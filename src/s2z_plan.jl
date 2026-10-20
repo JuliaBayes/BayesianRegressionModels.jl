@@ -211,9 +211,35 @@ function _sb_s2z_plan(brmi, prepared, predictor, overrides, rho, requested;
     end
 end
 
+# The predictors carrying a grouping in `requested` that no observed likelihood
+# reaches (for example, their response is omitted). StanBlocks draws such a
+# block in generated quantities, so S2Z has nothing to reparameterise and the
+# block stays conventional. A predictor that a bound top-level likelihood reads
+# (`target_obs` holds bound observations only) is reached. Every other
+# candidate, such as one read in a `@plate for` cell or only by an omitted
+# response, is settled by StanBlocks' placement in the ordinary program
+# `probe()` builds, as for shared `|ID|` margins (`_sb_marginal_id_probe`).
+function _sb_s2z_generated_predictors(probe, prepared, requested)
+    context = prepared.context
+    planned = Set(p.name for p in prepared.predictors)
+    unsettled = unique(d.predictor for d in context.group_declarations
+                       if d.predictor in planned && _s2z_declaration_group(d) in requested &&
+                          !haskey(context.target_obs, d.predictor))
+    isempty(unsettled) && return Set{Symbol}()
+    kinds = _traced_output_kinds(probe())
+    Set{Symbol}(filter(unsettled) do predictor
+        kind = get(kinds, predictor, nothing)
+        kind in (:transformed_parameter, :generated_quantity) || error(
+            "sbimpl: S2Z placement probe: predictor `$predictor` has descriptor " *
+            "kind `$kind`; expected a transformed parameter or generated quantity")
+        kind === :generated_quantity
+    end)
+end
+
 Base.@nospecializeinfer function _sb_plan_s2zs(@nospecialize(brmi), prepared, overrides, selection, rho;
                        buckets=Dict(), sd_overrides=Dict(), ranef_r2d2_overrides=Dict(),
-                       cv_groups, centered_groups, coordinates::Symbol=:contrasts)
+                       cv_groups, centered_groups, coordinates::Symbol=:contrasts,
+                       generated=Set{Symbol}())
     coordinates in (:contrasts, :groups) || throw(ArgumentError(
         "s2z_coordinates must be :contrasts or :groups, got $(repr(coordinates))"))
     selection isa Symbol || selection isa Tuple || selection isa AbstractVector ||
@@ -229,13 +255,18 @@ Base.@nospecializeinfer function _sb_plan_s2zs(@nospecialize(brmi), prepared, ov
     end
     out = Dict{Symbol,Any}()
     for predictor in prepared.predictors
+        predictor.name in generated && continue
         plan = _sb_s2z_plan(brmi, prepared, predictor, overrides, rho, requested;
                             buckets, sd_overrides, ranef_r2d2_overrides,
                             cv_groups, centered_groups, coordinates)
         isnothing(plan) && continue
         out[predictor.name] = plan
     end
-    missing = setdiff(requested, Set(p.group for p in values(out)))
+    # A grouping that only generated blocks carry is satisfied: none of its
+    # blocks is sampled, so none needs S2Z.
+    unsampled = Set(_s2z_declaration_group(d) for d in prepared.context.group_declarations
+                    if d.predictor in generated)
+    missing = setdiff(requested, Set(p.group for p in values(out)), unsampled)
     isempty(missing) || throw(ArgumentError(
         "S2Z requested for group(s) $(join(sort!(collect(missing)), ", ")) with no " *
         "eligible predictor; requires one independent Gaussian block of that " *

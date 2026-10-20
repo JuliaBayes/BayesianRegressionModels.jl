@@ -457,7 +457,7 @@ function _brm_sb_start_writes!(writes, absorbed, ::Val{:parameter}, t, d, names,
 end
 
 function _brm_sb_start_writes!(writes, absorbed, ::Val{:ranef}, t, d, names, totals)
-    blocks = [b for b in ranef_blocks(d.plan) if isequal(b.id, t.id)]
+    blocks = [b for b in ranef_blocks(d) if isequal(b.id, t.id)]
     if isempty(blocks)
         scales = _brm_total_id_scales(d, t.id)
         isempty(scales) && error(

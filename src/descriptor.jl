@@ -625,6 +625,19 @@ _brm_preproc_column(e::PreprocEntry) = _brm_preproc_column(Val(e.kind), e.raw_re
 _brm_preproc_column(::Val, raw_ref) = _brm_raw_column(raw_ref)
 _brm_preproc_column(::Val{:total_basis}, _) = nothing
 
+# The dataframe columns an observation's `data_source` key holds. A plain
+# response IS its column. A joint response names its member columns. A ragged
+# response read by a cell (`ragged(y, g)` beside `@plate`, or a `kernel(...)`
+# positional) is gathered from its flat column `y` into a derived key such as
+# `kernel_<cell>_y_ragged`, which no dataframe has.
+_brm_response_columns(source, ::Nothing) = (source,)
+_brm_response_columns(source, e::PreprocEntry) =
+    _brm_response_columns(source, Val(e.kind), e.raw_ref)
+_brm_response_columns(source, ::Val, _) = (source,)
+_brm_response_columns(_, ::Val{:joint_response}, raw_ref) = Symbol.(raw_ref)
+_brm_response_columns(_, ::Val{:joint_missing_response}, raw_ref) = Symbol.(raw_ref)
+_brm_response_columns(_, ::Val{:kernel_ragged}, raw_ref) = (first(raw_ref),)
+
 function _brm_input_schema(plan, key::Symbol, df_columns)
     e = get(plan.preproc, key, nothing)
     isnothing(e) || return (_brm_preproc_column(e), e.kind)
@@ -1374,17 +1387,14 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     # `data_columns` covers every column the formula references as a bare
     # predictor or grouping factor, but a RESPONSE is a `~` op, not a
     # DataColumn op, so it never appears there. The plan already knows every
-    # response: an observation declaration's `data_source` IS its dataframe
-    # column (including a plate-local alias, `kernel_y => dv`).
+    # response: an observation declaration's `data_source` names its dataframe
+    # column (including a plate-local alias, `kernel_y => dv`), or the derived
+    # key its preprocessing record maps back to one.
     df_columns = Set{Symbol}(semantics.columns)
     for d in plan.declarations
         d.role === :observation && !isnothing(d.data_source) || continue
-        entry = get(plan.preproc, d.data_source, nothing)
-        if entry isa PreprocEntry && entry.kind in (:joint_response, :joint_missing_response)
-            union!(df_columns, Symbol.(entry.raw_ref))
-        else
-            push!(df_columns, d.data_source)
-        end
+        union!(df_columns, _brm_response_columns(
+            d.data_source, get(plan.preproc, d.data_source, nothing)))
     end
 
     # --- inputs: the Stan data block + its dataframe provenance -------------
@@ -1540,7 +1550,7 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     end
     outputs = _brm_ranef_components(outputs, plan, stan)
     outputs = _brm_output_dims(outputs, plan, stan)
-    outputs = _brm_output_addresses(outputs, plan)
+    outputs = _brm_output_addresses(outputs, plan, stan)
 
     # --- schema -------------------------------------------------------------
     columns = Tuple(sort!(collect(df_columns)))
@@ -1683,7 +1693,7 @@ _brm_empty_carrier(output::BRMOutput) =
 # block shared by several predictors lists every one of them. Ownership is
 # keyed by declaration target, or by output name for outputs a block names
 # without declaring.
-function _brm_output_addresses(outputs, plan)
+function _brm_output_addresses(outputs, plan, stan)
     brmi = plan.parent
     view = (; plan, outputs)
     owners = Dict{Symbol,Vector{Symbol}}()
@@ -1785,7 +1795,7 @@ function _brm_output_addresses(outputs, plan)
     # bucket is matched on its grouping too, since one `|ID|` may name blocks
     # of several grouping factors).
     buckets = _sb_collect_id_buckets(brmi)
-    for block in ranef_blocks(plan)
+    for block in _ranef_blocks(plan, stan)
         binding = get(plan.bindings, block.binding, (;))
         if !isnothing(block.id)
             found = [b for (k, b) in pairs(buckets) if first(k) === block.id]
@@ -3332,7 +3342,7 @@ function brm_ranef_sd_coordinates(d::BRMDescriptor, logical::Symbol,
     brmi = d.plan.parent
 
     # 1. The shared block for this `|ID|` bucket.
-    all_blocks = ranef_blocks(d.plan)
+    all_blocks = ranef_blocks(d)
     blocks = [b for b in all_blocks if b.id === id]
     if isempty(blocks)
         scales = _brm_total_id_scales(d, id)

@@ -459,7 +459,26 @@ function _sb_vector_positive_priors(base::StanBlocks.SlicModel,
     end
     prior = _sb_vector_prior_statement(lhs, target, priors, nvalue;
                                        positive=true, mod, scope=base.mod)
-    (; model=Base.merge(base, prior.statement), prior.dependencies)
+    # The merged statement is traced in the base's own scope, so the caller
+    # names its arguments read arrive as `brm_prior_input_<name>` kwargs, as a
+    # term-owned prior's do (`_sb_term_model_call`). Passed under their own
+    # names they would rebind the base's: `sd(:, ID) ~ Exponential(tau)`
+    # turned the block's `tau` into an input, and `Exponential(nu)` on a
+    # Student-t block silently read its degrees of freedom.
+    statement = prior.statement
+    rhs = _sb_bind_vector_prior_inputs(statement.args[3], prior.dependencies)
+    (; model=Base.merge(base, Expr(:call, :~, statement.args[2], rhs)),
+       inputs=[_sb_term_prior_input(d) => d for d in prior.dependencies])
+end
+
+# Only a vector prior's positional arguments read the caller: its keyword
+# blocks hold the base's size expression and numeric bounds.
+_sb_bind_vector_prior_inputs(value, refs) = _sb_bind_prior_references(value, refs)
+function _sb_bind_vector_prior_inputs(value::Expr, refs)
+    value.head === :parameters && return value
+    value.head === :call || return _sb_bind_prior_references(value, refs)
+    Expr(:call, first(value.args),
+         (_sb_bind_vector_prior_inputs(arg, refs) for arg in value.args[2:end])...)
 end
 
 _sb_vector_prior_dependencies!(_out, _value) = nothing
@@ -3132,7 +3151,11 @@ population priors, one S2Z grouping per predictor; anything else errors
 loudly. The predictor's other groupings (crossed, nested or `|ID|`) and direct
 terms (`hsgp`, categorical blocks, ...) stay ordinary terms. Inspect
 [`s2z_effect_blocks`](@ref). S2Z groups are excluded from automatic totals
-and cannot overlap `centered_groups` or `cv_groups`.
+and cannot overlap `centered_groups` or `cv_groups`. S2Z applies to the blocks
+an observed likelihood reaches: a predictor that none reaches (its response
+omitted from the data, for example) keeps its block of the grouping
+conventional, re-drawn in generated quantities, while the grouping stays S2Z
+on every other predictor.
 
 `s2z_coordinates=:groups` instead samples J group coordinates per coefficient:
 independent `s_j ~ N(0, tau^(2c_j))` cells with deviations
@@ -3745,7 +3768,8 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
        mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
        centered_groups=Set{Symbol}(), total_groups=:auto,
        s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts, held_out=(),
-       resample_covariates=(), _frozen_preproc=nothing, _marginal_id_targets=nothing)
+       resample_covariates=(), _frozen_preproc=nothing, _marginal_id_targets=nothing,
+       _s2z_generated=nothing)
     brmi = _brm_resolve_optional_priors(brmi)
     # A frozen re-emission codes releveled factors over their fitted levels.
     isnothing(_frozen_preproc) || (brmi = _sb_fit_factor_levels(brmi, _frozen_preproc))
@@ -3840,10 +3864,21 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
         ranef_effect_overrides,total_groups; cv_groups,centered_groups,r2d2_overrides,ranef_r2d2_overrides,
         s2z_groups=s2z_selected)
     data[_SB_TOTAL_PLANS_KEY] = total_plans
+    # S2Z reparameterises sampled blocks only: a predictor no observed
+    # likelihood reaches keeps its block conventional, and StanBlocks re-draws
+    # it in generated quantities. The probe is the ordinary program, placed
+    # before any cv or held-out mark.
+    isnothing(_s2z_generated) && (_s2z_generated = _sb_s2z_generated_predictors(
+        prepared, s2z_selected) do
+            SBBRMI(source_parent; mod, centered_groups, total_groups=(),
+                   resample_covariates, _frozen_preproc,
+                   _marginal_id_targets=_SBMarginalProbe())
+        end)
     s2z_plans = _sb_plan_s2zs(brmi,prepared,effect_overrides,s2z_selected,s2z_rho;
                               buckets=id_buckets,sd_overrides=ranef_effect_overrides,
                               ranef_r2d2_overrides,
-                              cv_groups,centered_groups,coordinates=s2z_coordinates)
+                              cv_groups,centered_groups,coordinates=s2z_coordinates,
+                              generated=_s2z_generated)
     data[_SB_S2Z_PLANS_KEY] = s2z_plans
     for plan in Iterators.flatten((values(total_plans), values(s2z_plans))), key in plan.claimed
         delete!(id_buckets,key)
@@ -4016,7 +4051,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
         build(; cv_groups, held_out, _marginal_id_targets) = SBBRMI(source_parent;
             mod, cv_groups, centered_groups, total_groups, s2z_groups, s2z_rho,
             s2z_coordinates, held_out, resample_covariates, _frozen_preproc,
-            _marginal_id_targets)
+            _marginal_id_targets, _s2z_generated)
         probe = isempty(cv_groups) ? sb :
             build(; cv_groups=Set{Symbol}(), held_out=(),
                   _marginal_id_targets=_SBMarginalProbe())
@@ -8898,8 +8933,7 @@ function _sb_term_sd_submodel(term_overrides, t; mod::Module=@__MODULE__)
     end
     base = getf(t) === s ? _sb_s_generic : _sb_t2_generic
     configured = _sb_vector_positive_priors(base, :sd_pen, priors; mod)
-    (; model=configured.model,
-       kwargs=(; (dependency => dependency for dependency in configured.dependencies)...))
+    (; model=configured.model, kwargs=(; configured.inputs...))
 end
 
 function _sb_positive_term_prior_stmt(name::Symbol, index::Int, prior)
@@ -11570,7 +11604,7 @@ function _sb_emit_student_t_id_bucket!(stmts, data, bucket_name, n_terms_name,
         _sb_record_binding!(data, bucket_name, :random_effect, gname;
                             family=:ranef_correlated_draws_generic_student_t)
         push!(kwargs, Expr(:kw, :lkj_eta, ranef_effect.lkj_eta))
-        append!(kwargs, [Expr(:kw, d, d) for d in config.dependencies])
+        append!(kwargs, [Expr(:kw, k, v) for (k, v) in config.inputs])
     else
         model = :ranef_correlated_draws_student_t
     end
@@ -11747,8 +11781,7 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g:
                                    gname in centered_groups; mod) : nothing
     generic_model = generic_prior ? generic_config.model : nothing
     generic_dependency_kwargs = generic_prior ?
-        [Expr(:kw, dependency, dependency)
-         for dependency in generic_config.dependencies] : Any[]
+        [Expr(:kw, k, v) for (k, v) in generic_config.inputs] : Any[]
     if generic_prior
         family = gname in centered_groups ? :ranef_correlated_draws_centered_generic :
                                           :ranef_correlated_draws_generic

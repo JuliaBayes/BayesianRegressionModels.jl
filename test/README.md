@@ -47,6 +47,13 @@ known values, `sd(lp, ID) = value` and `cor(:, ID) = R`. It covers:
 
 Set `BRM_FIXED_RANEF_RUNTIME=0` to skip the compiled-model sets.
 
+`sd_prior_input_names.jl` checks that a scale prior's caller scalar may share a
+name with a binding of the submodel the prior is merged into, such as `tau` in
+`sd(:, ID) ~ Exponential(tau)`. It covers Gaussian, general-family,
+per-margin, centered, `cv_groups` and Student-t blocks, smoothing scales, and
+the completion submodel of a split block. Each spelling must emit exactly the
+Stan program of a twin whose scalar is called `lam`; the twin must pass stanc.
+
 `model_family_composition.jl` checks composing a family of related models
 without string templating:
 
@@ -96,6 +103,12 @@ every address back to its own output through
 grouping by predictor reaches every sampled coordinate. Set
 `BRM_OUTPUT_PREDICTORS_RUNTIME=0` to skip the compiled half.
 
+`descriptor_trace_reuse.jl` checks that `ranef_blocks(d)`,
+`brm_ranef_sd_coordinates` and `brm_ranef_draws` read the descriptor's own
+traced program: a copy of the descriptor whose plan holds no traceable program
+answers each query identically, in a fitted and in a prior program, while
+`ranef_blocks` on that plan fails.
+
 `plate_index_into.jl` checks `ragged(idx, group; into=target)`, an index column
 of row numbers on another flat axis: the gathered per-subject positions equal
 hand-rebased pre-grouped columns on BridgeStan and RK, `0` stays "no row",
@@ -128,6 +141,13 @@ the fitted interval on that axis, and an explicit `domain=` fits it fresh.
 StanBlocks revision pinned by `setup_env.jl` and checks the public flat
 predictive segments, bound pointwise likelihood, and refusal of a missing
 non-response ragged input.
+
+`s2z_omitted_response.jl` checks `s2z_groups` when a response is omitted. A
+predictor that no observed likelihood reaches keeps its block conventional, in
+generated quantities. It covers an intercept-only predictor, a grouping that a
+reached predictor shares, and an omitted `@plate` response. Each program
+matches its conventional or renamed-grouping twin, and the sampled BridgeStan
+density equals that of `prune_responses` of the same model.
 
 `omitted_plate_observations.jl` checks the grouped `pk_conc[i]` spelling with
 an omitted censored response and a joint QT likelihood. It checks the

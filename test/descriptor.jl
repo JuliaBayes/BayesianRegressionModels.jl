@@ -245,6 +245,46 @@ end
     @test brm_columns(s2z) == (:g, :y)
 end
 
+@testset "schema propagation — a cell's ragged response names its flat column" begin
+    # A cell gathers `ragged(y, obs_subject)` into the derived data key
+    # `kernel_loc_y_ragged`; the observation's `data_source` is that key. A
+    # replay form built from `brm_columns` asks for `y`, never the derived key.
+    ragged_df = (; subject=["b", "a", "c"],
+                   obs_subject=["a", "c", "b", "a", "b", "c"],
+                   obs_time=[0.5, 0.25, 1.5, 1.0, 3.0, 2.0],
+                   y=[0.81, 0.76, 0.52, 0.49, 0.21, 0.33])
+    plate_builder = @brm begin
+        sigma ~ Exponential(1)
+        log_CL ~ 1 + (1 | p | subject)
+        ragged(obs_time, obs_subject)
+        ragged(y, obs_subject)
+        @plate for i in eachindex(log_CL)
+            loc[i] = exp.(-exp(log_CL[i]) .* obs_time[i])
+            y[i] ~ normal(loc[i], sigma)
+        end
+    end
+    kernel_builder = @brm begin
+        sigma ~ Exponential(1)
+        log_CL ~ 1 + (1 | p | subject)
+        loc ~ kernel(ragged(obs_time, obs_subject), ragged(y, obs_subject),
+                     log_CL) do ts, yy, lCL
+            mu = exp.(-exp(lCL) .* ts)
+            yy ~ normal(mu, sigma)
+            mu
+        end
+    end
+    for builder in (plate_builder, kernel_builder)
+        d = brm_descriptor(builder, ragged_df; mod=@__MODULE__)
+        obs = only(x for x in d.plan.declarations if x.role === :observation)
+        @test obs.data_source === :kernel_loc_y_ragged
+        gathered = only(i for i in d.inputs if i.name === :kernel_loc_y_ragged)
+        @test gathered.transform === :kernel_ragged
+        @test brm_columns(d) == brm_columns(builder) ==
+              (:obs_subject, :obs_time, :subject, :y)
+        @test brm_operation(d, :replay).inputs == brm_columns(d)
+    end
+end
+
 @testset "generative semantics — BRM roles and labels" begin
     d = brm_descriptor(hier_builder, df; total_groups=(), mod=@__MODULE__)
     byname = Dict(o.name => o for o in d.outputs)
