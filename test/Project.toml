@@ -40,9 +40,10 @@ julia = "1.10"
 
 [sources.StanBlocks]
 url = "https://github.com/nsiccha/StanBlocks.jl"
-# Non-finite literals render; `weighted` takes a censored/truncated/interval_censored family;
-# an exchangeable ordered prior re-draws as the sorted iid draw.
-rev = "c26669b323e91e6599730e54a569baa8259349eb"
+# Descriptor outputs carry their value shape as `dims`; non-finite literals render; `weighted`
+# takes a censored/truncated/interval_censored family; an exchangeable ordered prior re-draws
+# as the sorted iid draw.
+rev = "f175dd6f436bc674914556a14a205fc100d42171"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"

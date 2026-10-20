@@ -769,7 +769,7 @@ _brm_transport_is_simplex(output) = string(output.type) == "simplex"
 # `rk_declaration` with the K-1 free coordinates of SB carrier `output`. A
 # `column` names one simplex column of a two-axis RK declaration.
 function _brm_transport_simplex!(pairs, simplexes, address, rk_names,
-        rk_declaration, output, stan, plan; column=nothing)
+        rk_declaration, output, stan; column=nothing)
     _brm_transport_is_simplex(output) || error(
         "brm_coordinate_transport: RK simplex $(address) pairs with SB carrier " *
         "`$(output.name)` of type `$(output.type)`, not a simplex")
@@ -778,7 +778,7 @@ function _brm_transport_simplex!(pairs, simplexes, address, rk_names,
     length(names) == K - 1 || error(
         "brm_coordinate_transport: simplex $(address) has $(K - 1) free RK and " *
         "$(length(names)) free Stan coordinates")
-    count = _brm_output_coordinate_count(plan, output)
+    count = _brm_output_coordinate_count(output)
     isnothing(count) || count == K || error(
         "brm_coordinate_transport: SB simplex `$(output.name)` has $count " *
         "elements; RK's has $K")
@@ -811,7 +811,7 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     rk_names = column === nothing ? [Symbol(increments, ".", j) for j in 1:free] :
         [Symbol(increments, ".", j, ".", column) for j in 1:free]
     _brm_transport_simplex!(pairs, simplexes, address, rk_names, increments, output,
-        stan, d.plan; column)
+        stan; column)
     record.beta || return
     coefficient = (; kind=:population, predictor=record.predictor,
         coefficient=entry.term)
@@ -907,7 +907,7 @@ function _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
         address = (; kind, target, declaration)
         if only(transforms) === :simplex
             _brm_transport_simplex!(pairs, simplexes, address,
-                [e.name for e in elements], declaration, output, stan, d.plan)
+                [e.name for e in elements], declaration, output, stan)
         elseif only(transforms) === :lkj
             names = _brm_transport_elements(output, stan, address)
             length(names) == length(elements) || error(
@@ -999,7 +999,7 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     isempty(rk_names) && isempty(_brm_element_coordinates(output, stan)) && return
     if transform === :simplex
         _brm_transport_simplex!(pairs, simplexes, address, rk_names, declaration,
-            output, stan, d.plan)
+            output, stan)
         return
     end
     names = stan[_brm_element_coordinates(output, stan)]
