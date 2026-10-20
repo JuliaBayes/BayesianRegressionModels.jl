@@ -9,6 +9,9 @@
 # length-scale, marginal sd, basis weights and collected value (`:value`)
 # resolve — the `mo(c)` rule.
 # The predictor-scoped compiler name is not a term label and is refused.
+# A grouped `hsgp(...; by=g)` repeat follows the same rule: its carrier is
+# `hsgp_<target>_<axes>_by_<g>` and it draws its own per-group weight block
+# (todo 0hr2mi6).
 #
 # Run: julia --project=test test/hsgp_shared_term_label.jl
 # Set BRM_HSGP_LABEL_RUNTIME=0 to skip the BridgeStan coordinates gate.
@@ -129,5 +132,106 @@ end
             d, :loc, tnames; coefficient=:Intercept)
         @test C[brm_output_coordinates(d, :loc, tnames)] ≈
               C[only(intercept.coordinates)] .+ C[v.coordinates]
+    end
+end
+
+# todo 0hr2mi6: a grouped `hsgp(...; by=g)` repeated across predictors used to
+# re-bind `hsgp_x_by_g` (transpile/descriptor died `name ∉ keys(info)`) and to
+# coalesce both predictors onto one per-group weight block.
+hsgp_grouped_df = (; x=collect(range(-1, 1; length=10)), g=repeat(["a", "b"], 5),
+                   ya=zeros(10), yb=zeros(10))
+hsgp_grouped_builder = @brm begin
+    a ~ 1 + hsgp(x; k=3, by=g)
+    b ~ 1 + hsgp(x; k=3, by=g)
+    sd(b, hsgp(x)) ~ Exponential(1)
+    ya ~ Normal(a, 1.0)
+    yb ~ Normal(b, 1.0)
+end
+
+@testset "repeated grouped HSGP: own carriers and weight block per predictor" begin
+    sb = SBBRMI(hsgp_grouped_builder(hsgp_grouped_df); mod=@__MODULE__)
+    code = BRM.stan_code(sb)
+    @test occursin("hsgp_b_x_by_g_sigma ~ exponential((1.0 ./ 1.0))", code)
+    @test !occursin("hsgp_x_by_g_sigma ~ exponential(", code)
+    @test StanBlocks.stan.compiles(sb.model)
+    d = brm_descriptor(sb)
+    logicals = [o.logical for o in d.outputs
+                if o.logical isa Symbol && startswith(string(o.logical), "hsgp_")]
+    @test sort(logicals) == [:hsgp_b_x_by_g, :hsgp_x_by_g]
+    # Each predictor's term declaration reads its own weight block, and the
+    # descriptor gives each block (and its flat draw) to that predictor alone.
+    blocks = Dict(lp => [o for o in brm_outputs(d; predictor=lp, term=:hsgp_x_by_g)
+                         if startswith(string(o.name), "b_hsgpw_")]
+                  for lp in (:a, :b))
+    @test only(blocks[:a]).name === :b_hsgpw_x_g
+    @test only(blocks[:b]).name === :b_hsgpw_x_b_g
+    @test only(blocks[:a]).predictors == (:a,)
+    @test only(blocks[:b]).predictors == (:b,)
+    for (lp, carrier) in ((:a, :hsgp_x_by_g), (:b, :hsgp_b_x_by_g))
+        owner = only(o for o in d.outputs if o.logical === carrier).declaration
+        @test owner.keywords[:beta] === only(blocks[lp]).name
+    end
+    @test only(unique(e.term for e in BRM._brm_term_coordinate_entries(sb.parent, :b))) ===
+          :hsgp_x_by_g
+    @test brm_length_scale_floor(d, :b; term=:hsgp_x_by_g) isa Float64
+end
+
+@testset "a grouped HSGP after an ungrouped one keeps its unscoped carrier" begin
+    builder = @brm begin
+        a ~ 1 + hsgp(x; k=3)
+        b ~ 1 + hsgp(x; k=3, by=g)
+        ya ~ Normal(a, 1.0)
+        yb ~ Normal(b, 1.0)
+    end
+    sb = SBBRMI(builder(hsgp_grouped_df); mod=@__MODULE__)
+    d = brm_descriptor(sb)
+    # `hsgp_x_by_g` is free, so the grouped term is not predictor-scoped, and
+    # the descriptor resolves `b`'s own term under its formula label.
+    entry = only(BRM._brm_term_coordinate_entries(sb.parent, :b))
+    @test entry.term === :hsgp_x_by_g
+    @test BRM._brm_term_owner_output(d, :b, entry).name === :hsgp_x_by_g
+    @test BRM._brm_term_parameter_output(d, :b, entry, :sd).name === :hsgp_x_by_g_sigma
+end
+
+@testset "per-predictor grouped HSGP coordinates under the shared label" begin
+    if !HSGP_LABEL_RUNTIME
+        @info "Skipping repeated grouped HSGP BridgeStan gate (BRM_HSGP_LABEL_RUNTIME=0)"
+    else
+        d = brm_descriptor(hsgp_grouped_builder, hsgp_grouped_df; mod=@__MODULE__,
+            name=:hsgp_grouped_shared_term_label)
+        prob = brm_execute(d, :fit)
+        names = BS.param_names(prob.model; include_tp=false, include_gq=false)
+        expected = (;
+            a=(; sd=:hsgp_x_by_g_sigma, length_scale=:hsgp_x_by_g_rho_iso),
+            b=(; sd=:hsgp_b_x_by_g_sigma, length_scale=:hsgp_b_x_by_g_rho_iso),
+        )
+        resolved = Dict{Symbol,Vector{Int}}()
+        for lp in (:a, :b), parameter in (:sd, :length_scale)
+            c = brm_term_coordinates(d, lp, names; term=:hsgp_x_by_g, parameter)
+            @test c.output.name === expected[lp][parameter]
+            @test length(c.coordinates) == 1
+            append!(get!(resolved, lp, Int[]), c.coordinates)
+        end
+        @test isempty(intersect(resolved[:a], resolved[:b]))
+        # Two independent standardized weight draws, one per predictor.
+        @test count(n -> startswith(n, "zflat_hsgpw_x_g."), names) == 2 * 3
+        @test count(n -> startswith(n, "zflat_hsgpw_x_b_g."), names) == 2 * 3
+
+        tnames = BS.param_names(prob.model; include_tp=true, include_gq=false)
+        q = collect(range(-0.5, 0.5; length=BS.param_unc_num(prob.model)))
+        C = BS.param_constrain(prob.model, q; include_tp=true, include_gq=false)
+        values = Dict{Symbol,Vector{Int}}()
+        for lp in (:a, :b)
+            v = brm_term_coordinates(d, lp, tnames; term=:hsgp_x_by_g, parameter=:value)
+            @test v.output.name === (lp === :a ? :hsgp_x_by_g : :hsgp_b_x_by_g)
+            @test length(v.coordinates) == length(hsgp_grouped_df.x)
+            intercept = brm_population_effect_coordinates(
+                d, lp, tnames; coefficient=:Intercept)
+            @test C[brm_output_coordinates(d, lp, tnames)] ≈
+                  C[only(intercept.coordinates)] .+ C[v.coordinates]
+            values[lp] = v.coordinates
+        end
+        @test isempty(intersect(values[:a], values[:b]))
+        @test C[values[:a]] != C[values[:b]]
     end
 end

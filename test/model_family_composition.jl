@@ -270,9 +270,9 @@ end
     @test stanc_ok(sb_code(calibrated(FAMILY_DATA)))
 
     @test brm_columns(PLATE_BUILDER) == (:obs_subject, :obs_time, :subject, :weight, :y)
-    # The descriptor also lists the cell's `log_CL` read and a plan-internal
-    # observation alias as columns (todo `1dsty7q`).
-    @test_broken brm_columns(PLATE_BUILDER) ==
+    # The descriptor names the ragged response's flat column `y`, not the
+    # cell's gathered `kernel_loc_y_ragged` key (todo `1dsty7q`).
+    @test brm_columns(PLATE_BUILDER) ==
           brm_columns(brm_descriptor(PLATE_BUILDER, PLATE_DATA; mod=@__MODULE__))
     @test sprint(show, PLATE_BUILDER) == PLATE_SOURCE
 
