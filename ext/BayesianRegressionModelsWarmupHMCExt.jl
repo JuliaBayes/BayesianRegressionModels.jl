@@ -233,11 +233,11 @@ function _prepare_frame(state::_BRMRanefCenteringState, ir, position, gradient)
     _centering_frame(state, position, gradient)
 end
 
-# `orders[bi][j, g]` is the margin at position `j` of group `g`'s triangular
-# order (`BRMOrderedCenteringReparametrization`); `nothing` is the declared
-# order, whose frame is unchanged.
+# `ordered` is a `BRMOrderedCenteringReparametrization`, whose source frame
+# orders every group (`_source_group_factor`); `nothing` is the declared order,
+# whose frame is unchanged.
 function _centering_frame(state::_BRMRanefCenteringState{N}, position, gradient,
-                          orders=nothing) where {N}
+                          ordered=nothing) where {N}
     T = promote_type(eltype(position), eltype(gradient), Float64)
     n = length(state.sources)
     source = T.(state.sources)
@@ -248,11 +248,9 @@ function _centering_frame(state::_BRMRanefCenteringState{N}, position, gradient,
 
     for (bi, block) in enumerate(state.blocks), g in 1:block.ranef.n_groups
         K = block.ranef.n_terms
-        order = isnothing(orders) ? (1:K) : view(orders[bi], :, g)
-        C = order == 1:K ? BRM._adaptive_block_cholesky(position, block) :
-            _unpacked(_permuted_cholesky(
-                _packed_block_cholesky(position, block, Val(N + 1)), order, K,
-                Val(N + 1)), K)
+        order = isnothing(ordered) ? (1:K) : view(ordered.orders[bi], :, g)
+        C = isnothing(ordered) ? BRM._adaptive_block_cholesky(position, block) :
+            _unpacked(_source_group_factor(position, ordered, bi, g), K)
         A = zeros(T, K, K)
         z = Vector{T}(undef, K)
         for j in 1:K
@@ -615,8 +613,8 @@ function _prepare_frame(state::BRMJointAdaptiveCenteringState, ir, position, gra
 end
 
 function _centering_frame(state::BRMJointAdaptiveCenteringState, position, gradient,
-                          orders=nothing)
-    frames = (_centering_frame(state.ranef, position, gradient, orders),
+                          ordered=nothing)
+    frames = (_centering_frame(state.ranef, position, gradient, ordered),
               _centering_frame(state.hsgp, position, gradient),
               _centering_frame(state.scalar, position, gradient))
     BRMAdaptiveCenteringFrame(
@@ -721,6 +719,19 @@ end
 # controls in the joint pair order, and the order is a pure function of them, so
 # checkpoints carry nothing else.
 #
+# The block's own correlation coordinates are reordered too. Stan's
+# `cholesky_factor_corr` parametrizes `L` by canonical partial correlations
+# taken in declaration order, and that geometry alone left a data-poor margin
+# declared first mixing about 4x worse with identical effect frames (synthetic
+# `rho_sr` bulk ESS 120 against 479). So the block has one order of its own,
+# its margins by mean control (`_derive_orders!`), and the source frame's
+# Cholesky coordinates are the partial correlations of the correlation matrix
+# in that order. The compiled ones are recovered through the declared-order
+# factor, and the Jacobian is the difference of the two correlation
+# transforms (`_correlation_logjac`). Each group's ties follow the block order,
+# so most groups share it and need no rotations. At uniform controls every order
+# is the declared one, so the wrapper starts in the compiled frame.
+#
 # The map runs under Enzyme on every gradient, so it follows `_block_location`'s
 # Julia 1.10 rules: per-block factors live in `NTuple`s sized by the state's
 # capacity, never in heap work vectors, and the random-effect loops read only
@@ -737,6 +748,14 @@ struct BRMOrderedCenteringReparametrization{N} <: WarmupHMC.AbstractReparametriz
     perms::Vector{Matrix{Int}}
     starts::Vector{Vector{Int}}
     groups::Vector{Vector{Int}}
+    # Per ranef block: its own order (margins by mean control), each margin's
+    # position in it, and, per distinct group order `q`, that order's rows of
+    # the block-order factor (`rows[bi][j, q]`) and its kind: `0` the declared
+    # order, `1` the block order, `2` any other.
+    block_orders::Vector{Vector{Int}}
+    positions::Vector{Vector{Int}}
+    rows::Vector{Matrix{Int}}
+    kinds::Vector{Vector{Int}}
     # `1`: source -> compiled; `-1`: compiled -> source.
     direction::Int
 end
@@ -748,13 +767,15 @@ end
 
 _packed_length(::Val{K}) where {K} = Val((K * (K + 1)) ÷ 2)
 
-# `C = diag(tau) * L` in declared order, packed. Same operations and
-# association as `_block_cholesky_entry`.
-function _packed_block_cholesky(x, block, ::Val{KMAX}) where {KMAX}
+# `C = diag(tau[order]) * L`, packed, where `L` is built from the block's
+# Cholesky coordinates and row `i` holds margin `order[i]`; the declared order
+# gives `diag(tau) * L` with the same operations and association as
+# `_block_cholesky_entry`.
+function _packed_block_cholesky(x, block, order, ::Val{KMAX}) where {KMAX}
     T = eltype(x)
     C = ntuple(_ -> zero(T), _packed_length(Val(KMAX)))
     for i in 1:block.ranef.n_terms
-        tau = _block_tau(x, block, i)
+        tau = _block_tau(x, block, order[i])
         stick = one(T)
         offset = (i - 1) * (i - 2) ÷ 2
         for l in 1:i-1
@@ -807,25 +828,76 @@ end
 
 _unpacked(C, K) = [j <= i ? C[_tri(i, j)] : zero(eltype(C)) for i in 1:K, j in 1:K]
 
-function _is_declared_order(perms, q, K)
+# Stan's `cholesky_factor_corr` log-Jacobian from its unconstrained coordinates
+# to the correlation matrix, at the packed factor `F` (rows may carry scales):
+# `sum(log(1 - z^2)) + sum(log(stick)) + sum((K - i) * log(L[i,i]))`, the tanh,
+# stick-breaking and `L -> L * L'` terms. With `n[i,l]` the norm of row `i` from
+# column `l` on, `1 - z[i,l]^2 = (n[i,l+1] / n[i,l])^2`, `stick[i,l] =
+# n[i,l] / n[i,1]` and `L[i,i] = n[i,i] / n[i,1]`; everything is a ratio of row
+# norms, so no difference of squares can cancel.
+function _correlation_logjac(F, K)
+    T = eltype(F)
+    total = zero(T)
+    for i in 2:K
+        suffix = zero(T)
+        log_ii = zero(T)
+        log_next = zero(T)
+        acc = zero(T)
+        for l in i:-1:1
+            suffix += F[_tri(i, l)] * F[_tri(i, l)]
+            log_n = log(suffix) / 2
+            if l == i
+                log_ii = log_n
+            else
+                acc += 2 * log_next - log_n
+            end
+            log_next = log_n
+        end
+        total += acc - (i - 1) * log_next + (K - i) * (log_ii - log_next)
+    end
+    total
+end
+
+# Writes the unconstrained Cholesky coordinates of the packed factor `F`,
+# `atanh(z)` with `z[i,l] = F[i,l] / n[i,l]` (`n` as above), spelled
+# `sign(F) * log((n[i,l] + |F|) / n[i,l+1])`: rounding `z` to `±1` first would
+# turn a nearly singular correlation into an infinite coordinate.
+function _write_cholesky_coordinates!(y, block, F, K)
+    for i in 2:K
+        offset = (i - 1) * (i - 2) ÷ 2
+        suffix = F[_tri(i, i)] * F[_tri(i, i)]
+        for l in i-1:-1:1
+            f = F[_tri(i, l)]
+            rest = sqrt(suffix)
+            suffix += f * f
+            y[block.cholesky_free[offset + l]] = copysign(log((sqrt(suffix) + abs(f)) / rest), f)
+        end
+    end
+    y
+end
+
+function _is_declared_order(order, K)
     for j in 1:K
-        perms[j, q] == j || return false
+        order[j] == j || return false
     end
     true
 end
 
-# Margins in descending control, ties in declaration order (`sortperm` is
-# stable).
-_learned_order(controls) = sortperm(controls; rev=true)
+# Margins in descending control; ties by `tiebreak` (default: declaration
+# order).
+_learned_order(controls, tiebreak=eachindex(controls)) =
+    sortperm(collect(eachindex(controls)); by=k -> (-controls[k], tiebreak[k]))
 
 function _derive_orders!(ir::BRMOrderedCenteringReparametrization)
     state = ir.state.ranef
     for (bi, block) in enumerate(state.blocks)
         K, G = block.ranef.n_terms, block.ranef.n_groups
         lookup = state.pair_lookup[bi]
-        order = reduce(hcat,
-            [_learned_order([state.sources[lookup[k, g]] for k in 1:K]) for g in 1:G];
-            init=zeros(Int, K, 0))
+        controls = [state.sources[lookup[k, g]] for k in 1:K, g in 1:G]
+        block_order = _learned_order(vec(sum(controls; dims=2)) ./ G)
+        position = invperm(block_order)
+        order = reduce(hcat, [_learned_order(controls[:, g], position) for g in 1:G];
+                       init=zeros(Int, K, 0))
         members = Dict{Vector{Int},Vector{Int}}()
         distinct = Vector{Int}[]
         for g in 1:G
@@ -837,6 +909,11 @@ function _derive_orders!(ir::BRMOrderedCenteringReparametrization)
         ir.perms[bi] = reduce(hcat, distinct; init=zeros(Int, K, 0))
         ir.starts[bi] = cumsum(vcat(1, [length(members[key]) for key in distinct]))
         ir.groups[bi] = reduce(vcat, (members[key] for key in distinct); init=Int[])
+        ir.block_orders[bi] = block_order
+        ir.positions[bi] = position
+        ir.rows[bi] = reduce(hcat, [position[key] for key in distinct];
+                             init=zeros(Int, K, 0))
+        ir.kinds[bi] = [key == 1:K ? 0 : key == block_order ? 1 : 2 for key in distinct]
     end
     ir
 end
@@ -846,9 +923,11 @@ function _adaptive_ordered_centering_reparametrizer(
         scalar_cells=_NO_SCALAR_CELLS)
     state = _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells)
     n = length(state.ranef.blocks)
+    matrices() = [Matrix{Int}(undef, 0, 0) for _ in 1:n]
+    vectors() = [Int[] for _ in 1:n]
     ir = BRMOrderedCenteringReparametrization(state, _joint_targets(state, scalar_cells),
-        [Matrix{Int}(undef, 0, 0) for _ in 1:n], [Matrix{Int}(undef, 0, 0) for _ in 1:n],
-        [Int[] for _ in 1:n], [Int[] for _ in 1:n], 1)
+        matrices(), matrices(), vectors(), vectors(), vectors(), vectors(), matrices(),
+        vectors(), 1)
     state, _derive_orders!(ir)
 end
 
@@ -960,11 +1039,29 @@ function _ordered_block_map!(y, x, ir::BRMOrderedCenteringReparametrization{N},
     perms = ir.perms[bi]
     starts = ir.starts[bi]
     groups = ir.groups[bi]
-    C = _packed_block_cholesky(x, block, Val(N + 1))
+    rows = ir.rows[bi]
+    kinds = ir.kinds[bi]
+    block_order = ir.block_orders[bi]
+    reordered = !_is_declared_order(block_order, K)
+    # `C`: the declared-order factor of the compiled frame; `Cs`: the block-order
+    # factor of the source frame, whose Cholesky coordinates are permuted.
+    if ir.direction > 0
+        Cs = _packed_block_cholesky(x, block, block_order, Val(N + 1))
+        C = reordered ? _permuted_cholesky(Cs, ir.positions[bi], K, Val(N + 1)) : Cs
+    else
+        C = _packed_block_cholesky(x, block, Base.OneTo(K), Val(N + 1))
+        Cs = reordered ? _permuted_cholesky(C, block_order, K, Val(N + 1)) : C
+    end
     ljac = zero(eltype(x))
+    if reordered
+        from, to = ir.direction > 0 ? (Cs, C) : (C, Cs)
+        _write_cholesky_coordinates!(y, block, to, K)
+        ljac += _correlation_logjac(from, K) - _correlation_logjac(to, K)
+    end
     for q in axes(perms, 2)
-        declared = _is_declared_order(perms, q, K)
-        Cp = declared ? C : _permuted_cholesky(C, view(perms, :, q), K, Val(N + 1))
+        declared = kinds[q] == 0
+        Cp = declared ? C : kinds[q] == 1 ? Cs :
+            _permuted_cholesky(Cs, view(rows, :, q), K, Val(N + 1))
         for r in starts[q]:starts[q + 1] - 1
             ljac += ir.direction > 0 ?
                 _ordered_group_forward!(y, x, state, block, lookup, groups[r], C, Cp,
@@ -1011,7 +1108,8 @@ end
 
 WarmupHMC.InverseFunctions.inverse(ir::BRMOrderedCenteringReparametrization) =
     BRMOrderedCenteringReparametrization(ir.state, ir.targets, ir.orders, ir.perms,
-                                         ir.starts, ir.groups, -ir.direction)
+        ir.starts, ir.groups, ir.block_orders, ir.positions, ir.rows, ir.kinds,
+        -ir.direction)
 
 WarmupHMC.reparam_controls(ir::BRMOrderedCenteringReparametrization) =
     vcat(ir.state.ranef.sources, ir.state.hsgp.sources, ir.state.scalar.sources)
@@ -1037,7 +1135,18 @@ end
 # Every cell's frame at one source-frame draw, in joint pair order: ranef cells
 # in the current learned order, the rest in their per-cell frames.
 _ordered_frame(ir::BRMOrderedCenteringReparametrization, position, gradient) =
-    _centering_frame(ir.state, position, gradient, ir.orders)
+    _centering_frame(ir.state, position, gradient, ir)
+
+# Group `g`'s permuted factor at a source-frame position, packed (the map's
+# `Cp`, outside AD).
+function _source_group_factor(position, ir::BRMOrderedCenteringReparametrization{N},
+                              bi, g) where {N}
+    block = ir.state.ranef.blocks[bi]
+    K = block.ranef.n_terms
+    Cs = _packed_block_cholesky(position, block, ir.block_orders[bi], Val(N + 1))
+    rows = ir.positions[bi][ir.orders[bi][:, g]]
+    rows == 1:K ? Cs : _permuted_cholesky(Cs, rows, K, Val(N + 1))
+end
 
 const _CENTERING_CANDIDATES = range(0.0, 1.0; length=11)
 
