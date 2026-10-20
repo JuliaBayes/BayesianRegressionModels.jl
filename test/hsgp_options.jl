@@ -64,13 +64,14 @@ end
     @test any(occursin("uniform(rho_lower_hsgp_t, 5.0)", l)
               for l in stan_lines(periodic, "rho_iso"))
 
+    # The `u` axis's fitted floor is about 94, so its upper bound sits above it.
     anisotropic = options_model(@brm(begin
         mu ~ 1 + hsgp(t, u; k=3, iso=false)
-        length_scale(:, hsgp(t, u)) ~ Uniform(length_scale_floor, 30.0)
+        length_scale(:, hsgp(t, u)) ~ Uniform(length_scale_floor, 200.0)
         sigma ~ Exponential(1)
         y ~ Normal(mu, sigma)
     end), merge(df, (; u=df.t .^ 2)))
-    @test any(occursin("uniform(rho_lower_hsgp_t_u, 30.0)", l)
+    @test any(occursin("uniform(rho_lower_hsgp_t_u, 200.0)", l)
               for l in stan_lines(anisotropic, "hsgp_t_u_rho"))
 
     grouped = options_model(@brm(begin
@@ -103,6 +104,187 @@ end
         end
         @test isfinite(BridgeStan.log_density(problem.model, zeros(length(names))))
     end
+end
+
+# `t` spans [0, 10], so a k=5 basis has L = 1.5 * 5 = 7.5 and this floor.
+const OPTIONS_FLOOR = (4 * 7.5 / π) * sqrt(log(100) / (5^2 - 1))
+
+@testset "brm_length_scale_floor reads a term's fitted floor" begin
+    df = options_df()
+    plain = options_model(plain_builder, df)
+    floor = brm_length_scale_floor(brm_descriptor(plain), :mu; term=:hsgp_t)
+    @test floor isa Float64
+    @test floor == options_data(plain)[:rho_lower_hsgp_t]
+    @test floor ≈ OPTIONS_FLOOR
+    # The same value under a floor-marked prior and a floor-replacing one.
+    for prior in (:(Uniform(length_scale_floor, 24.0)), :(LogNormal(0, 1)))
+        builder = eval(:(@brm begin
+            mu ~ 1 + hsgp(t; k=5)
+            length_scale(:, hsgp(t)) ~ $prior
+            sigma ~ Exponential(1)
+            y ~ Normal(mu, sigma)
+        end))
+        d = brm_descriptor(options_model(builder, df))
+        @test brm_length_scale_floor(d, :mu; term=:hsgp_t) == floor
+    end
+    # A fresh reprocess re-derives it with the new basis.
+    wider = (; t=collect(range(0.0, 20.0; length=12)), y=df.y)
+    fresh = brm_descriptor(reprocess(plain, wider; freeze_constants=false))
+    @test brm_length_scale_floor(fresh, :mu; term=:hsgp_t) ≈ 2 * floor
+
+    anisotropic = options_model(@brm(begin
+        mu ~ 1 + hsgp(t, u; k=3, iso=false)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end), merge(df, (; u=df.t .^ 2)))
+    floors = brm_length_scale_floor(brm_descriptor(anisotropic), :mu; term=:hsgp_t_u)
+    @test floors isa Vector{Float64}
+    @test floors == options_data(anisotropic)[:rho_lower_hsgp_t_u]
+    @test length(floors) == 2
+
+    periodic = options_model(@brm(begin
+        mu ~ 1 + hsgp(t; k=3, cov=:periodic, period=24.0)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end), df)
+    @test brm_length_scale_floor(brm_descriptor(periodic), :mu; term=:hsgp_t) ==
+          BRM._brm_hsgp_periodic_rho_lower(3)
+
+    with_g = merge(df, (; g=repeat(["a", "b"], 6)))
+    grouped = options_model(@brm(begin
+        mu ~ 1 + hsgp(t; k=4, by=g)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end), with_g)
+    @test brm_length_scale_floor(brm_descriptor(grouped), :mu; term=:hsgp_t_by_g) ==
+          options_data(grouped)[:rho_lower_hsgp_t_by_g]
+    hyper = options_model(@brm(begin
+        mu ~ 1 + hsgp(t; k=4, by=g)
+        log(length_scale(hsgp(t))) ~ 1 + (1 | g)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end), with_g)
+    @test brm_length_scale_floor(brm_descriptor(hyper), :mu; term=:hsgp_t_by_g) ==
+          options_data(hyper)[:rho_lower_hsgp_t_by_g]
+
+    # A one-function basis has no usable floor.
+    single = options_model(@brm(begin
+        mu ~ 1 + hsgp(t; k=1)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end), df)
+    @test brm_length_scale_floor(brm_descriptor(single), :mu; term=:hsgp_t) == 0.0
+
+    # A model-derived axis carries its floor as a literal of the fixed domain.
+    latent = options_model(@brm(begin
+        x ~ 1 + t
+        mu ~ 1 + hsgp(x; k=6, domain=(0.02, 4.0))
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end), df)
+    @test brm_length_scale_floor(brm_descriptor(latent), :mu; term=:hsgp_x) ≈
+          (4 * 1.99 / π) * sqrt(log(100) / (6^2 - 1))
+
+    @test_throws "available term labels" brm_length_scale_floor(
+        brm_descriptor(plain), :mu; term=:hsgp_u)
+    mixed = options_model(@brm(begin
+        mu ~ 1 + hsgp(t; k=5) + gp(t)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end), df)
+    @test_throws "only an `hsgp` term" brm_length_scale_floor(
+        brm_descriptor(mixed), :mu; term=Symbol("gp(t)"))
+end
+
+@testset "an upper bound at or below the fitted floor is refused" begin
+    df = options_df()
+    # refused: the declared length-scale support is empty, so the program
+    # could never initialize (decision 0ddmtf8)
+    message = "the fitted length-scale floor 4.183 (k=5, c=1.5, L=7.5) is not " *
+              "below the upper bound 3.0"
+    @test_throws message options_model(@brm(begin
+        mu ~ 1 + hsgp(t; k=5)
+        length_scale(:, hsgp(t)) ~ Uniform(length_scale_floor, 3.0)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end), df)
+    @test_throws message options_model(@brm(begin
+        mu ~ 1 + hsgp(t; k=5)
+        length_scale(:, hsgp(t)) ~ truncated(LogNormal(0, 1); lower=length_scale_floor, upper=3.0)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end), df)
+    @test_throws "length_scale(:, hsgp(t)) ~ Uniform(length_scale_floor, 3.0)" options_model(
+        @brm(begin
+            mu ~ 1 + hsgp(t; k=5)
+            length_scale(:, hsgp(t)) ~ Uniform(length_scale_floor, 3.0)
+            sigma ~ Exponential(1)
+            y ~ Normal(mu, sigma)
+        end), df)
+    # A floor exactly equal to the bound leaves no interior either.
+    exact = options_data(options_model(plain_builder, df))[:rho_lower_hsgp_t]
+    @test_throws "is not below the upper bound" options_model(eval(:(@brm begin
+        mu ~ 1 + hsgp(t; k=5)
+        length_scale(:, hsgp(t)) ~ Uniform(length_scale_floor, $exact)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end)), df)
+    # Each anisotropic axis is checked: `u`'s floor is about 94.
+    @test_throws "floor of axis 2" options_model(@brm(begin
+        mu ~ 1 + hsgp(t, u; k=3, iso=false)
+        length_scale(:, hsgp(t, u)) ~ Uniform(length_scale_floor, 30.0)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end), merge(df, (; u=df.t .^ 2)))
+    @test_throws "(k=4, c=1.5, L=7.5)" options_model(@brm(begin
+        mu ~ 1 + hsgp(t; k=4, by=g)
+        length_scale(:, hsgp(t)) ~ Uniform(length_scale_floor, 2.0)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end), merge(df, (; g=repeat(["a", "b"], 6))))
+    @test_throws "(k=3, period=24.0)" options_model(@brm(begin
+        mu ~ 1 + hsgp(t; k=3, cov=:periodic, period=24.0)
+        length_scale(:, hsgp(t)) ~ Uniform(length_scale_floor, 1.0)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end), df)
+    @test_throws "(k=6, domain half-width L=" options_model(@brm(begin
+        x ~ 1 + t
+        mu ~ 1 + hsgp(x; k=6, domain=(0.02, 4.0))
+        length_scale(:, hsgp(x)) ~ Uniform(length_scale_floor, 0.5)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end), df)
+
+    # A fresh reprocess re-derives the floor and checks it again; the frozen
+    # replay keeps the fitted floor.
+    bounded = options_model(@brm(begin
+        mu ~ 1 + hsgp(t; k=5)
+        length_scale(:, hsgp(t)) ~ Uniform(length_scale_floor, 6.0)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end), df)
+    wider = (; t=collect(range(0.0, 20.0; length=12)), y=df.y)
+    @test_throws "is not below the upper bound 6.0" reprocess(
+        bounded, wider; freeze_constants=false)
+    @test reprocess(bounded, (; t=[1.0, 9.0], y=zeros(2))).data[:rho_lower_hsgp_t] ==
+          options_data(bounded)[:rho_lower_hsgp_t]
+
+    # Without the marker an explicit prior below the floor is the user's choice.
+    @test options_model(@brm(begin
+        mu ~ 1 + hsgp(t; k=5)
+        length_scale(:, hsgp(t)) ~ Uniform(1.0, 3.0)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end), df) isa SBBRMI
+    # Literal bounds name the authored address, not the prior twice.
+    @test_throws "`length_scale(:, hsgp(t)) ~ Uniform(5.0, 3.0)` needs" options_model(
+        @brm(begin
+            mu ~ 1 + hsgp(t; k=5)
+            length_scale(:, hsgp(t)) ~ Uniform(5.0, 3.0)
+            sigma ~ Exponential(1)
+            y ~ Normal(mu, sigma)
+        end), df)
 end
 
 @testset "replay outside the fitted basis interval" begin

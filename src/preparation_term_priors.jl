@@ -138,6 +138,62 @@ _brm_has_floor_marker(value::ExprColumn) =
     any(_brm_has_floor_marker, values(getkwargs(value)))
 _brm_has_floor_marker(_value) = false
 
+# The numeric upper end of a length-scale prior whose lower end is the floor
+# marker: `Uniform(length_scale_floor, b)` or
+# `truncated(D; lower=length_scale_floor, upper=b)`; `nothing` otherwise.
+_brm_floor_prior_upper(_prior) = nothing
+_brm_floor_prior_upper(prior::ExprColumn) =
+    _brm_floor_prior_upper(getf(prior), getargs(prior), getkwargs(prior))
+_brm_floor_prior_upper(_f, _args, _kwargs) = nothing
+_brm_floor_prior_upper(::Type{<:Uniform}, args, _kwargs) =
+    length(args) == 2 && first(args) isa _BRMLengthScaleFloor &&
+        last(args) isa Real ? Float64(last(args)) : nothing
+_brm_floor_prior_upper(::typeof(truncated), _args, kwargs) =
+    get(kwargs, :lower, nothing) isa _BRMLengthScaleFloor &&
+        get(kwargs, :upper, nothing) isa Real ? Float64(kwargs.upper) : nothing
+
+# A floor-marked prior with an upper bound at or below the fitted floor
+# declares `real<lower=floor, upper=b>` with no admissible value: Stan fails
+# only at initialization and RK with an unrelated domain error. The fitted
+# floor is data, so this is checked wherever it is computed (decision 0ddmtf8),
+# like the literal `Uniform(a, b)` bounds `_sb_gp_scale_prior` already checks.
+function _brm_check_hsgp_floor_upper(prior, floor, spelling, geometry, remedy;
+                                     prefix="BRM preparation")
+    upper = _brm_floor_prior_upper(prior)
+    isnothing(upper) || _brm_check_hsgp_floor_below(
+        floor, upper, "$spelling ~ $prior", geometry, remedy; prefix)
+    nothing
+end
+
+# `statement` is the authored prior; a fresh replay re-derives `floor` and
+# re-checks it against the recorded `upper`.
+function _brm_check_hsgp_floor_below(floor, upper, statement, geometry, remedy;
+                                     prefix="BRM preparation")
+    floors = floor isa Real ? (floor,) : Tuple(floor)
+    axis = findfirst(>=(upper), floors)
+    isnothing(axis) && return nothing
+    which = length(floors) == 1 ? "fitted length-scale floor" :
+        "fitted length-scale floor of axis $axis"
+    error("$prefix: `$statement`: the $which ",
+          "$(round(floors[axis]; sigdigits=4)) ($geometry) is not below the ",
+          "upper bound $upper, so the length scale has no admissible value; ",
+          "$remedy, or raise the upper bound")
+end
+
+_brm_hsgp_floor_values(values) = join(string.(values), ", ")
+_brm_hsgp_floor_values(values::Tuple{Any}) = string(only(values))
+function _brm_hsgp_floor_geometry(K, c, fits, explicit_domain::Bool)
+    L = _brm_hsgp_floor_values(Tuple(last(fit) for fit in fits))
+    k = _brm_hsgp_floor_values(Tuple(K))
+    explicit_domain ? "k=$k, domain half-width L=$L" :
+        "k=$k, c=$(_brm_hsgp_floor_values(Tuple(c))), L=$L"
+end
+_brm_hsgp_floor_remedy(explicit_domain::Bool) =
+    explicit_domain ? "raise k, narrow the domain" : "raise k, lower c"
+_brm_hsgp_periodic_floor_geometry(K, period) =
+    "k=$(_brm_hsgp_floor_values(Tuple(K))), period=$period"
+const _BRM_HSGP_PERIODIC_FLOOR_REMEDY = "raise k"
+
 function _brm_floor_prior_spec(spec, term, slot, spelling)
     substituted = _brm_substitute_floor(spec.expression, spelling)
     _brm_has_floor_marker(substituted) || return spec
