@@ -220,6 +220,23 @@ end
     @test_throws "with different definitions" BRM._rk_unique_source_definitions([valid, changed])
     @test_throws "both bound and defined" BRM._rk_validate_source_definitions(program([valid], [:cell => identity]))
     @test_throws "explicit definitions" BRM._rk_source_definition(:(@eval cell(x) = x))
+    # An @rkppl submodel may carry its macro; it reads as the bare assignment.
+    bare = :(sm(x) = begin y ~ Normal(x, 1); return y end)
+    @test BRM._rk_source_definition(bare) == (; name=:sm, kind=:rkppl)
+    @test BRM._rk_canonical_source_definition(bare) === bare
+    @test BRM._rk_canonical_source_definition(valid) === valid
+    for head in (Symbol("@rkppl"), Expr(:., :ReactiveKernelsPPL, QuoteNode(Symbol("@rkppl"))),
+            GlobalRef(ReactiveKernelsPPL, Symbol("@rkppl")))
+        explicit = Expr(:macrocall, head, LineNumberNode(1), bare)
+        @test BRM._rk_source_definition(explicit) == (; name=:sm, kind=:rkppl)
+        @test BRM._rk_canonical_source_definition(explicit) === bare
+    end
+    printed = Meta.parse(sprint(Base.show_unquoted, :(ReactiveKernelsPPL.@rkppl $bare)))
+    @test BRM._rk_source_equal(BRM._rk_canonical_source_definition(printed), bare)
+    # refused: a submodel is an assignment definition (`rkppl-use` §12); the
+    # `function` form is an ordinary Julia function, so @rkppl cannot wrap it.
+    @test_throws "assignment definition" BRM._rk_source_definition(
+        :(ReactiveKernelsPPL.@rkppl function sm(x) return x end))
 end
 
 @stestset "computed grouped predictor ports retain the subject scan and empty-group prior" begin
