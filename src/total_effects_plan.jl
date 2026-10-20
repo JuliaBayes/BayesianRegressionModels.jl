@@ -424,6 +424,9 @@ function _sb_total_group_level_columns(data,target,group,design,columns,maps,inf
         effective = _sb_total_effective_design(hcat((maps[i] for i in matched)...),ones(J,length(matched)))
         for (i,column) in pairs(design.columns)
             isnothing(maps[i]) && !isnothing(infos[i]) && !isnothing(column.source) || continue
+            # A String column's level indicators stay sampled, like a
+            # CategoricalVector column's contrast block.
+            _brm_is_level_indicator(column) && continue
             found = _sb_total_group_level(column.values,columns,indices,J)
             isnothing(found) && continue
             candidate = hcat(effective,_sb_total_effective_design(

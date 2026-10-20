@@ -245,3 +245,20 @@ end
     broken = (; df..., xw=[i == 9 ? v + 0.5 : v for (i, v) in enumerate(df.xw)])
     @test only(total_effect_blocks(SBBRMI(slope_builder(broken); mod=@__MODULE__))).group_columns == ()
 end
+
+@testset "a column that would make the totals' mean rank-deficient stays sampled" begin
+    # `wc = 1 - w` is group-constant, but with the intercept and `w` already
+    # integrated it adds no new direction.
+    df = (; group_data()..., wc=1 .- WG[GRP])
+    brmi = @brm df begin
+        mu ~ 1 + w + wc + (1 | a | g)
+        effect(mu, :) ~ Normal(0, 2)
+        sd(:, a) ~ Normal(0, 1)
+        y ~ Normal(mu, 1)
+    end
+    sb = SBBRMI(brmi; mod=@__MODULE__)
+    block = only(total_effect_blocks(sb))
+    @test block.population_columns == (:Intercept, :w)
+    @test block.group_columns == (:w,)
+    @test only(o for o in brm_descriptor(sb).outputs if o.name === :pop_mu_beta_pop).labels == [:wc]
+end

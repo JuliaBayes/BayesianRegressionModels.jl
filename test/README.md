@@ -368,7 +368,10 @@ integrated out. It also covers generated deviations, recovery,
 `brm_population_effect_coordinates`, `population_draws`, `brm_start`,
 centering locations, `population_model`, descriptions, frozen replay and rebuild
 refusals for changed group-level values, transport for a new group, and the
-legacy rebuild of a fit recorded without per-group values.
+legacy rebuild of a fit recorded without per-group values. Columns that vary
+within a group, or that would make the totals' mean design rank-deficient,
+stay sampled. `string_categorical_coordinates.jl` checks that a group-constant
+`String` column stays sampled, like a `CategoricalVector` column.
 
 ```sh
 julia --project=test test/total_effects.jl

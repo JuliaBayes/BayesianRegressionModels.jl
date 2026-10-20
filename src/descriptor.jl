@@ -2942,8 +2942,8 @@ end
 # its column name addresses them all, as `effect(lp, c)` does. Returns the
 # claimed columns in carrier order, or `nothing` when `coefficient` is no such
 # block address. Level indicators are never absorbed by an exact-total block
-# (`_sb_total_plan` absorbs only untransformed or `protect` random-effect
-# columns), so they always sit in the conventional carrier.
+# (`_sb_total_group_level_columns` skips them, as it skips a CategoricalVector
+# column's contrast block), so they always sit in the conventional carrier.
 _brm_is_level_indicator(column) =
     column.preprocess isa _BRMPopulationPreprocess &&
     column.preprocess.kind === :population_factor_dummy
