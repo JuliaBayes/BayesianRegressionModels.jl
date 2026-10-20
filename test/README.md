@@ -565,16 +565,13 @@ separate parameter branches. It preserves every fitted prior and coordinate,
 compares normalized native densities and reverse gradients against independent
 oracles and compiled Stan, and replays the complete emitted source and artifact.
 
-`held_out_rows.jl` checks per-row `held_out=(; y = mask)` on both backends:
-mask validation, RKBRMI's fitted density as the full one minus the held rows'
-pointwise densities with unchanged coordinates (a held row outside LogNormal's
-support included), and SBBRMI's masked fit as the fit on the kept rows
-(density offset and gradient) for flat, bounded LogNormal, `@plate`-cell,
-`kernel(...)`-cell and ragged-join responses, with `y_likelihood` unchanged (a
-held row outside LogNormal's support scores `-Inf`). Masks combine with
-whole-response Symbols and survive `reprocess`, `generative_plan` and the
-descriptor. RKBRMI masks on per-subject arrays are `@test_broken` (RKPPL nested
-`missing`).
+`held_out_rows.jl` checks that a per-row `held_out` mask is refused on both
+backends and on every replay (a fit receives only the rows it conditions on,
+user decision `1bwqnxs`), that a replay's `held_out=` replaces the fit's
+whole-response hold-outs through `reprocess`, `restan_data`, `generative_plan`
+and the descriptor, and that a per-subject window fitted on its kept rows
+replays onto the full data, a denser grid and a re-drawn subject with its
+frozen `zscale` constants.
 
 `rk_callable_terms.jl` checks positional/keyword formula broadcasting, including
 singleton input axes, against independent and compiled Stan targets.
