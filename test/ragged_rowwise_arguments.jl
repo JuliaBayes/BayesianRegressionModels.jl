@@ -31,6 +31,33 @@ const in_cell = @brm begin
     end
 end
 
+const uncensored_model_scope = @brm begin
+    sigma_add ~ Exponential(1)
+    sigma_prop ~ Exponential(1)
+    log_k ~ 1 + (1 | p | subject)
+    @plate for i in eachindex(log_k)
+        loc[i] = exp.(-exp(log_k[i]) .* t[i])
+    end
+    y ~ Normal(loc, addprop(loc, sigma_add, sigma_prop))
+end
+
+# The censored model observed beside a per-subject response `qt`, and the
+# same model without `y`: with `y` omitted, only `qt` conditions the fit.
+const with_qt = @brm begin
+    sigma_add ~ Exponential(1)
+    sigma_prop ~ Exponential(1)
+    log_k ~ 1 + (1 | p | subject)
+    @plate for i in eachindex(log_k)
+        loc[i] = exp.(-exp(log_k[i]) .* t[i])
+    end
+    y ~ censored(Normal(loc, addprop(loc, sigma_add, sigma_prop)); lower=lloq)
+    qt ~ Normal(log_k, 1.0)
+end
+const qt_only = @brm begin
+    log_k ~ 1 + (1 | p | subject)
+    qt ~ Normal(log_k, 1.0)
+end
+
 const joined = @brm begin
     sigma_add ~ Exponential(1)
     sigma_prop ~ Exponential(1)
@@ -131,5 +158,70 @@ end
                 role=:posterior_predictive)
             @test output.segments == segments
         end
+    end
+end
+
+# The plate's iterables, in order: what each argument plate's cells walk over.
+plate_iterables(plate) = plate.args[3].args[1].args[2:end]
+
+@testset "an omitted model-scope response reads the same grouped argument" begin
+    replay_data = (; subject=["a", "b", "c"], t=[[0.5], [0.5, 1.0], [1.0, 2.0]],
+        lloq=[[0.05], fill(0.05, 2), fill(0.05, 2)])
+    for builder in (model_scope, uncensored_model_scope)
+        bound = SBBRMI(builder(grouped_data); mod=@__MODULE__)
+        omitted = @test_logs (:warn, r"`y` bind\(s\) no data column") SBBRMI(
+            builder(drop_response(grouped_data)); mod=@__MODULE__)
+        @test observation(omitted) == observation(bound)
+        @test !haskey(omitted.data, :y)
+        @test omitted.model.observations == (:y,)
+        y = only(d for d in generative_plan(omitted).declarations if d.target === :y)
+        @test y.role === :observation
+        @test isnothing(y.data_source)
+        # Bound, the argument plate walks the response's groups beside the
+        # plate result; omitted, it walks the plate result's own cells.
+        @test plate_iterables(only(argument_plates(bound))) == [:y, :loc]
+        plate = only(argument_plates(omitted))
+        @test plate_iterables(plate) == [:loc]
+        @test occursin("addprop", sprint(show, plate))
+        replayed = reprocess(omitted, replay_data)
+        for (model, segments) in ((omitted, [3, 4, 8]), (replayed, [1, 3, 5]))
+            code = BayesianRegressionModels.stan_code(model)
+            @test !whole_memory_addprop(code)
+            @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+            output = brm_output(brm_descriptor(model), :y;
+                role=:posterior_predictive)
+            @test output.segments == segments
+        end
+        problem = StanBlocks.stan_instantiate(omitted.model)
+        @test LogDensityProblems.dimension(problem) == 0
+        names = BridgeStan.param_names(problem.model; include_tp=true, include_gq=true)
+        output = brm_output(brm_descriptor(omitted), :y; role=:posterior_predictive)
+        coordinates = brm_output_coordinates(output, names)
+        @test length(coordinates) == 8
+        draw = BridgeStan.param_constrain(problem.model, Float64[];
+            include_tp=true, include_gq=true,
+            rng=BridgeStan.StanRNG(problem.model, 1))[coordinates]
+        @test all(isfinite, draw)
+        builder === model_scope && @test all(draw .>= 0.05)
+    end
+
+    # Beside a bound response, the omitted `y` adds no density: the fit is the
+    # `qt`-only model's, coordinate for coordinate.
+    qt = [0.1, -0.2, 0.3]
+    mixed = @test_logs (:warn, r"`y` bind\(s\) no data column") SBBRMI(
+        with_qt(merge(drop_response(grouped_data), (; qt))); mod=@__MODULE__)
+    @test mixed.model.observations == (:qt, :y)
+    @test !whole_memory_addprop(BayesianRegressionModels.stan_code(mixed))
+    reference = SBBRMI(qt_only((; subject=grouped_data.subject, qt));
+        mod=@__MODULE__)
+    problem = StanBlocks.stan_instantiate(mixed.model)
+    expected = StanBlocks.stan_instantiate(reference.model)
+    dimension = LogDensityProblems.dimension(problem)
+    @test dimension == LogDensityProblems.dimension(expected) > 0
+    @test BridgeStan.param_unc_names(problem.model) ==
+          BridgeStan.param_unc_names(expected.model)
+    for x in (zeros(dimension), collect(range(-0.4, 0.3; length=dimension)))
+        @test LogDensityProblems.logdensity(problem, x) ≈
+              LogDensityProblems.logdensity(expected, x) rtol=1e-12
     end
 end
