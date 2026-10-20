@@ -98,7 +98,7 @@ Base.show(io::IO, v::BRMNLMEView) = print(io, "BRMNLMEView(",
 # The coordinate records this view reads. The old panel-only kernel plan has
 # no semantic inventory. Closure-style `kernel(...) do` cells instead use the
 # value plan, like `@plate for` cells.
-_brm_nlme_records(plan::Union{_RKStructuralPlan,_RKValuePlan,_RKHeldOutPlan,_RKHeldOutRowsPlan}) =
+_brm_nlme_records(plan::Union{_RKStructuralPlan,_RKValuePlan,_RKHeldOutPlan}) =
     _rk_coordinate_records(plan)
 _brm_nlme_records(plan) = _brm_nlme_error(
     "brm_nlme_view: an RK plan of kind `$(nameof(typeof(plan)))` has no " *
@@ -117,8 +117,7 @@ _brm_nlme_block_identity(record) = (; group=record.group, id=record.id,
 
 _brm_nlme_regression(plan::_RKStructuralPlan) = plan
 _brm_nlme_regression(plan::_RKValuePlan) = plan.regression
-_brm_nlme_regression(plan::Union{_RKHeldOutPlan,_RKHeldOutRowsPlan}) =
-    _brm_nlme_regression(plan.parent)
+_brm_nlme_regression(plan::_RKHeldOutPlan) = _brm_nlme_regression(plan.parent)
 
 # Read the same scalar design columns that the RK affine emitter multiplies by
 # its population coefficients. Other coefficient families need a separate
@@ -460,7 +459,7 @@ end
 # array per plate cell). Anything else is refused rather than attributed by
 # position.
 _brm_nlme_ragged_labels(plan, name) = nothing
-_brm_nlme_ragged_labels(plan::Union{_RKHeldOutPlan,_RKHeldOutRowsPlan}, name) =
+_brm_nlme_ragged_labels(plan::_RKHeldOutPlan, name) =
     _brm_nlme_ragged_labels(plan.parent, name)
 # A ragged join gathers its response cell by cell (`_rk_kernel_observed_layout`),
 # so its densities follow the row partition, not the flat row order: the labels

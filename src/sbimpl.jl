@@ -3024,19 +3024,9 @@ inside `kernel(...)` cells. For prior draws, keep the model identical and omit
 the response column from the data — the program lowers to generated quantities
 automatically.
 
-`held_out` also takes per-row masks, `held_out=(; y = mask)` or `:y => mask`,
-beside whole-response Symbols. `mask` is shaped like the response as the data
-binds it: one `Bool` per row of a flat response (also for a
-`ragged(y, group) ~ ...` observation, whose mask is gathered per subject like
-the response), one `Bool` vector per array of a response bound as one array
-per subject. `true` holds that row out: its likelihood leaves `model`, while
-`y_gen` and `y_likelihood` keep every row, so a held-out row's
-`y_likelihood` entry is its log predictive density at the fitted parameters.
-No parameter changes role. An all-true mask is the whole-response hold-out and
-an all-false one holds nothing out. `reprocess` keeps each mask position by
-position by default and refuses a replay whose response has another shape; pass
-that replay's own masks with `reprocess(sb, new_df; held_out=...)`, or
-`held_out=()` to hold nothing out.
+`held_out` takes no per-row masks. To fit on some rows of a response, build
+the model on those rows only and predict or score the others by replaying the
+fit's draws onto the full data with [`reprocess`](@ref).
 
 Formula statements `sd(:, ID) ~ Exponential(scale)` and
 `cor(:, ID) ~ LKJCholesky(K, eta)` configure a shared `|ID|` block.
@@ -3056,16 +3046,13 @@ sbbrmi = SBBRMI(brmi)
 src   = stan_code(sbbrmi)
 ```
 """
-struct SBBRMI{P<:BRMI, M, D<:AbstractDict, PP<:AbstractDict, HO<:AbstractSet{Symbol}, B<:AbstractDict, HR<:AbstractDict{Symbol}}
+struct SBBRMI{P<:BRMI, M, D<:AbstractDict, PP<:AbstractDict, HO<:AbstractSet{Symbol}, B<:AbstractDict}
     parent::P
     model::M
     data::D
     preproc::PP
     held_out::HO
     bindings::B
-    # Per-row hold-outs: response data source => its validated row mask, in
-    # the shape the data gave the response (`_sb_held_out_response`).
-    held_out_rows::HR
 end
 
 # Preserve the historical positional constructor used by downstream code that
@@ -3077,9 +3064,6 @@ SBBRMI(parent::BRMI, model, data::AbstractDict, preproc::AbstractDict) =
 SBBRMI(parent::BRMI, model, data::AbstractDict, preproc::AbstractDict,
         held_out::AbstractSet{Symbol}) =
     SBBRMI(parent, model, data, preproc, held_out, Dict{Symbol,NamedTuple}())
-SBBRMI(parent::BRMI, model, data::AbstractDict, preproc::AbstractDict,
-        held_out::AbstractSet{Symbol}, bindings::AbstractDict) =
-    SBBRMI(parent, model, data, preproc, held_out, bindings, Dict{Symbol,Any}())
 
 # Bind semantic meaning at emission time. These records are removed from the
 # Stan data dictionary and carried with the emitted artifact through replay.
@@ -4310,7 +4294,7 @@ This is a declaration plan, not an RNG executor: it does not claim that a
 component-wise consumer draw is prior-predictive. Its purpose is to expose the
 one authoritative program and provenance an executor must consume.
 """
-struct GenerativePlan{P,M,D,PP,DS,B,CV,HO,EB,HR}
+struct GenerativePlan{P,M,D,PP,DS,B,CV,HO,EB}
     parent::P
     model::M
     data::D
@@ -4320,7 +4304,6 @@ struct GenerativePlan{P,M,D,PP,DS,B,CV,HO,EB,HR}
     cv_groups::CV
     held_out::HO
     bindings::EB
-    held_out_rows::HR
 end
 
 # Keep the pre-held-out positional shape source-compatible. New plans derived
@@ -4331,10 +4314,6 @@ GenerativePlan(parent, model, data, preproc, declarations, builder, cv_groups) =
 GenerativePlan(parent, model, data, preproc, declarations, builder, cv_groups, held_out) =
     GenerativePlan(parent, model, data, preproc, declarations, builder, cv_groups,
                    held_out, Dict{Symbol,NamedTuple}())
-GenerativePlan(parent, model, data, preproc, declarations, builder, cv_groups, held_out,
-               bindings) =
-    GenerativePlan(parent, model, data, preproc, declarations, builder, cv_groups,
-                   held_out, bindings, Dict{Symbol,Any}())
 
 _sb_plan_lhs_name(x::Symbol) = x
 _sb_plan_lhs_name(x::Expr) =
@@ -4634,8 +4613,7 @@ function _generative_plan(sb::SBBRMI, builder, cv_groups)
     model = StanBlocks.SlicModel(body, data, sb.model.mod, sb.model.observations)
     declarations = _sb_plan_declarations(body, data, parent, sb.model.mod)
     GenerativePlan(parent, model, data, preproc, Tuple(declarations), builder,
-                   copy(cv_groups), copy(sb.held_out), deepcopy(sb.bindings),
-                   deepcopy(sb.held_out_rows))
+                   copy(cv_groups), copy(sb.held_out), deepcopy(sb.bindings))
 end
 
 # Shared redirect: holding out every observation leaves nothing to fit, and
@@ -4648,27 +4626,15 @@ _sb_held_out_all_redirect() = _brm_held_out_all_redirect()
 # `data_source=:qt_y`, while StanBlocks must receive the mark on the latter.
 #
 # `cover_all` re-applies a set the artifact already recorded, which may cover
-# every observation: `population_model` holds them all out. `replay` marks a
-# replay's hold-out (`reprocess`), whose shape errors name its `held_out=`.
+# every observation: `population_model` holds them all out.
 Base.@nospecializeinfer function _sb_apply_held_out(@nospecialize(sb::SBBRMI), held_out;
-                                                    cover_all::Bool=false, prefix="sbimpl",
-                                                    replay::Bool=false)
+                                                    cover_all::Bool=false, prefix="sbimpl")
     request = _brm_held_out_request(held_out; prefix)
-    isempty(request.names) && isempty(request.rows) && return sb
+    isempty(request.names) && return sb
     inventory = _sb_held_out_inventory(sb)
-    selection = _brm_resolve_held_out(request, inventory.aliases, inventory.sources,
-        inventory.unbound; prefix, cover_all, replay,
-        response=source -> _sb_held_out_response(sb, source).values)
-    _sb_mark_held_out(sb, selection.whole, selection.rows)
-end
-
-# The `held_out=` request that re-applies everything `x` (an SBBRMI or a
-# GenerativePlan) holds out, for a rebuild or replay of the same model.
-function _sb_held_out_spec(x)
-    isempty(x.held_out_rows) && return x.held_out
-    sources = sort!(collect(keys(x.held_out_rows)))
-    Any[sort!(collect(x.held_out))...,
-        (source => x.held_out_rows[source] for source in sources)...]
+    selected = _brm_resolve_held_out(request, inventory.aliases, inventory.sources,
+                                     inventory.unbound; prefix, cover_all)
+    _sb_mark_held_out(sb, selected)
 end
 
 # Every observation's response data source, under each name that addresses it.
@@ -4698,34 +4664,9 @@ Base.@nospecializeinfer function _sb_held_out_inventory(@nospecialize(sb::SBBRMI
     (; aliases, sources, unbound)
 end
 
-# The response a row mask is shaped like: the values the data gave the
-# observation. A formula-boundary `ragged(y, group) ~ ...` response is bound per
-# subject, gathered from its flat column (`_sb_ragged_lhs_layout`); its mask is
-# given over the flat rows, and `rows` gathers it the same way.
-Base.@nospecializeinfer function _sb_held_out_response(@nospecialize(sb::SBBRMI),
-                                                       source::Symbol)
-    entry = get(sb.preproc, source, nothing)
-    entry isa PreprocEntry && entry.kind === :ragged_gather ||
-        return (; values=_sb_unmarked_value(sb, source, sb.data[source]), rows=nothing)
-    for (key, node) in _brm_operation_entries(sb.parent)
-        key === source && node isa NamedColumn || continue
-        operation = parent(node)
-        operation isa ExprColumn{typeof(~)} || continue
-        lhs, rhs = getargs(operation, 2)
-        lhs isa ExprColumn{typeof(ragged)} || continue
-        response, group = getargs(lhs)
-        return (; values=_sb_ragged_response_values(key, name(group), parent(response)),
-                rows=_sb_ragged_lhs_layout(key, lhs, rhs).rows)
-    end
-    error("sbimpl: gathered response `$source` has no `ragged($source, group) ~ ...` " *
-          "observation to align its `held_out` row mask with")
-end
-_sb_held_out_stan_mask(response, mask) =
-    isnothing(response.rows) ? mask : [mask[r] for r in response.rows]
-
 # A response data source's value without its hold-out mark.
 function _sb_unmarked_value(sb::SBBRMI, key::Symbol, value)
-    key in sb.held_out || haskey(sb.held_out_rows, key) || return value
+    key in sb.held_out || return value
     raw = StanBlocks.getvalue(value)
     ismissing(raw) && error(
         "sbimpl: held-out response `$key` carries no recoverable data value; " *
@@ -4733,30 +4674,15 @@ function _sb_unmarked_value(sb::SBBRMI, key::Symbol, value)
     raw
 end
 
-# Mark the response data sources `whole` held out (cv) and hold out the masked
-# rows of each `rows` source (StanBlocks' element hold-out: no cv taint), on top
-# of what `sb` already holds out. A whole hold-out subsumes a source's row mask.
-Base.@nospecializeinfer function _sb_mark_held_out(@nospecialize(sb::SBBRMI), whole,
-                                                   rows=Dict{Symbol,Any}())
+# Mark the response data sources `selected` held out (cv), on top of the ones
+# `sb` already holds out.
+Base.@nospecializeinfer function _sb_mark_held_out(@nospecialize(sb::SBBRMI), selected)
     marked = Dict{Symbol,Any}(sb.data)
-    held_rows = Dict{Symbol,Any}(sb.held_out_rows)
-    for source in setdiff(whole, sb.held_out)
-        value = _sb_unmarked_value(sb, source, marked[source])
-        delete!(held_rows, source)
-        marked[source] = StanBlocks.stan.maybecv(source, value)
-    end
-    for (source, mask) in rows
-        source in sb.held_out && error(
-            "sbimpl: response `$source` is already held out whole; it takes no row mask")
-        value = _sb_unmarked_value(sb, source, marked[source])
-        response = _sb_held_out_response(sb, source)
-        marked[source] = StanBlocks.stan.maybecv(source, value;
-            held_out=_sb_held_out_stan_mask(response, mask))
-        held_rows[source] = mask
+    for source in setdiff(selected, sb.held_out)
+        marked[source] = StanBlocks.stan.maybecv(source, marked[source])
     end
     model = StanBlocks.SlicModel(sb.model.model, marked, sb.model.mod, sb.model.observations)
-    SBBRMI(sb.parent, model, marked, sb.preproc, union(sb.held_out, whole), sb.bindings,
-           held_rows)
+    SBBRMI(sb.parent, model, marked, sb.preproc, union(sb.held_out, selected), sb.bindings)
 end
 
 """
@@ -4794,9 +4720,8 @@ unless explicitly overridden. A group named in both `cv_groups` and
 `centered_groups` is refused by the `SBBRMI` constructor, as at fit time.
 
 `held_out` takes the [`SBBRMI`](@ref) form. The plan form defaults to the
-source plan's hold-outs, each row mask re-applied position by position, so new
-data whose response has another shape passes its own masks, or `held_out=()`
-to hold nothing out.
+source plan's hold-outs; a value replaces them, and `held_out=()` holds nothing
+out.
 """
 generative_plan(sb::SBBRMI) = _generative_plan(sb, nothing, Set{Symbol}())
 
@@ -4827,7 +4752,7 @@ function generative_plan(builder::Function, df;
 end
 
 function generative_plan(plan::GenerativePlan, new_df;
-                         cv_groups=plan.cv_groups, held_out=_sb_held_out_spec(plan),
+                         cv_groups=plan.cv_groups, held_out=plan.held_out,
                          centered_groups=nothing)
     isnothing(plan.builder) && error(
         "generative_plan: this plan was built from an SBBRMI and has no reusable `@brm` builder. " *
@@ -4972,8 +4897,7 @@ function _sb_mark_resample_groups(sb::SBBRMI, groups)
         "sbimpl: resample replay: failed to mark group index provenance for " *
         "$(sort!(collect(setdiff(groups, seen))))")
     model = StanBlocks.SlicModel(sb.model.model, marked, sb.model.mod, sb.model.observations)
-    SBBRMI(sb.parent, model, marked, sb.preproc, copy(sb.held_out), sb.bindings,
-           copy(sb.held_out_rows))
+    SBBRMI(sb.parent, model, marked, sb.preproc, copy(sb.held_out), sb.bindings)
 end
 
 function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool, held_out)
@@ -4992,7 +4916,7 @@ function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool, held_o
     # program. The default `:auto` would integrate totals for an eligible shape
     # and false-trigger the geometry check (for a conventionally-built fit) or
     # emit a totals `cv_template` the cv-contagion assertion cannot see.
-    baseline = SBBRMI(sb.parent; mod=sb.model.mod, held_out=_sb_held_out_spec(sb),
+    baseline = SBBRMI(sb.parent; mod=sb.model.mod, held_out=sb.held_out,
                       total_groups=(), s2z_groups=())
     stan_code(baseline) == stan_code(sb) || error(
         "sbimpl: `resample_groups` requires an SBBRMI emitted with the default " *
@@ -5002,7 +4926,7 @@ function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool, held_o
         "fit artifact, then request `resample_groups` from it.")
 
     # The replay's own `held_out` is applied to the replay data by the final
-    # `reprocess`, not by the template: a fit's row mask names the fit's rows.
+    # `reprocess`, not by the template.
     rebound = _sb_rebind_brmi(sb.parent, new_df)
     cv_template = SBBRMI(
         rebound; mod=sb.model.mod, cv_groups=groups,
@@ -5448,18 +5372,10 @@ of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
   [`modeled_covariates`](@ref), then use [`transport_draws`](@ref) with the
   actual compiled coordinate names.
 - `held_out` (default: what `sb` holds out): the response hold-outs of the
-  replay, in the [`SBBRMI`](@ref) `held_out` form — whole responses and per-row
-  masks `(; y = mask)`. The default re-applies each of `sb`'s row masks
-  position by position, so it fits only a replay whose response has `sb`'s
-  shape. A replay onto data of another shape (a denser time grid, more rows
-  per subject) passes that data's own masks, or `held_out=()` to hold nothing
-  out; the value replaces `sb`'s hold-outs, whole-response ones included. Every
-  parameter keeps its role and coordinates, so the fit's draws replay as
-  before. It composes with `resample_groups` and `resample_covariates`, with
-  one boundary: a response that reads a re-drawn group is generated, not
-  fitted, in that replay, and StanBlocks refuses a row mask on it, so such a
-  replay passes `held_out=()` (or masks only responses the group does not
-  reach). The masks change no generated quantity.
+  replay, in the [`SBBRMI`](@ref) `held_out` form. A value replaces `sb`'s
+  hold-outs, and `held_out=()` holds nothing out. Every parameter keeps its
+  role and coordinates, so the fit's draws replay as before. It composes with
+  `resample_groups` and `resample_covariates`.
 
 Covered: the Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
 `mo`/`s`/`t2`/`gp`/`hsgp`), interval-censored predictor splits,
@@ -5480,7 +5396,7 @@ rather than silently copying stale structure.
 """
 function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
                    resample_groups=(),resample_covariates=(),
-                   held_out=_sb_held_out_spec(sb))
+                   held_out=sb.held_out)
     groups = _sb_resample_group_set(resample_groups)
     covariates = union(_sb_existing_covariates(sb.preproc),
         _sb_covariate_selection(sb.parent,resample_covariates))
@@ -5572,14 +5488,14 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     new_model = StanBlocks.SlicModel(sb.model.model, new_data, sb.model.mod, sb.model.observations)
     _sb_apply_held_out(
         SBBRMI(sb.parent, new_model, new_data, new_preproc, Set{Symbol}(), sb.bindings),
-        held_out; cover_all=true, prefix="sbimpl: reprocess", replay=true)
+        held_out; cover_all=true, prefix="sbimpl: reprocess")
 end
 
 function reprocess(plan::GenerativePlan, new_df; freeze_constants::Bool=true,
                    resample_groups=(),resample_covariates=(),
-                   held_out=_sb_held_out_spec(plan))
+                   held_out=plan.held_out)
     sb = SBBRMI(plan.parent, plan.model, plan.data, plan.preproc,
-                copy(plan.held_out), plan.bindings, copy(plan.held_out_rows))
+                copy(plan.held_out), plan.bindings)
     groups = _sb_resample_group_set(resample_groups)
     replayed = reprocess(sb, new_df; freeze_constants,
                          resample_groups=groups,resample_covariates,held_out)
@@ -5604,7 +5520,7 @@ See [`reprocess`](@ref) for the covered-terms list and error cases.
 """
 restan_data(sb::SBBRMI, new_df; freeze_constants::Bool=true,
             resample_groups=(),resample_covariates=(),
-            held_out=_sb_held_out_spec(sb)) =
+            held_out=sb.held_out) =
     stan_data(reprocess(sb, new_df; freeze_constants, resample_groups,resample_covariates,
                         held_out))
 

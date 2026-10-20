@@ -1199,8 +1199,8 @@ hand, so an operation that appears can be executed.
 Stan data keys. `:reprocess` forwards both `freeze_constants=` and the checked
 new-population `resample_groups=` CV/GQ re-emission described by
 [`reprocess`](@ref). Both forward `held_out=`: the default keeps the
-descriptor's hold-outs, and new data of another shape passes its own row masks
-(or `held_out=()`), as for [`reprocess`](@ref) and [`generative_plan`](@ref).
+descriptor's hold-outs, and a value replaces them (`held_out=()` holds nothing
+out), as for [`reprocess`](@ref) and [`generative_plan`](@ref).
 
 The builder form's `held_out` keyword names one response or a collection of
 responses — a strict subset; holding out every observation is refused. A
@@ -1588,14 +1588,14 @@ function _brm_derive_operations(plan, stan, outputs, columns)
         push!(ops, BRMOperation(
             :replay, "Rebuild the declaration on a new dataframe", columns, (), :brm,
             (d, new_df; highlights=d.highlight_specs,
-             held_out=_sb_held_out_spec(d.plan), kwargs...) -> brm_descriptor(
+             held_out=d.plan.held_out, kwargs...) -> brm_descriptor(
                 generative_plan(d.plan, new_df; held_out); highlights, kwargs...)))
     end
     if _brm_reprocess_supported(plan, outputs)
         push!(ops, BRMOperation(
             :reprocess, "Re-run preprocessing on a new dataframe", columns, (), :brm,
             (d, new_df; freeze_constants::Bool=true, highlights=d.highlight_specs,
-             resample_groups=(), held_out=_sb_held_out_spec(d.plan), kwargs...) ->
+             resample_groups=(), held_out=d.plan.held_out, kwargs...) ->
                 brm_descriptor(
                     reprocess(d.plan, new_df; freeze_constants, resample_groups, held_out);
                     highlights, kwargs...)))
