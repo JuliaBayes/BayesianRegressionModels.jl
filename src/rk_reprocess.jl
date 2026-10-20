@@ -62,6 +62,7 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
             fitted_constants=(name, _source) -> get(constants, name, nothing))
     end
     _rk_check_replay_program(rk.plan, plan; prefix)
+    _rk_check_replay_terms(plan; prefix)
     _rk_check_replay_groupings(plan, groups; prefix)
     # Same coordinates, so the fit's draws mean the same thing on the replay.
     # Resampled groups size their effects by the new data's levels.
@@ -80,6 +81,27 @@ end
 
 # The coordinate names `plan` binds (ReactiveKernels package extension).
 function _rk_plan_coordinate_names end
+
+_rk_replay_predictors(plan::_RKStructuralPlan) = plan.predictors
+_rk_replay_predictors(plan::_RKValuePlan) = plan.regression.predictors
+_rk_replay_predictors(plan::_RKHeldOutPlan) = _rk_replay_predictors(plan.parent)
+_rk_replay_predictors(_plan) = ()
+
+# Latent values that belong to the training rows themselves (an exact GP's
+# values at its locations, an AR/DAR path over its time steps, measurement-
+# error latents, structured group fields) have no meaning at other rows, and
+# a replay with the same number of rows would silently reinterpret them.
+const _RK_ROW_LATENT_TERMS = (gp="an exact `gp(...)`", ar="an `ar(...)`/`rw(...)` path",
+    dar="a `dar(...)`/`cdar(...)` path", me="a measurement-error `me(...)`",
+    structured="a structured group field")
+function _rk_check_replay_terms(plan; prefix)
+    for predictor in _rk_replay_predictors(plan), term in predictor.terms
+        haskey(_RK_ROW_LATENT_TERMS, term.kind) || continue
+        error("$prefix: $(_RK_ROW_LATENT_TERMS[term.kind]) term of `$(predictor.name)` " *
+            "holds latent values of the training rows, which do not carry to new " *
+            "rows; rebuild with `freeze_constants=false`")
+    end
+end
 
 _rk_replay_buckets(plan::_RKStructuralPlan) = plan.ranef_buckets
 _rk_replay_buckets(plan::_RKValuePlan) = plan.regression.ranef_buckets

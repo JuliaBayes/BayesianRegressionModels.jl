@@ -60,6 +60,11 @@ grouped(d) = @brm d begin
     mu ~ 1 + zscale(x) + (1 | g)
     y ~ Normal(mu, sigma)
 end
+exact_gp(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + gp(x)
+    y ~ Normal(mu, sigma)
+end
 membership(d) = @brm d begin
     sigma ~ Exponential(1)
     mu ~ 1 + (1 | mm(gs, other))
@@ -269,6 +274,15 @@ end
     end
     @test_throws "not a training level" reprocess(rk,
         merge(rows_of(PK, [2]), (; subject=["zzz"])))
+    # A new read grid and dose for in-sample subjects: the cell runs on the
+    # new times with each subject's fitted clearance.
+    log_CL = graph_value(rk, :log_CL, u)
+    grid = [[0.1, 0.2, 3.0, 6.0, 9.0], [0.5]]
+    design = merge(rows_of(PK, [3, 1]), (; t=grid, dose=[50.0, 75.0],
+        y=[zeros(length(g)) for g in grid]))
+    expected = reduce(vcat, [dose .* exp.(-exp(log_CL[j]) .* t)
+        for (j, dose, t) in zip([3, 1], design.dose, grid)])
+    @test graph_value(reprocess(rk, design), :conc, u) ≈ expected atol=1e-12 rtol=1e-12
 end
 
 @stestset "resample_groups: new subjects take caller-supplied effects" begin
@@ -291,6 +305,12 @@ end
 @stestset "a grouping whose levels are not frozen is refused" begin
     rk = RKBRMI(RM.membership(TRAIN))
     @test_throws "do not freeze their group levels" reprocess(rk, rows_of(TRAIN, 2:5))
+end
+
+@stestset "latent values of the training rows are refused" begin
+    # Same row count, other rows: the coordinates match, the latents do not.
+    @test_throws "latent values of the training rows" reprocess(
+        RKBRMI(RM.exact_gp(TRAIN)), rows_of(TRAIN, reverse(1:N)))
 end
 
 @stestset "replaying the training data is the fit" begin
