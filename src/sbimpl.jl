@@ -3132,7 +3132,11 @@ population priors, one S2Z grouping per predictor; anything else errors
 loudly. The predictor's other groupings (crossed, nested or `|ID|`) and direct
 terms (`hsgp`, categorical blocks, ...) stay ordinary terms. Inspect
 [`s2z_effect_blocks`](@ref). S2Z groups are excluded from automatic totals
-and cannot overlap `centered_groups` or `cv_groups`.
+and cannot overlap `centered_groups` or `cv_groups`. S2Z applies to the blocks
+an observed likelihood reaches: a predictor that none reaches (its response
+omitted from the data, for example) keeps its block of the grouping
+conventional, re-drawn in generated quantities, while the grouping stays S2Z
+on every other predictor.
 
 `s2z_coordinates=:groups` instead samples J group coordinates per coefficient:
 independent `s_j ~ N(0, tau^(2c_j))` cells with deviations
@@ -3745,7 +3749,8 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
        mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
        centered_groups=Set{Symbol}(), total_groups=:auto,
        s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts, held_out=(),
-       resample_covariates=(), _frozen_preproc=nothing, _marginal_id_targets=nothing)
+       resample_covariates=(), _frozen_preproc=nothing, _marginal_id_targets=nothing,
+       _s2z_generated=nothing)
     brmi = _brm_resolve_optional_priors(brmi)
     # A frozen re-emission codes releveled factors over their fitted levels.
     isnothing(_frozen_preproc) || (brmi = _sb_fit_factor_levels(brmi, _frozen_preproc))
@@ -3840,10 +3845,21 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
         ranef_effect_overrides,total_groups; cv_groups,centered_groups,r2d2_overrides,ranef_r2d2_overrides,
         s2z_groups=s2z_selected)
     data[_SB_TOTAL_PLANS_KEY] = total_plans
+    # S2Z reparameterises sampled blocks only: a predictor no observed
+    # likelihood reaches keeps its block conventional, and StanBlocks re-draws
+    # it in generated quantities. The probe is the ordinary program, placed
+    # before any cv or held-out mark.
+    isnothing(_s2z_generated) && (_s2z_generated = _sb_s2z_generated_predictors(
+        prepared, s2z_selected) do
+            SBBRMI(source_parent; mod, centered_groups, total_groups=(),
+                   resample_covariates, _frozen_preproc,
+                   _marginal_id_targets=_SBMarginalProbe())
+        end)
     s2z_plans = _sb_plan_s2zs(brmi,prepared,effect_overrides,s2z_selected,s2z_rho;
                               buckets=id_buckets,sd_overrides=ranef_effect_overrides,
                               ranef_r2d2_overrides,
-                              cv_groups,centered_groups,coordinates=s2z_coordinates)
+                              cv_groups,centered_groups,coordinates=s2z_coordinates,
+                              generated=_s2z_generated)
     data[_SB_S2Z_PLANS_KEY] = s2z_plans
     for plan in Iterators.flatten((values(total_plans), values(s2z_plans))), key in plan.claimed
         delete!(id_buckets,key)
@@ -4016,7 +4032,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
         build(; cv_groups, held_out, _marginal_id_targets) = SBBRMI(source_parent;
             mod, cv_groups, centered_groups, total_groups, s2z_groups, s2z_rho,
             s2z_coordinates, held_out, resample_covariates, _frozen_preproc,
-            _marginal_id_targets)
+            _marginal_id_targets, _s2z_generated)
         probe = isempty(cv_groups) ? sb :
             build(; cv_groups=Set{Symbol}(), held_out=(),
                   _marginal_id_targets=_SBMarginalProbe())
