@@ -279,8 +279,7 @@ function _sb_emit_marginal_id_bucket!(stmts, data, bucket_name, n_terms_name,
              Expr(:kw, :L_active, L_name), Expr(:kw, :tau_active, tau_name),
              Expr(:kw, :b_active, carrier),
              (Expr(:kw, field, key) for (field, key) in pairs(data_keys))...,
-             (Expr(:kw, d, d) for d in union(scale.dependencies,
-                                              completion.dependencies))...))))
+             (Expr(:kw, k, v) for (k, v) in completion.inputs)...))))
 
     position = Dict(c => i for (i, c) in enumerate(active_cols))
     ranges = [target => (target in inactive ? (bucket_name, cols) :

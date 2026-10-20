@@ -459,7 +459,26 @@ function _sb_vector_positive_priors(base::StanBlocks.SlicModel,
     end
     prior = _sb_vector_prior_statement(lhs, target, priors, nvalue;
                                        positive=true, mod, scope=base.mod)
-    (; model=Base.merge(base, prior.statement), prior.dependencies)
+    # The merged statement is traced in the base's own scope, so the caller
+    # names its arguments read arrive as `brm_prior_input_<name>` kwargs, as a
+    # term-owned prior's do (`_sb_term_model_call`). Passed under their own
+    # names they would rebind the base's: `sd(:, ID) ~ Exponential(tau)`
+    # turned the block's `tau` into an input, and `Exponential(nu)` on a
+    # Student-t block silently read its degrees of freedom.
+    statement = prior.statement
+    rhs = _sb_bind_vector_prior_inputs(statement.args[3], prior.dependencies)
+    (; model=Base.merge(base, Expr(:call, :~, statement.args[2], rhs)),
+       inputs=[_sb_term_prior_input(d) => d for d in prior.dependencies])
+end
+
+# Only a vector prior's positional arguments read the caller: its keyword
+# blocks hold the base's size expression and numeric bounds.
+_sb_bind_vector_prior_inputs(value, refs) = _sb_bind_prior_references(value, refs)
+function _sb_bind_vector_prior_inputs(value::Expr, refs)
+    value.head === :parameters && return value
+    value.head === :call || return _sb_bind_prior_references(value, refs)
+    Expr(:call, first(value.args),
+         (_sb_bind_vector_prior_inputs(arg, refs) for arg in value.args[2:end])...)
 end
 
 _sb_vector_prior_dependencies!(_out, _value) = nothing
@@ -8914,8 +8933,7 @@ function _sb_term_sd_submodel(term_overrides, t; mod::Module=@__MODULE__)
     end
     base = getf(t) === s ? _sb_s_generic : _sb_t2_generic
     configured = _sb_vector_positive_priors(base, :sd_pen, priors; mod)
-    (; model=configured.model,
-       kwargs=(; (dependency => dependency for dependency in configured.dependencies)...))
+    (; model=configured.model, kwargs=(; configured.inputs...))
 end
 
 function _sb_positive_term_prior_stmt(name::Symbol, index::Int, prior)
@@ -11586,7 +11604,7 @@ function _sb_emit_student_t_id_bucket!(stmts, data, bucket_name, n_terms_name,
         _sb_record_binding!(data, bucket_name, :random_effect, gname;
                             family=:ranef_correlated_draws_generic_student_t)
         push!(kwargs, Expr(:kw, :lkj_eta, ranef_effect.lkj_eta))
-        append!(kwargs, [Expr(:kw, d, d) for d in config.dependencies])
+        append!(kwargs, [Expr(:kw, k, v) for (k, v) in config.inputs])
     else
         model = :ranef_correlated_draws_student_t
     end
@@ -11763,8 +11781,7 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g:
                                    gname in centered_groups; mod) : nothing
     generic_model = generic_prior ? generic_config.model : nothing
     generic_dependency_kwargs = generic_prior ?
-        [Expr(:kw, dependency, dependency)
-         for dependency in generic_config.dependencies] : Any[]
+        [Expr(:kw, k, v) for (k, v) in generic_config.inputs] : Any[]
     if generic_prior
         family = gname in centered_groups ? :ranef_correlated_draws_centered_generic :
                                           :ranef_correlated_draws_generic
