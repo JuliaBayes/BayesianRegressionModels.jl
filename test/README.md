@@ -86,6 +86,16 @@ unconstrained BridgeStan name has exactly one sampled owner, and a carrier
 that owns elements but is absent from the names, or whose `dims` are
 unresolved, still fails closed.
 
+`output_predictors.jl` checks `BRMOutput.predictors`, `term` and the
+population-level `component`s: every term family, a column used by two
+predictors, a shared `|ID|` block listing both predictors, R2D2 and horseshoe
+priors, exact totals, S2Z and stratified blocks, all found through
+`brm_outputs(d; predictor=, term=, component=)`. Its compiled half resolves
+every address back to its own output through
+`brm_population_effect_coordinates` and `brm_term_coordinates`, and checks that
+grouping by predictor reaches every sampled coordinate. Set
+`BRM_OUTPUT_PREDICTORS_RUNTIME=0` to skip the compiled half.
+
 `plate_index_into.jl` checks `ragged(idx, group; into=target)`, an index column
 of row numbers on another flat axis: the gathered per-subject positions equal
 hand-rebased pre-grouped columns on BridgeStan and RK, `0` stays "no row",
