@@ -329,7 +329,7 @@ function _rk_ast_value_spline(definitions, term, taken)
     kval = k isa Tuple ? Expr(:tuple, k...) : k
     basis = term.options.kind === :t2 ? :brm_t2_basis : :brm_tps_basis
     stmts = Expr[Expr(:(=), Expr(:tuple, X, Z...),
-        Expr(:call, basis, term.columns..., kval))]
+        Expr(:call, basis, term.columns..., get(term.options, :fit_columns, ())..., kval))]
     block = _rk_block_body()
     fixed_basis = _rk_block_argument!(block, :X, X)
     penalized = [_rk_block_argument!(block, "Z$j", Zj) for (j, Zj) in enumerate(Z)]

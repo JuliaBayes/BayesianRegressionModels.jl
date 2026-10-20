@@ -4488,26 +4488,33 @@ function _rk_plan_spline_axis!(axis::Symbol, target::Symbol, head::String,
     nothing
 end
 
+# A spline basis is fitted in-graph to fit-role copies of its axes, so a
+# frozen `reprocess` keeps the training basis (`_rk_fit_twin!`).
 function _rk_plan_spline_term!(prepared::_BRMPreparedTerm{typeof(s)},
         target::Symbol, data::AbstractDict,
-        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol})
+        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol};
+        derived::Vector{_RKDerivedSpec})
     axis = prepared.source
     _rk_plan_spline_axis!(axis, target, "s", data, columns)
     id = _rk_mint_smooth_id!(taken, columns, "s_" * string(axis))
+    fit_columns = (_rk_fit_twin!(derived, columns, taken, data, axis),)
     _RKTermSpec(:spline, [axis],
-        (; id, kind=:tps, k=prepared.state.fit.k), id, id)
+        (; id, kind=:tps, k=prepared.state.fit.k, fit_columns), id, id)
 end
 
 function _rk_plan_spline_term!(prepared::_BRMPreparedTerm{typeof(t2)},
         target::Symbol, data::AbstractDict,
-        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol})
+        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol};
+        derived::Vector{_RKDerivedSpec})
     first_axis, second_axis = prepared.source
     _rk_plan_spline_axis!(first_axis, target, "t2", data, columns)
     _rk_plan_spline_axis!(second_axis, target, "t2", data, columns)
     base = "t2_" * string(first_axis) * "_" * string(second_axis)
     id = _rk_mint_smooth_id!(taken, columns, base)
+    fit_columns = Tuple(_rk_fit_twin!(derived, columns, taken, data, axis)
+        for axis in (first_axis, second_axis))
     _RKTermSpec(:spline, [first_axis, second_axis],
-        (; id, kind=:t2, k=prepared.state.fit.k), id, id)
+        (; id, kind=:t2, k=prepared.state.fit.k, fit_columns), id, id)
 end
 
 # ---- exact-GP latent terms (iso single-axis; mirrors `_sb_gp`) ----
@@ -5634,7 +5641,7 @@ Base.@nospecializeinfer function _rk_plan_predictor(@nospecialize(brmi::BRMI), c
                 prepared, target, context.data, columns, taken))
         elseif prepared.callable === s || prepared.callable === t2
             push!(terms, _rk_plan_spline_term!(
-                prepared, target, context.data, columns, taken))
+                prepared, target, context.data, columns, taken; derived))
         elseif prepared.callable === hsgp
             push!(terms, _rk_plan_hsgp_term!(
                 prepared, target, context.data, columns, taken; derived,

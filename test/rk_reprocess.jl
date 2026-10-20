@@ -102,6 +102,16 @@ smooth_clamped(d) = @brm d begin
     mu ~ 1 + hsgp(x; k=5, extrapolate=:clamp)
     y ~ Normal(mu, sigma)
 end
+thin_plate(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + s(x)
+    y ~ Normal(mu, sigma)
+end
+tensor(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + t2(x, z)
+    y ~ Normal(mu, sigma)
+end
 zscaled_interaction(d) = @brm d begin
     sigma ~ Exponential(1)
     mu ~ 1 + zscale(x) & z
@@ -205,6 +215,14 @@ end
         RKBRMI(RM.smooth(TRAIN)), merge(rows_of(TRAIN, [top]), (; x=[100 * TRAIN.x[top]])))
 end
 
+@stestset "s/t2 keep the training basis" begin
+    for build in (RM.thin_plate, RM.tensor)
+        # The design has fewer unique values than a basis needs of its own.
+        check_frozen(build, 2:5)
+        check_frozen(build, [7])
+    end
+end
+
 @stestset "a same-group replay keeps the fitted group effects" begin
     # Rows 3 and 6 hold only group `c`, a single subject or two in another order.
     check_frozen(RM.grouped, [3, 6])
@@ -244,7 +262,8 @@ end
 
 @stestset "replaying the training data is the fit" begin
     for build in (RM.string_factor, RM.monotonic, RM.fitted_constant, RM.zscaled,
-            RM.zscaled_log, RM.grouped, RM.smooth, RM.smooth_rows, RM.smooth_orthogonal)
+            RM.zscaled_log, RM.grouped, RM.smooth, RM.smooth_rows, RM.smooth_orthogonal,
+            RM.thin_plate, RM.tensor)
         rk = RKBRMI(build(TRAIN))
         u = point(rk)
         @test density(reprocess(rk, TRAIN), u) == density(rk, u)
