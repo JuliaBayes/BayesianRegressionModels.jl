@@ -245,7 +245,8 @@ export RanefBlock, ranef_blocks, ranef_coordinates,
        parameter_draws, hsgp_population_curve
 export AbstractAdaptiveCenteringBlock, AdaptiveCenteringBlock,
        R2D2AdaptiveCenteringBlock, adaptive_centering_blocks,
-       adaptive_centering_problem, select_hsgp_centeredness,
+       adaptive_centering_problem, adaptive_centering_controls,
+       select_hsgp_centeredness,
        select_ranef_centeredness
 export brm_output_draws, brm_predictive_draws, hsgp_coordinate_draws, hsgp_transform_draws, hsgp_boundary_check
 export BRMPowerscaleSensitivity, brm_psis_weights, brm_cjs_dist,

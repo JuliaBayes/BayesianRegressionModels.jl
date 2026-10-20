@@ -6,14 +6,6 @@ struct _RKHeldOutPlan{P}
     held_out::Set{Symbol}
 end
 
-# A per-row hold-out keeps the parent's program and coordinates; only the
-# bound data changes. Each held-out row of a response binds as `missing`, which
-# RKPPL observes as no likelihood (rkppl-use "Missing observations").
-struct _RKHeldOutRowsPlan{P}
-    parent::P
-    rows::Dict{Symbol,Any}
-end
-
 # An unconditioned BRM program forward-simulates on the Stan route. Its
 # declarations belong to generated quantities, not to an HMC coordinate pack.
 # Retain the authoritative generative snapshot while emitting only its empty
@@ -73,19 +65,16 @@ Base.@nospecializeinfer function _brm_rk_plan(@nospecialize(brmi::BRMI); held_ou
     # A `constant(...)` becomes a named scalar data constant, which the graph
     # holds as a number. RK has no replay, so it is always evaluated here.
     brmi, _ = _brm_resolve_constants(brmi; prefix="RK backend")
-    selection = _rk_held_out_selection(brmi, held_out)
-    plan = _brm_rk_unselected_plan(brmi; held_rows=selection.rows)
-    isempty(selection.whole) || (plan = _RKHeldOutPlan(plan, selection.whole))
-    isempty(selection.rows) ? plan : _RKHeldOutRowsPlan(plan, selection.rows)
+    selected = _rk_held_out_selection(brmi, held_out)
+    original = _brm_rk_unselected_plan(brmi)
+    isempty(selected) ? original : _RKHeldOutPlan(original, selected)
 end
 
 Base.@nospecializeinfer function _rk_held_out_selection(@nospecialize(brmi::BRMI), held_out)
     request = _brm_held_out_request(held_out; prefix="RK backend")
-    isempty(request.names) && isempty(request.rows) &&
-        return (; whole=Set{Symbol}(), rows=Dict{Symbol,Any}())
+    isempty(request.names) && return Set{Symbol}()
     aliases = Dict{Symbol,Set{Symbol}}()
     sources = Set{Symbol}()
-    values = Dict{Symbol,Any}()
     unbound = Symbol[]
     function record(target, column)
         source = _brm_observation_name(column)
@@ -94,7 +83,6 @@ Base.@nospecializeinfer function _rk_held_out_selection(@nospecialize(brmi::BRMI
             return
         end
         push!(sources, source)
-        values[source] = _rk_observation_values(column)
         for alias in (target, source)
             push!(get!(() -> Set{Symbol}(), aliases, alias), source)
         end
@@ -118,15 +106,8 @@ Base.@nospecializeinfer function _rk_held_out_selection(@nospecialize(brmi::BRMI
             record(key, lhs)
         end
     end
-    _brm_resolve_held_out(request, aliases, sources, unbound; prefix="RK backend",
-        response=source -> values[source])
+    _brm_resolve_held_out(request, aliases, sources, unbound; prefix="RK backend")
 end
-
-# The raw values an observed response column binds (a `ragged(y, g)` join
-# binds its flat `y`).
-_rk_observation_values(column::NamedColumn) = parent(parent(column))
-_rk_observation_values(column::ExprColumn{typeof(ragged)}) =
-    _rk_observation_values(first(getargs(column)))
 
 _rk_emitted_observation_name(lhs::Symbol) = lhs
 function _rk_emitted_observation_name(lhs::Expr)
@@ -285,36 +266,3 @@ _rk_observed_names(plan::_RKKernelPlan) = (plan.kernel.data_columns[
     findfirst(==(plan.kernel.obs_response), plan.kernel.slice_params)],)
 _rk_observed_names(plan::_RKHeldOutPlan) = Tuple(
     name for name in _rk_observed_names(plan.parent) if !(name in plan.held_out))
-
-function Base.getproperty(plan::_RKHeldOutRowsPlan, field::Symbol)
-    field in (:parent, :rows) ? getfield(plan, field) :
-        getproperty(getfield(plan, :parent), field)
-end
-_rk_plan_summary(plan::_RKHeldOutRowsPlan) =
-    _rk_plan_summary(plan.parent) * " (withheld rows: " * join(
-        ("$name $(_rk_held_out_row_count(mask))" for (name, mask) in
-            sort!(collect(plan.rows); by=first)), ", ") * ")"
-_rk_held_out_row_count(mask::Vector{Bool}) = "$(count(mask)) of $(length(mask))"
-_rk_held_out_row_count(mask::Vector{Vector{Bool}}) =
-    "$(sum(count, mask)) of $(sum(length, mask))"
-_rk_emit_ast(plan::_RKHeldOutRowsPlan; coordinates=nothing) =
-    _rk_emit_ast(plan.parent; coordinates)
-_rk_observed_names(plan::_RKHeldOutRowsPlan) = _rk_observed_names(plan.parent)
-function _rk_source_data_columns(plan::_RKHeldOutRowsPlan, emitted)
-    columns = _rk_source_data_columns(plan.parent, emitted)
-    for (source, mask) in plan.rows
-        haskey(columns, source) || error(
-            "RK backend: the per-row `held_out` response `$source` binds no data " *
-            "column of the emitted program")
-        columns[source] = _rk_held_out_rows_column(columns[source], mask, source)
-    end
-    columns
-end
-# Fresh columns: the bound response stays the caller's.
-_rk_held_out_rows_column(values::AbstractVector, mask::Vector{Bool}, source) =
-    Union{Missing,eltype(values)}[held ? missing : value
-        for (value, held) in zip(values, mask)]
-_rk_held_out_rows_column(values, mask::Vector{Vector{Bool}}, source) = error(
-    "RK backend: a per-row `held_out` mask on `$source`, a response observed one " *
-    "array per subject, is not built yet: RKPPL does not yet skip `missing` " *
-    "entries inside per-subject arrays")

@@ -572,16 +572,13 @@ separate parameter branches. It preserves every fitted prior and coordinate,
 compares normalized native densities and reverse gradients against independent
 oracles and compiled Stan, and replays the complete emitted source and artifact.
 
-`held_out_rows.jl` checks per-row `held_out=(; y = mask)` on both backends:
-mask validation, RKBRMI's fitted density as the full one minus the held rows'
-pointwise densities with unchanged coordinates (a held row outside LogNormal's
-support included), and SBBRMI's masked fit as the fit on the kept rows
-(density offset and gradient) for flat, bounded LogNormal, `@plate`-cell,
-`kernel(...)`-cell and ragged-join responses, with `y_likelihood` unchanged (a
-held row outside LogNormal's support scores `-Inf`). Masks combine with
-whole-response Symbols and survive `reprocess`, `generative_plan` and the
-descriptor. RKBRMI masks on per-subject arrays are `@test_broken` (RKPPL nested
-`missing`).
+`held_out_rows.jl` checks that a per-row `held_out` mask is refused on both
+backends and on every replay (a fit receives only the rows it conditions on,
+user decision `1bwqnxs`), that a replay's `held_out=` replaces the fit's
+whole-response hold-outs through `reprocess`, `restan_data`, `generative_plan`
+and the descriptor, and that a per-subject window fitted on its kept rows
+replays onto the full data, a denser grid and a re-drawn subject with its
+frozen `zscale` constants.
 
 `rk_callable_terms.jl` checks positional/keyword formula broadcasting, including
 singleton input axes, against independent and compiled Stan targets.
@@ -752,6 +749,19 @@ and every cell's 11 candidate losses against an independent weighted-correlation
 oracle at zero, mixed and one source controls. It tests the fixed-frame scoring
 proxy; it does not measure online window winners or sampler convergence.
 
+`adaptive_centering_learned_order.jl` covers `ranef_order=:learned`, where
+each group's triangular order follows its controls (snag
+`correlated-kreis-15564811`). Its synthetic half needs no Stan model: it checks
+the map at both compiled endpoints against a dense `cholesky(P*Sigma*P')`
+reference, plus the inverse, a finite-difference log-Jacobian and the Enzyme
+gradient. With every group in declaration order, the map, Jacobian, inverse
+and scoring frame must equal the per-pair joint wrapper (ordinary, R2D2, HSGP
+and scalar cells). The window rule is checked against an independent
+re-implementation. The compiled half checks a `K=3` block at both endpoints
+against BridgeStan's own `diag(tau) * L`, the `adaptive_centering_controls`
+report, copy isolation, the declared fallback of a model without a correlated
+block, and a short WarmupHMC run that is checkpointed and resumed.
+
 `adaptive_hsgp_centering.jl` checks pilot-selection under spectral underflow,
 the partial-coordinate Jacobian, Turing/Enzyme versus StanBlocks/BridgeStan
 density and gradient parity, physical constrained quantities, and the
@@ -765,7 +775,8 @@ four compiled models first compares the physical value every cell reads with
 BridgeStan's `param_constrain`, then checks the wrapper identities.
 
 `adaptive_centering_threads.jl` differentiates the ordinary, joint (ordinary +
-R2D2 + HSGP), S2Z, HSGP-only, cdar and scalar (total / S2Z cell) wrappers on
+R2D2 + HSGP), learned-order (`ranef_order=:learned` over the joint cells),
+S2Z, HSGP-only, cdar and scalar (total / S2Z cell) wrappers on
 three concurrent tasks while a fourth forces collections, in a child Julia
 started with four threads; the child must exit cleanly and every gradient must
 bitwise-equal its single-threaded reference. On Julia 1.10, Enzyme's reverse

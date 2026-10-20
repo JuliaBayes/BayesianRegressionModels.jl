@@ -182,8 +182,7 @@ end
 _brm_prior_median(law::UnivariateDistribution) = Float64(median(law))
 _brm_prior_median(_law) = nothing
 
-_brm_nlme_scalar_data(plan::Union{_RKHeldOutPlan,_RKHeldOutRowsPlan}, name) =
-    _brm_nlme_scalar_data(plan.parent, name)
+_brm_nlme_scalar_data(plan::_RKHeldOutPlan, name) = _brm_nlme_scalar_data(plan.parent, name)
 _brm_nlme_scalar_data(plan, name) = let x = get(plan.columns, name, nothing)
     x isa Real ? Float64(x) : nothing
 end

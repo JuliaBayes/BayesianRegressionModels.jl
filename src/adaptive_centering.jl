@@ -1652,6 +1652,33 @@ random-intercept geometry documented by that method.
 """
 function adaptive_centering_problem end
 
+"""
+    adaptive_centering_controls(adaptive, model; unc_names=nothing) -> Vector{NamedTuple}
+
+One row per adaptive cell of `adaptive`, the wrapper
+[`adaptive_centering_problem`](@ref) returned for `model`, in the wrapper's
+pair order (the order `centeredness` and checkpoints use). Every row has
+
+- `cell`, the pair number; `index` and `name`, its unconstrained coordinate;
+- `family`: `:ranef` (ordinary or R2D2 random-effect cell), `:hsgp` (basis
+  weight), `:scalar` (exact total or S2Z contrast) or `:cdar` (walk cell);
+- `c`, the current source control, and `target`, the compiled frame's.
+
+Random-effect rows also carry `binding`, `group`, `margin` (its
+`(; predictor, coefficient)`, as [`brm_ranef_draws`](@ref) labels it),
+`level`, `term` (the margin's declared position in its block) and `rank`, its
+position in the group's current triangular order: `term` itself under
+`ranef_order=:declared`, the learned position under `ranef_order=:learned`.
+HSGP and cdar rows carry `binding`, `margin = (; predictor, coefficient=term)`
+and `term` (the basis or walk cell); fields that do not apply are `nothing`.
+
+Read it after warm-up from the same object the sampler adapted, for example a
+single-chain `adaptive_warmup_mcmc` run; samplers that copy their density per
+chain leave the passed object at its initial controls (warmuphmc-use §5c).
+Pass `unc_names` when `adaptive` does not wrap a BridgeStan model.
+"""
+function adaptive_centering_controls end
+
 function adaptive_centering_blocks(::TuringBRMI, _unc_names)
     error(
         "Turing backend: `adaptive_centering_blocks` describes compiled Stan " *

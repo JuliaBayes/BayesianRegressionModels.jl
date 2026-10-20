@@ -233,7 +233,11 @@ function _prepare_frame(state::_BRMRanefCenteringState, ir, position, gradient)
     _centering_frame(state, position, gradient)
 end
 
-function _centering_frame(state::_BRMRanefCenteringState, position, gradient)
+# `ordered` is a `BRMOrderedCenteringReparametrization`, whose source frame
+# orders every group (`_source_group_factor`); `nothing` is the declared order,
+# whose frame is unchanged.
+function _centering_frame(state::_BRMRanefCenteringState{N}, position, gradient,
+                          ordered=nothing) where {N}
     T = promote_type(eltype(position), eltype(gradient), Float64)
     n = length(state.sources)
     source = T.(state.sources)
@@ -244,29 +248,32 @@ function _centering_frame(state::_BRMRanefCenteringState, position, gradient)
 
     for (bi, block) in enumerate(state.blocks), g in 1:block.ranef.n_groups
         K = block.ranef.n_terms
-        C = BRM._adaptive_block_cholesky(position, block)
+        order = isnothing(ordered) ? (1:K) : view(ordered.orders[bi], :, g)
+        C = isnothing(ordered) ? BRM._adaptive_block_cholesky(position, block) :
+            _unpacked(_source_group_factor(position, ordered, bi, g), K)
         A = zeros(T, K, K)
         z = Vector{T}(undef, K)
-        for k in 1:K
+        for j in 1:K
+            k = order[j]
             p = state.pair_lookup[bi][k, g]
             c = source[p]
             m = zero(T)
-            for l in 1:k-1
-                m += C[k, l] * z[l]
-                A[k, l] = c * C[k, l]
+            for l in 1:j-1
+                m += C[j, l] * z[l]
+                A[j, l] = c * C[j, l]
             end
-            s = C[k, k]
+            s = C[j, j]
             u = position[block.effects[k, g]]
-            z[k] = (u - c * m) / s^c
-            A[k, k] = s^c
+            z[j] = (u - c * m) / s^c
+            A[j, j] = s^c
             location[p] = m
             scale[p] = s
-            innovation[p] = z[k]
+            innovation[p] = z[j]
         end
-        gu = gradient[block.effects[:, g]]
+        gu = gradient[block.effects[order, g]]
         h = transpose(A) * gu
-        for k in 1:K
-            invariant_gradient[state.pair_lookup[bi][k, g]] = h[k]
+        for j in 1:K
+            invariant_gradient[state.pair_lookup[bi][order[j], g]] = h[j]
         end
     end
     BRMAdaptiveCenteringFrame(
@@ -605,8 +612,9 @@ function _prepare_frame(state::BRMJointAdaptiveCenteringState, ir, position, gra
     _centering_frame(state, position, gradient)
 end
 
-function _centering_frame(state::BRMJointAdaptiveCenteringState, position, gradient)
-    frames = (_centering_frame(state.ranef, position, gradient),
+function _centering_frame(state::BRMJointAdaptiveCenteringState, position, gradient,
+                          ordered=nothing)
+    frames = (_centering_frame(state.ranef, position, gradient, ordered),
               _centering_frame(state.hsgp, position, gradient),
               _centering_frame(state.scalar, position, gradient))
     BRMAdaptiveCenteringFrame(
@@ -614,10 +622,14 @@ function _centering_frame(state::BRMJointAdaptiveCenteringState, position, gradi
     )
 end
 
-function _adaptive_joint_centering_reparametrizer(
-        blocks, hsgp_blocks, r2d2_blocks=BRM.R2D2AdaptiveCenteringBlock[],
-        scalar_cells=(; indices=Int[], scales=Int[], locations=Float64[],
-                        targets=Float64[]))
+const _NO_SCALAR_CELLS = (; indices=Int[], scales=Int[], locations=Float64[],
+                           targets=Float64[])
+
+# The joint state of ordinary, R2D2, HSGP and scalar cells, after refusing every
+# coordinate overlap that would make the transform inexact. Shared by the
+# per-pair wrapper below and the learned-order wrapper
+# (`_adaptive_ordered_centering_reparametrizer`).
+function _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells)
     hsgp_state = BRMHSGPAdaptiveCenteringState(hsgp_blocks)
     scalar_state = _scalar_centering_state(scalar_cells)
     block_effects(bs) = BitSet(Iterators.flatten(vec(b.effects) for b in bs))
@@ -654,25 +666,547 @@ function _adaptive_joint_centering_reparametrizer(
     n_ranef = sum(b -> b.ranef.n_terms * b.ranef.n_groups, blocks; init=0)
     n_r2d2 = length(ranef_state.sources) - n_ranef
     n_hsgp = length(hsgp_state.sources)
-    state = BRMJointAdaptiveCenteringState(ranef_state, hsgp_state, scalar_state,
-                                           n_ranef, n_r2d2, n_hsgp)
-    pair(p, idx, c) = idx => WarmupHMC.Reparametrization(
-        WarmupHMC.PartiallyCentered(c), WarmupHMC.PartiallyCentered(c),
-        BRMJointAdaptiveCenteringArgument(state, p, :location),
-        BRMJointAdaptiveCenteringArgument(state, p, :log_scale),
-    )
-    pairs = [pair(p, _pair_index(ranef_state, p),
-                  ranef_state.blocks[ranef_state.pair_blocks[p]].target_c)
-             for p in eachindex(ranef_state.sources)]
-    append!(pairs, [begin
-        bi, basis = _hsgp_pair_location(hsgp_state, j)
-        pair(n_ranef + n_r2d2 + j, _hsgp_pair_index(hsgp_state, j),
-             hsgp_state.blocks[bi].target_c[basis])
-    end for j in eachindex(hsgp_state.sources)])
-    append!(pairs, [pair(n_ranef + n_r2d2 + n_hsgp + j, scalar_state.indices[j],
-                         scalar_cells.targets[j])
-                    for j in eachindex(scalar_state.sources)])
+    BRMJointAdaptiveCenteringState(ranef_state, hsgp_state, scalar_state,
+                                   n_ranef, n_r2d2, n_hsgp)
+end
+
+# The compiled frame of every joint cell, in pair order.
+function _joint_targets(state::BRMJointAdaptiveCenteringState, scalar_cells)
+    ranef = [state.ranef.blocks[state.ranef.pair_blocks[p]].target_c
+             for p in eachindex(state.ranef.sources)]
+    hsgp = [state.hsgp.blocks[bi].target_c[basis]
+            for (bi, basis) in zip(state.hsgp.pair_blocks, state.hsgp.pair_basis)]
+    vcat(ranef, hsgp, Float64.(scalar_cells.targets))
+end
+
+_joint_cell_index(state::BRMJointAdaptiveCenteringState, p) =
+    _joint_pair_index(state, _joint_pair_family(state, p)...)
+
+function _adaptive_joint_centering_reparametrizer(
+        blocks, hsgp_blocks, r2d2_blocks=BRM.R2D2AdaptiveCenteringBlock[],
+        scalar_cells=_NO_SCALAR_CELLS)
+    state = _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells)
+    pairs = [_joint_cell_index(state, p) => WarmupHMC.Reparametrization(
+                 WarmupHMC.PartiallyCentered(c), WarmupHMC.PartiallyCentered(c),
+                 BRMJointAdaptiveCenteringArgument(state, p, :location),
+                 BRMJointAdaptiveCenteringArgument(state, p, :log_scale))
+             for (p, c) in enumerate(_joint_targets(state, scalar_cells))]
     state, WarmupHMC.IndexedReparametrization(pairs)
+end
+
+# ---- Learned triangular order (`ranef_order = :learned`) --------------------
+#
+# A correlated block's triangular map centres margin `k` on its conditional mean
+# given the margins before it, and the per-pair wrappers above take that order
+# from the formula declaration order. A data-poor margin declared before
+# data-rich ones can then never be "non-centred given the data-rich margins",
+# for any controls (snag correlated-kreis-15564811). The learned order re-derives
+# each group's order from that group's controls (`_learned_order`): descending
+# `c`, ties in declaration order. Centred margins come first; every other margin
+# is centred to its own degree around its conditional mean given the margins
+# ahead of it.
+#
+# The conditioning order is a permutation `P` of the block covariance
+# `Sigma = C * C'`, `C = diag(tau) * L`: position `j` holds margin `P[j]`, and
+# `Cp = cholesky(P * Sigma * P')` replaces `C`. Source coordinate `x[P[j]]` is
+# `c * m[j] + Cp[j,j]^c * w[j]` with `m[j] = sum(Cp[j,i] * w[i] for i < j)`; the
+# effects are `b[P[j]] = m[j] + Cp[j,j] * w[j]`, and the compiled coordinates are
+# the declared-order frame of `b` at the block's compiled `target_c`. For a block
+# compiled non-centred, source -> compiled is then a rotation rather than
+# per-coordinate pairs, so this wrapper is a custom reparametrization that a
+# `WindowSelectionPlan` adapts (`_ordered_select!`); HSGP, total and S2Z cells
+# keep their per-cell maps inside it. Its controls are the joint wrapper's cell
+# controls in the joint pair order, and the order is a pure function of them, so
+# checkpoints carry nothing else.
+#
+# The block's own correlation coordinates are reordered too. Stan's
+# `cholesky_factor_corr` parametrizes `L` by canonical partial correlations
+# taken in declaration order, and that geometry alone left a data-poor margin
+# declared first mixing about 4x worse with identical effect frames (synthetic
+# `rho_sr` bulk ESS 120 against 479). So the block has one order of its own,
+# its margins by mean control (`_derive_orders!`), and the source frame's
+# Cholesky coordinates are the partial correlations of the correlation matrix
+# in that order. The compiled ones are recovered through the declared-order
+# factor, and the Jacobian is the difference of the two correlation
+# transforms (`_correlation_logjac`). Each group's ties follow the block order,
+# so most groups share it and need no rotations. At uniform controls every order
+# is the declared one, so the wrapper starts in the compiled frame.
+#
+# The map runs under Enzyme on every gradient, so it follows `_block_location`'s
+# Julia 1.10 rules: per-block factors live in `NTuple`s sized by the state's
+# capacity, never in heap work vectors, and the random-effect loops read only
+# flat integer arrays.
+struct BRMOrderedCenteringReparametrization{N} <: WarmupHMC.AbstractReparametrization
+    state::BRMJointAdaptiveCenteringState{N}
+    # The compiled frame of every cell, in joint pair order.
+    targets::Vector{Float64}
+    # Per ranef block: `orders[bi][j, g]` is the margin at position `j` of group
+    # `g`. The distinct orders are `perms[bi][:, q]`, and the groups sharing
+    # order `q` are `groups[bi][starts[bi][q]:starts[bi][q+1]-1]`, so the
+    # permuted factor is built once per distinct order.
+    orders::Vector{Matrix{Int}}
+    perms::Vector{Matrix{Int}}
+    starts::Vector{Vector{Int}}
+    groups::Vector{Vector{Int}}
+    # Per ranef block: its own order (margins by mean control), each margin's
+    # position in it, and, per distinct group order `q`, that order's rows of
+    # the block-order factor (`rows[bi][j, q]`) and its kind: `0` the declared
+    # order, `1` the block order, `2` any other.
+    block_orders::Vector{Vector{Int}}
+    positions::Vector{Vector{Int}}
+    rows::Vector{Matrix{Int}}
+    kinds::Vector{Vector{Int}}
+    # `1`: source -> compiled; `-1`: compiled -> source.
+    direction::Int
+end
+
+# `Base.setindex(t, v, i)` with a runtime `i`, as a branch-free select over every
+# entry. Base's recursive version falls off a cliff past 32 entries (measured:
+# 1.9 us and an 80 KB heap allocation per write at 49 entries, against 6 ns and
+# none here), and a heap allocation inside an Enzyme-differentiated map is the
+# Julia 1.10 GC hazard `_block_location` describes. The square Givens buffer
+# reaches 49 entries at `K = 7`, the packed factor 36 at `K = 8`.
+@inline _tset(t::NTuple{M,T}, v, i) where {M,T} = ntuple(k -> ifelse(k == i, T(v), t[k]), Val(M))
+
+# Packed lower-triangular storage: entry `(i, j)`, `j <= i`.
+@inline _tri(i, j) = (i * (i - 1)) ÷ 2 + j
+# Row-major `n x n` storage.
+@inline _sq(i, j, n) = (i - 1) * n + j
+
+_packed_length(::Val{K}) where {K} = Val((K * (K + 1)) ÷ 2)
+
+# `C = diag(tau[order]) * L`, packed, where `L` is built from the block's
+# Cholesky coordinates and row `i` holds margin `order[i]`; the declared order
+# gives `diag(tau) * L` with the same operations and association as
+# `_block_cholesky_entry`.
+function _packed_block_cholesky(x, block, order, ::Val{KMAX}) where {KMAX}
+    T = eltype(x)
+    C = ntuple(_ -> zero(T), _packed_length(Val(KMAX)))
+    for i in 1:block.ranef.n_terms
+        tau = _block_tau(x, block, order[i])
+        stick = one(T)
+        offset = (i - 1) * (i - 2) ÷ 2
+        for l in 1:i-1
+            z = tanh(x[block.cholesky_free[offset + l]])
+            C = _tset(C, tau * (stick * z), _tri(i, l))
+            stick *= sqrt(one(T) - z * z)
+        end
+        C = _tset(C, tau * stick, _tri(i, i))
+    end
+    C
+end
+
+# `cholesky(P * C * C' * P')`, packed, for the order `order[1:K]`: the LQ factor
+# of the row-permuted `P * C`, by Givens rotations of its columns. Each diagonal
+# is the norm of a residual row, never a difference of squares, so a nearly
+# singular correlation cannot round a conditional variance below zero (the
+# difference-of-squares Cholesky did, mid-warm-up). `A` is `KMAX x KMAX`,
+# row-major.
+function _permuted_cholesky(C::NTuple{M,T}, order, K, ::Val{KMAX}) where {M,T,KMAX}
+    A = ntuple(_ -> zero(T), Val(KMAX * KMAX))
+    for j in 1:K
+        for l in 1:order[j]
+            A = _tset(A, C[_tri(order[j], l)], _sq(j, l, KMAX))
+        end
+    end
+    for j in 1:K
+        for l in j+1:K
+            a, b = A[_sq(j, j, KMAX)], A[_sq(j, l, KMAX)]
+            r = sqrt(a * a + b * b)
+            iszero(r) && continue
+            c, s = a / r, b / r
+            for i in j:K
+                u, v = A[_sq(i, j, KMAX)], A[_sq(i, l, KMAX)]
+                A = _tset(A, c * u + s * v, _sq(i, j, KMAX))
+                A = _tset(A, c * v - s * u, _sq(i, l, KMAX))
+            end
+        end
+        if A[_sq(j, j, KMAX)] < zero(T)
+            for i in j:K
+                A = _tset(A, -A[_sq(i, j, KMAX)], _sq(i, j, KMAX))
+            end
+        end
+    end
+    Cp = ntuple(_ -> zero(T), Val(M))
+    for j in 1:K, i in 1:j
+        Cp = _tset(Cp, A[_sq(j, i, KMAX)], _tri(j, i))
+    end
+    Cp
+end
+
+_unpacked(C, K) = [j <= i ? C[_tri(i, j)] : zero(eltype(C)) for i in 1:K, j in 1:K]
+
+# Stan's `cholesky_factor_corr` log-Jacobian from its unconstrained coordinates
+# to the correlation matrix, at the packed factor `F` (rows may carry scales):
+# `sum(log(1 - z^2)) + sum(log(stick)) + sum((K - i) * log(L[i,i]))`, the tanh,
+# stick-breaking and `L -> L * L'` terms. With `n[i,l]` the norm of row `i` from
+# column `l` on, `1 - z[i,l]^2 = (n[i,l+1] / n[i,l])^2`, `stick[i,l] =
+# n[i,l] / n[i,1]` and `L[i,i] = n[i,i] / n[i,1]`; everything is a ratio of row
+# norms, so no difference of squares can cancel.
+function _correlation_logjac(F, K)
+    T = eltype(F)
+    total = zero(T)
+    for i in 2:K
+        suffix = zero(T)
+        log_ii = zero(T)
+        log_next = zero(T)
+        acc = zero(T)
+        for l in i:-1:1
+            suffix += F[_tri(i, l)] * F[_tri(i, l)]
+            log_n = log(suffix) / 2
+            if l == i
+                log_ii = log_n
+            else
+                acc += 2 * log_next - log_n
+            end
+            log_next = log_n
+        end
+        total += acc - (i - 1) * log_next + (K - i) * (log_ii - log_next)
+    end
+    total
+end
+
+# Writes the unconstrained Cholesky coordinates of the packed factor `F`,
+# `atanh(z)` with `z[i,l] = F[i,l] / n[i,l]` (`n` as above), spelled
+# `sign(F) * log((n[i,l] + |F|) / n[i,l+1])`: rounding `z` to `±1` first would
+# turn a nearly singular correlation into an infinite coordinate.
+function _write_cholesky_coordinates!(y, block, F, K)
+    for i in 2:K
+        offset = (i - 1) * (i - 2) ÷ 2
+        suffix = F[_tri(i, i)] * F[_tri(i, i)]
+        for l in i-1:-1:1
+            f = F[_tri(i, l)]
+            rest = sqrt(suffix)
+            suffix += f * f
+            y[block.cholesky_free[offset + l]] = copysign(log((sqrt(suffix) + abs(f)) / rest), f)
+        end
+    end
+    y
+end
+
+function _is_declared_order(order, K)
+    for j in 1:K
+        order[j] == j || return false
+    end
+    true
+end
+
+# Margins in descending control; ties by `tiebreak` (default: declaration
+# order).
+_learned_order(controls, tiebreak=eachindex(controls)) =
+    sortperm(collect(eachindex(controls)); by=k -> (-controls[k], tiebreak[k]))
+
+function _derive_orders!(ir::BRMOrderedCenteringReparametrization)
+    state = ir.state.ranef
+    for (bi, block) in enumerate(state.blocks)
+        K, G = block.ranef.n_terms, block.ranef.n_groups
+        lookup = state.pair_lookup[bi]
+        controls = [state.sources[lookup[k, g]] for k in 1:K, g in 1:G]
+        block_order = _learned_order(vec(sum(controls; dims=2)) ./ G)
+        position = invperm(block_order)
+        order = reduce(hcat, [_learned_order(controls[:, g], position) for g in 1:G];
+                       init=zeros(Int, K, 0))
+        members = Dict{Vector{Int},Vector{Int}}()
+        distinct = Vector{Int}[]
+        for g in 1:G
+            key = order[:, g]
+            haskey(members, key) || push!(distinct, key)
+            push!(get!(members, key, Int[]), g)
+        end
+        ir.orders[bi] = order
+        ir.perms[bi] = reduce(hcat, distinct; init=zeros(Int, K, 0))
+        ir.starts[bi] = cumsum(vcat(1, [length(members[key]) for key in distinct]))
+        ir.groups[bi] = reduce(vcat, (members[key] for key in distinct); init=Int[])
+        ir.block_orders[bi] = block_order
+        ir.positions[bi] = position
+        ir.rows[bi] = reduce(hcat, [position[key] for key in distinct];
+                             init=zeros(Int, K, 0))
+        ir.kinds[bi] = [key == 1:K ? 0 : key == block_order ? 1 : 2 for key in distinct]
+    end
+    ir
+end
+
+function _adaptive_ordered_centering_reparametrizer(
+        blocks, hsgp_blocks, r2d2_blocks=BRM.R2D2AdaptiveCenteringBlock[],
+        scalar_cells=_NO_SCALAR_CELLS)
+    state = _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells)
+    n = length(state.ranef.blocks)
+    matrices() = [Matrix{Int}(undef, 0, 0) for _ in 1:n]
+    vectors() = [Int[] for _ in 1:n]
+    ir = BRMOrderedCenteringReparametrization(state, _joint_targets(state, scalar_cells),
+        matrices(), matrices(), vectors(), vectors(), vectors(), vectors(), matrices(),
+        vectors(), 1)
+    state, _derive_orders!(ir)
+end
+
+# One group of one block, source -> compiled. Every source value is read before
+# any output is written, so `y === x` is safe.
+function _ordered_group_forward!(y, x, state, block, lookup, g, C, Cp, perms, q,
+                                 declared, ::Val{KMAX}) where {KMAX}
+    T = eltype(x)
+    K = block.ranef.n_terms
+    t = block.target_c
+    u = ntuple(_ -> zero(T), Val(KMAX))
+    for k in 1:K
+        u = _tset(u, x[block.effects[k, g]], k)
+    end
+    w = ntuple(_ -> zero(T), Val(KMAX))
+    b = ntuple(_ -> zero(T), Val(KMAX))
+    ljac = zero(T)
+    for j in 1:K
+        a = perms[j, q]
+        c = state.sources[lookup[a, g]]
+        m = zero(T)
+        for i in 1:j-1
+            m += Cp[_tri(j, i)] * w[i]
+        end
+        s = Cp[_tri(j, j)]
+        w = _tset(w, (u[a] - c * m) / s^c, j)
+        if declared
+            # WarmupHMC's per-pair spelling (`warmuphmc-use` §5c), so the
+            # declared order reproduces the per-pair wrapper.
+            log_scale = log(s)
+            y[block.effects[a, g]] = t * m + (u[a] - c * m) * exp(log_scale * (t - c))
+            ljac += log_scale * (t - c)
+        else
+            b = _tset(b, m + s * w[j], a)
+            ljac += (1 - c) * log(s)
+        end
+    end
+    declared && return ljac
+    # Effects -> the compiled declared-order frame at `target_c`.
+    z = ntuple(_ -> zero(T), Val(KMAX))
+    for k in 1:K
+        m = zero(T)
+        for l in 1:k-1
+            m += C[_tri(k, l)] * z[l]
+        end
+        s = C[_tri(k, k)]
+        z = _tset(z, (b[k] - m) / s, k)
+        y[block.effects[k, g]] = t * m + s^t * z[k]
+        ljac += (t - 1) * log(s)
+    end
+    ljac
+end
+
+# One group of one block, compiled -> source; the exact inverse of
+# `_ordered_group_forward!`.
+function _ordered_group_inverse!(y, x, state, block, lookup, g, C, Cp, perms, q,
+                                 declared, ::Val{KMAX}) where {KMAX}
+    T = eltype(x)
+    K = block.ranef.n_terms
+    t = block.target_c
+    v = ntuple(_ -> zero(T), Val(KMAX))
+    for k in 1:K
+        v = _tset(v, x[block.effects[k, g]], k)
+    end
+    # The compiled frame -> innovations `z` and effects `b`, declared order.
+    z = ntuple(_ -> zero(T), Val(KMAX))
+    b = ntuple(_ -> zero(T), Val(KMAX))
+    ljac = zero(T)
+    for k in 1:K
+        m = zero(T)
+        for l in 1:k-1
+            m += C[_tri(k, l)] * z[l]
+        end
+        s = C[_tri(k, k)]
+        z = _tset(z, (v[k] - t * m) / s^t, k)
+        if declared
+            c = state.sources[lookup[k, g]]
+            log_scale = log(s)
+            y[block.effects[k, g]] = c * m + (v[k] - t * m) * exp(log_scale * (c - t))
+            ljac += log_scale * (c - t)
+        else
+            b = _tset(b, m + s * z[k], k)
+            ljac += (1 - t) * log(s)
+        end
+    end
+    declared && return ljac
+    w = ntuple(_ -> zero(T), Val(KMAX))
+    for j in 1:K
+        a = perms[j, q]
+        c = state.sources[lookup[a, g]]
+        m = zero(T)
+        for i in 1:j-1
+            m += Cp[_tri(j, i)] * w[i]
+        end
+        s = Cp[_tri(j, j)]
+        w = _tset(w, (b[a] - m) / s, j)
+        y[block.effects[a, g]] = c * m + s^c * w[j]
+        ljac += (c - 1) * log(s)
+    end
+    ljac
+end
+
+function _ordered_block_map!(y, x, ir::BRMOrderedCenteringReparametrization{N},
+                             bi) where {N}
+    state = ir.state.ranef
+    block = state.blocks[bi]
+    K = block.ranef.n_terms
+    lookup = state.pair_lookup[bi]
+    perms = ir.perms[bi]
+    starts = ir.starts[bi]
+    groups = ir.groups[bi]
+    rows = ir.rows[bi]
+    kinds = ir.kinds[bi]
+    block_order = ir.block_orders[bi]
+    reordered = !_is_declared_order(block_order, K)
+    # `C`: the declared-order factor of the compiled frame; `Cs`: the block-order
+    # factor of the source frame, whose Cholesky coordinates are permuted.
+    if ir.direction > 0
+        Cs = _packed_block_cholesky(x, block, block_order, Val(N + 1))
+        C = reordered ? _permuted_cholesky(Cs, ir.positions[bi], K, Val(N + 1)) : Cs
+    else
+        C = _packed_block_cholesky(x, block, Base.OneTo(K), Val(N + 1))
+        Cs = reordered ? _permuted_cholesky(C, block_order, K, Val(N + 1)) : C
+    end
+    ljac = zero(eltype(x))
+    if reordered
+        from, to = ir.direction > 0 ? (Cs, C) : (C, Cs)
+        _write_cholesky_coordinates!(y, block, to, K)
+        ljac += _correlation_logjac(from, K) - _correlation_logjac(to, K)
+    end
+    for q in axes(perms, 2)
+        declared = kinds[q] == 0
+        Cp = declared ? C : kinds[q] == 1 ? Cs :
+            _permuted_cholesky(Cs, view(rows, :, q), K, Val(N + 1))
+        for r in starts[q]:starts[q + 1] - 1
+            ljac += ir.direction > 0 ?
+                _ordered_group_forward!(y, x, state, block, lookup, groups[r], C, Cp,
+                                        perms, q, declared, Val(N + 1)) :
+                _ordered_group_inverse!(y, x, state, block, lookup, groups[r], C, Cp,
+                                        perms, q, declared, Val(N + 1))
+        end
+    end
+    ljac
+end
+
+# WarmupHMC's per-pair partially centred map (`warmuphmc-use` §5c),
+# `y = t*loc + (x - c*loc) * exp(log_scale * (t - c))`; its inverse swaps `t`
+# and `c`.
+function _cell_map!(y, x, idx, location, log_scale, target, source, direction)
+    from, to = direction > 0 ? (source, target) : (target, source)
+    y[idx] = to * location + (x[idx] - from * location) * exp(log_scale * (to - from))
+    log_scale * (to - from)
+end
+
+function WarmupHMC.with_logabsdet_jacobian!(y::AbstractVector,
+        ir::BRMOrderedCenteringReparametrization, x::AbstractVector)
+    s = ir.state
+    ljac = zero(eltype(x))
+    for bi in eachindex(s.ranef.blocks)
+        ljac += _ordered_block_map!(y, x, ir, bi)
+    end
+    offset = s.n_ranef + s.n_r2d2
+    for p in eachindex(s.hsgp.sources)
+        bi, basis = _hsgp_pair_location(s.hsgp, p)
+        block = s.hsgp.blocks[bi]
+        ljac += _cell_map!(y, x, block.effects[basis], zero(eltype(x)),
+            BRM._adaptive_hsgp_log_scale(x, block, basis), ir.targets[offset + p],
+            s.hsgp.sources[p], ir.direction)
+    end
+    offset += s.n_hsgp
+    for p in eachindex(s.scalar.sources)
+        ljac += _cell_map!(y, x, s.scalar.indices[p], s.scalar.locations[p],
+            x[s.scalar.scales[p]], ir.targets[offset + p], s.scalar.sources[p],
+            ir.direction)
+    end
+    ljac, y
+end
+
+WarmupHMC.InverseFunctions.inverse(ir::BRMOrderedCenteringReparametrization) =
+    BRMOrderedCenteringReparametrization(ir.state, ir.targets, ir.orders, ir.perms,
+        ir.starts, ir.groups, ir.block_orders, ir.positions, ir.rows, ir.kinds,
+        -ir.direction)
+
+WarmupHMC.reparam_controls(ir::BRMOrderedCenteringReparametrization) =
+    vcat(ir.state.ranef.sources, ir.state.hsgp.sources, ir.state.scalar.sources)
+
+function WarmupHMC.restore_reparam_controls!(ir::BRMOrderedCenteringReparametrization,
+                                             controls)
+    s = ir.state
+    sources = (s.ranef.sources, s.hsgp.sources, s.scalar.sources)
+    n = sum(length, sources)
+    controls isa AbstractVector && length(controls) == n || throw(ArgumentError(
+        "BRM learned-order centering controls must be one value per adaptive " *
+        "cell ($n), in the joint pair order"))
+    all(c -> c isa Real && isfinite(c) && 0 <= c <= 1, controls) ||
+        throw(ArgumentError("centeredness values must lie in [0,1]"))
+    offset = 0
+    for v in sources
+        v .= controls[offset .+ eachindex(v)]
+        offset += length(v)
+    end
+    _derive_orders!(ir)
+end
+
+# Every cell's frame at one source-frame draw, in joint pair order: ranef cells
+# in the current learned order, the rest in their per-cell frames.
+_ordered_frame(ir::BRMOrderedCenteringReparametrization, position, gradient) =
+    _centering_frame(ir.state, position, gradient, ir)
+
+# Group `g`'s permuted factor at a source-frame position, packed (the map's
+# `Cp`, outside AD).
+function _source_group_factor(position, ir::BRMOrderedCenteringReparametrization{N},
+                              bi, g) where {N}
+    block = ir.state.ranef.blocks[bi]
+    K = block.ranef.n_terms
+    Cs = _packed_block_cholesky(position, block, ir.block_orders[bi], Val(N + 1))
+    rows = ir.positions[bi][ir.orders[bi][:, g]]
+    rows == 1:K ? Cs : _permuted_cholesky(Cs, rows, K, Val(N + 1))
+end
+
+const _CENTERING_CANDIDATES = range(0.0, 1.0; length=11)
+
+# The learned-order wrapper's window rule. Each cell scores WarmupHMC's 11
+# candidates `c = 0:0.1:1` with WarmupHMC's default criterion, the
+# position-gradient correlation `Cor(q_t, g_t)` over the window's equally
+# weighted evidence (`warmuphmc-use` §5d), from the same source-invariant frame
+# the per-pair wrapper scores (`_score_candidate`), random-effect cells in their
+# current learned order. The lowest finite loss wins; a cell with no finite loss
+# keeps its control. The order is then re-derived from the new controls.
+function _ordered_select!(ir::BRMOrderedCenteringReparametrization, positions,
+                          gradients)
+    n = size(positions, 2)
+    n > 2 || return false
+    old = WarmupHMC.reparam_controls(ir)
+    candidates = [WarmupHMC.PartiallyCentered(t) for t in _CENTERING_CANDIDATES]
+    shape = (length(candidates), length(old))
+    mean_q, mean_g = zeros(shape), zeros(shape)
+    qq, gg, qg = zeros(shape), zeros(shape), zeros(shape)
+    # Two passes over the evidence: means, then centred moments.
+    for pass in 1:2, col in 1:n
+        frame = _ordered_frame(ir, positions[:, col], gradients[:, col])
+        for p in eachindex(old), (i, t) in enumerate(candidates)
+            _, q, g = _score_candidate(frame, p, 0, nothing, t)
+            if pass == 1
+                mean_q[i, p] += q / n
+                mean_g[i, p] += g / n
+            else
+                dq, dg = q - mean_q[i, p], g - mean_g[i, p]
+                qq[i, p] += dq * dq
+                gg[i, p] += dg * dg
+                qg[i, p] += dq * dg
+            end
+        end
+    end
+    new = copy(old)
+    for p in eachindex(old)
+        losses = [qg[i, p] / sqrt(qq[i, p] * gg[i, p]) for i in axes(qg, 1)]
+        finite = findall(isfinite, losses)
+        isempty(finite) && continue
+        new[p] = _CENTERING_CANDIDATES[finite[argmin(losses[finite])]]
+    end
+    new == old && return false
+    WarmupHMC.restore_reparam_controls!(ir, new)
+    true
+end
+
+function _ordered_centering_problem(ir, problem, ad_backend, centeredness)
+    controls = _initial_controls(centeredness, length(WarmupHMC.reparam_controls(ir)))
+    isnothing(controls) || WarmupHMC.restore_reparam_controls!(ir, controls)
+    plan = WarmupHMC.WindowSelectionPlan(_ordered_select!; synchronize! = _derive_orders!)
+    WarmupHMC.ReparametrizedProblem(ir, problem, ad_backend; scoring_plan=plan)
 end
 
 # cdar walk cells are scalar zero-location cells like HSGP basis weights, so
@@ -1000,12 +1534,18 @@ function _adaptive_s2z_fisher_problem(model, problem, ad_backend, names; centere
     WarmupHMC.ReparametrizedProblem(ir, problem, ad_backend; scoring_plan=plan)
 end
 
-function _initial_centering!(state,ir,centeredness)
-    isnothing(centeredness) && return ir
-    values = centeredness isa Real ? fill(centeredness,length(ir.pairs)) : collect(centeredness)
-    length(values) == length(ir.pairs) || throw(DimensionMismatch("one centering value is required per adaptive coordinate"))
+function _initial_controls(centeredness, n)
+    isnothing(centeredness) && return nothing
+    values = centeredness isa Real ? fill(centeredness,n) : collect(centeredness)
+    length(values) == n || throw(DimensionMismatch("one centering value is required per adaptive coordinate"))
     all(c -> c isa Real && isfinite(c) && 0 <= c <= 1,values) ||
         throw(ArgumentError("centeredness values must lie in [0,1]"))
+    values
+end
+
+function _initial_centering!(state,ir,centeredness)
+    values = _initial_controls(centeredness,length(ir.pairs))
+    isnothing(values) && return ir
     ir.pairs .= [index => WarmupHMC.Reparametrization(value.target,
         WarmupHMC.PartiallyCentered(Float64(c)),value.args...)
         for ((index,value),c) in zip(ir.pairs,values)]
@@ -1014,7 +1554,8 @@ end
 
 """
     adaptive_centering_problem(model, problem, ad_backend;
-        unc_names=nothing, centeredness=nothing)
+        unc_names=nothing, centeredness=nothing, s2z_rule=:cells,
+        ranef_order=:declared)
 
 Wrap a compiled BRM log-density in WarmupHMC's strictly-online adaptive
 centering for exact total-coefficient blocks, S2Z free contrasts, ordinary
@@ -1108,16 +1649,41 @@ zero location and its marginal prior spread
 wrapper, whose pair order and checkpoint contract are already settled: a model
 mixing cdar cells with ordinary or HSGP cells fails before construction.
 
+A correlated block's triangular map centres each margin on its conditional mean
+given the margins before it. With the default `ranef_order=:declared`, that order
+is the order the block's margins are declared in the formula, so a data-poor
+margin declared before data-rich ones can never be non-centred *given* them,
+whatever its control. `ranef_order=:learned` instead re-derives every group's
+order from that group's controls: margins in descending `c`, ties in
+declaration order, so centred margins come first and each other margin is
+centred around its conditional mean given the margins ahead of it. One group
+may centre a margin that another keeps non-centred. Both compiled endpoints
+are supported; the density, Jacobian and priors stay exact, and returned draws
+stay in the compiled frame. Because the composite map is not per-coordinate,
+this wrapper is selected at each restarting warm-up window
+(`WarmupHMC.WindowSelectionPlan`) instead of WarmupHMC's online per-cell
+scoring. Every cell, HSGP, total and S2Z cells included, then scores the same
+11 candidates with WarmupHMC's default position-gradient correlation over the
+window's evidence (see `nonlinear_evidence` in warmuphmc-use), and keeps the
+lowest finite loss. Controls, `centeredness` and checkpoints keep the joint pair
+order above; the order is a function of the controls. A model without a
+correlated block (at least two margins) has nothing to order and gets exactly
+the `:declared` wrapper. [`adaptive_centering_controls`](@ref) reports every
+cell's control and, for random-effect cells, its place in the current order.
+
 This changes coordinates, not the statistical model or its priors. Conditional
 on a block's `C = diag(tau) * L`, an intermediate source coordinate is Gaussian
 with covariance `A(c) * A(c)'` whenever the block innovation is standard normal;
 the wrapped density and Jacobian still represent the original BRM prior exactly.
 """
 function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=nothing,
-                                       centeredness=nothing, s2z_rule=:cells)
+                                       centeredness=nothing, s2z_rule=:cells,
+                                       ranef_order=:declared)
     names = isnothing(unc_names) ? _problem_unc_names(problem) : unc_names
     s2z_rule in (:cells, :fisher) ||
         throw(ArgumentError("s2z_rule must be :cells or :fisher"))
+    ranef_order in (:declared, :learned) ||
+        throw(ArgumentError("ranef_order must be :declared or :learned"))
     if s2z_rule === :fisher
         isempty(BRM.s2z_effect_blocks(model)) &&
             throw(ArgumentError("s2z_rule=:fisher needs S2Z blocks"))
@@ -1162,6 +1728,13 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
         b for b in blocks if b isa BRM.AdaptiveCenteringBlock]
     r2d2_blocks = BRM.R2D2AdaptiveCenteringBlock[
         b for b in blocks if b isa BRM.R2D2AdaptiveCenteringBlock]
+    # cdar cells never share a wrapper; the branch below refuses the mix.
+    if ranef_order === :learned && isempty(cdar_blocks) &&
+            any(b -> b.ranef.n_terms > 1, blocks)
+        _, ir = _adaptive_ordered_centering_reparametrizer(ordinary, hsgp_blocks,
+            r2d2_blocks, scalar ? _scalar_centering_cells(model, names) : _NO_SCALAR_CELLS)
+        return _ordered_centering_problem(ir, problem, ad_backend, centeredness)
+    end
     state, ir = if !isempty(cdar_blocks)
         (isempty(blocks) && isempty(hsgp_blocks)) || error(
             "BRM adaptive centering: a single online plan cannot yet mix " *
@@ -1190,6 +1763,108 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
     WarmupHMC.ReparametrizedProblem(
         ir, problem, ad_backend; scoring_plan=plan,
     )
+end
+
+# ---- Controls report --------------------------------------------------------
+
+_centering_state(ir::WarmupHMC.IndexedReparametrization) =
+    isempty(ir.pairs) ? nothing : first(ir.pairs).second.args[1].state
+_centering_state(ir::BRMOrderedCenteringReparametrization) = ir.state
+_centering_state(::BRMS2ZMapReparametrization) = throw(ArgumentError(
+    "adaptive_centering_controls: an `s2z_rule=:fisher` wrapper has one J-by-K " *
+    "weight matrix per S2Z block, not per-cell controls; read them with " *
+    "`WarmupHMC.reparam_controls(adaptive.reparametrizer)`"))
+
+_centering_orders(::WarmupHMC.IndexedReparametrization) = nothing
+_centering_orders(ir::BRMOrderedCenteringReparametrization) = ir.orders
+
+_centering_values(ir::WarmupHMC.IndexedReparametrization) =
+    ([last(p).source.c for p in ir.pairs], [last(p).target.c for p in ir.pairs])
+_centering_values(ir::BRMOrderedCenteringReparametrization) =
+    (WarmupHMC.reparam_controls(ir), ir.targets)
+
+_control_row(cell, index, names, family; binding=nothing, group=nothing,
+             margin=nothing, level=nothing, term=nothing, rank=nothing, c, target) =
+    (; cell, index, name=names[index], family, binding, group, margin, level, term,
+       rank, c=Float64(c), target=Float64(target))
+
+function _control_rows!(rows, state::_BRMRanefCenteringState, orders, offset, values,
+                        names, margins)
+    controls, targets = values
+    for p in eachindex(state.sources)
+        bi, k, g = _pair_location(state, p)
+        ranef = state.blocks[bi].ranef
+        labels = get(margins, ranef.binding, ())
+        push!(rows, _control_row(offset + p, state.blocks[bi].effects[k, g], names,
+            :ranef; binding=ranef.binding, group=ranef.group,
+            margin=length(labels) == ranef.n_terms ? labels[k] : nothing,
+            level=ranef.levels[g], term=k,
+            rank=isnothing(orders) ? k : findfirst(==(k), view(orders[bi], :, g)),
+            c=controls[offset + p], target=targets[offset + p]))
+    end
+    offset + length(state.sources)
+end
+
+function _control_rows!(rows, state::BRMHSGPAdaptiveCenteringState, _, offset, values,
+                        names, _)
+    controls, targets = values
+    for p in eachindex(state.sources)
+        bi, basis = _hsgp_pair_location(state, p)
+        block = state.blocks[bi]
+        push!(rows, _control_row(offset + p, block.effects[basis], names, :hsgp;
+            binding=block.logical, margin=(; predictor=block.logical,
+            coefficient=block.term), term=basis, c=controls[offset + p],
+            target=targets[offset + p]))
+    end
+    offset + length(state.sources)
+end
+
+function _control_rows!(rows, state::BRMScalarCenteringState, _, offset, values,
+                        names, _)
+    controls, targets = values
+    for p in eachindex(state.sources)
+        push!(rows, _control_row(offset + p, state.indices[p], names, :scalar;
+            c=controls[offset + p], target=targets[offset + p]))
+    end
+    offset + length(state.sources)
+end
+
+function _control_rows!(rows, state::BRMCDARAdaptiveCenteringState, _, offset, values,
+                        names, _)
+    controls, targets = values
+    for p in eachindex(state.sources)
+        bi, cell = _cdar_pair_location(state, p)
+        block = state.blocks[bi]
+        push!(rows, _control_row(offset + p, block.effects[cell], names, :cdar;
+            binding=block.logical, margin=(; predictor=block.logical,
+            coefficient=block.term), term=cell, c=controls[offset + p],
+            target=targets[offset + p]))
+    end
+    offset + length(state.sources)
+end
+
+function _control_rows!(rows, state::BRMJointAdaptiveCenteringState, orders, offset,
+                        values, names, margins)
+    offset = _control_rows!(rows, state.ranef, orders, offset, values, names, margins)
+    offset = _control_rows!(rows, state.hsgp, nothing, offset, values, names, margins)
+    _control_rows!(rows, state.scalar, nothing, offset, values, names, margins)
+end
+
+_control_margins(model::Union{BRM.GenerativePlan,BRM.SBBRMI}) =
+    Dict(m.block.binding => m.margins
+         for m in BRM._brmd_ranef_metadata(BRM.brm_descriptor(model)))
+_control_margins(_) = Dict{Symbol,Tuple}()
+
+function BRM.adaptive_centering_controls(adaptive::WarmupHMC.ReparametrizedProblem,
+                                         model; unc_names=nothing)
+    ir = adaptive.reparametrizer
+    state = _centering_state(ir)
+    rows = NamedTuple[]
+    isnothing(state) && return rows
+    names = isnothing(unc_names) ? _problem_unc_names(adaptive.problem) : unc_names
+    _control_rows!(rows, state, _centering_orders(ir), 0, _centering_values(ir), names,
+                   _control_margins(model))
+    rows
 end
 
 end # module
