@@ -59,7 +59,7 @@ end
             saved = copy(u)
             before = Base.invokelatest(native, u)
             checked = brm_check_coordinate_transport(transport, rk, stan.model, u)
-            @test keys(checked) == (:pairs, :factors, :simplexes, :max_error)
+            @test keys(checked) == (:pairs, :factors, :simplexes, :centered, :max_error)
             @test checked.pairs == count(p -> p.relation !== :cholesky, transport.pairs)
             @test checked.factors == 1
             @test checked.max_error <= 1e-12
@@ -74,21 +74,27 @@ end
             @test isequal(u, saved)
             @test rk.model === built
         end
-        # Different parameterizations cannot be compared using a permutation
+        # A centered Stan program maps exactly onto the retained build, but
+        # never by a permutation: a permutation-only comparison stays refused
         # (reporter's explicit permutation-only comparison requirement).
         centered = SBBRMI(brmi; mod=@__MODULE__, total_groups=(),
             centered_groups=[:subject], held_out)
         centered_stan = BRM.stan_instantiate(centered; path=joinpath(tempdir(),
             "brm-coordinate-transport", "retained-centered-$(held_out === () ? "all" : "y2").stan"))
-        err = try
-            brm_coordinate_transport(rk, centered,
-                BridgeStan.param_unc_names(centered_stan.model))
-        catch e
-            e
-        end
-        @test err isa BRMCoordinateTransportError
-        @test err.reason === :parameterization_mismatch
-        @test occursin("is centered", sprint(showerror, err))
+        mapped = brm_coordinate_transport(rk, centered,
+            BridgeStan.param_unc_names(centered_stan.model))
+        @test length(mapped.centered) == 2
+        u = collect(range(-0.43,0.51; length=built.layout.total))
+        checked = brm_check_coordinate_transport(mapped, rk, centered_stan.model, u)
+        @test checked.centered == 2
+        @test checked.max_error <= 1e-12
+        gradient = similar(u)
+        value, _ = sampler_value_and_gradient!(query, gradient, u)
+        sv, sg = BridgeStan.log_density_gradient(centered_stan.model,
+            brm_rk_point_to_stan(mapped, u); propto=false, jacobian=true)
+        @test value ≈ brm_stan_logdensity_to_rk(mapped, u, sv) atol=2e-11 rtol=2e-11
+        @test gradient ≈ brm_stan_gradient_to_rk(mapped, u, sg) atol=2e-10 rtol=2e-10
+        @test_throws "do not move by one permutation" brm_rk_to_stan(mapped, u)
 
         # Input errors must not masquerade as unsupported model coverage.
         invalid = try

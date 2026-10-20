@@ -167,6 +167,17 @@ function BRM._rk_layout_coordinate_transforms(backend::BRM.RKBRMI)
         "without an entry")
     transforms
 end
+# Each packed coordinate's constrained lower bound under a `:floored`
+# transform (`lo + exp(u)`); `NaN` for other transforms or an unresolved bound.
+function BRM._rk_layout_coordinate_floors(backend::BRM.RKBRMI)
+    layout = backend.model.layout
+    floors = fill(NaN, layout.total)
+    for entry in layout.entries
+        entry.transform === :floored && entry.lo isa Real &&
+            (floors[entry.offset:(entry.offset + entry.size - 1)] .= entry.lo)
+    end
+    floors
+end
 BRM._rk_constrained_values(backend::BRM.RKBRMI, u::AbstractVector) =
     constrain(backend.model.layout, u)
 BRM._rk_unconstrained_point(backend::BRM.RKBRMI, values::NamedTuple) =
