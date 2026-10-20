@@ -2160,9 +2160,11 @@ function _brm_population_columns(term::ExprColumn{typeof(factor)};
     all(k -> k === :ref || k === :cmc, keys(kwargs)) || return nothing
     ref_raw = get(kwargs, :ref, 1)
     ref_raw isa Integer || return nothing
-    1 <= ref_raw <= maximum(raw_values) || error(
+    # The column's level set: a frozen SBBRMI re-emission supplies the fitted one.
+    max_level = maximum(_brm_fit_levels(raw_values))
+    1 <= ref_raw <= max_level || error(
         "BRM backend lowering: `factor($(name(inner)); ref=$ref_raw)` ref " *
-        "out of range (max level $(maximum(raw_values)))")
+        "out of range (max level $max_level)")
 
     source = name(inner)
     block = ref_raw == 1 ? source : Symbol(source, :__ref_, ref_raw)

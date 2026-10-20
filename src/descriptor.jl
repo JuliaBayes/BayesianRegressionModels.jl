@@ -227,13 +227,19 @@ BRM adds:
   `s`, `t2`, `gp`, `me`, `ar` and `interval_censored` terms have no public
   parameter roles, and neither do an R2D2 prior's `R²` and simplex: their
   outputs carry `predictors` (and `term`) but no component.
-- `dims` — the resolved length of each axis of `size` (`()` for a scalar), or
-  `nothing` when BRM cannot resolve one. A literal size and a size naming a
-  data input resolve from the bound data; a categorical predictor's contrast
-  (or cell-mean) vector resolves from its frozen level set. A `0` marks a
-  carrier with no elements — a one-level treatment factor's contrasts, a
-  one-level ordinal outcome's thresholds — which BridgeStan lists under no
-  name, so [`brm_output_coordinates`](@ref) returns `Int[]` for it.
+- `dims` — the shape of the output's value (`()` for a scalar): StanBlocks'
+  `ModelOutput.dims`, its declared size evaluated against the bound data,
+  composite sizes and transformed-data values included. `prod(dims)` is the
+  number of names BridgeStan lists for the output, and a one-size square
+  matrix has both axes (`cholesky_factor_corr[K]` reports `(K, K)`), so
+  `dims` and `size` need not have the same length. A categorical predictor's
+  contrast or cell-mean width from its frozen level set cross-checks it. It
+  is `nothing` for a hand-assembled output and under a StanBlocks that
+  publishes no `dims`; BRM needs StanBlocks `f175dd6` or later, where `dims`
+  is the value shape. A `0` marks a carrier with no elements — a
+  one-level treatment factor's contrasts, a one-level ordinal outcome's
+  thresholds — which BridgeStan lists under no name, so
+  [`brm_output_coordinates`](@ref) returns `Int[]` for it.
 - `predictors` — the formula linear predictors whose terms own this output,
   by their public names (`:Vc` for `log(Vc) ~ …`), in formula order, or `()`
   for an output no formula term owns (an ordinary prior such as `sigma`, an
@@ -1615,31 +1621,37 @@ function _brm_ranef_components(outputs, plan, stan)
               for o in outputs]
 end
 
-# Each output's resolved axis lengths, `BRMOutput.dims`. StanBlocks publishes
-# `size` as the declared expressions: a literal or a data input's name resolves
-# against the bound data block, but a composite expression has no public
-# resolver (snag `StanBlocks/snags/stan-descriptor-aa56f7f3`). The composite
-# BRM emits for a categorical predictor's contrast or cell-mean vector
-# (`n_levels - 1` / `n_levels`) resolves from the frozen level set that drove
-# that emission, the count `brm_population_effect_coordinates` checks. Any
-# other unresolved axis leaves `dims === nothing`, so `brm_output_coordinates`
-# keeps reporting a carrier absent from the names as drift.
+# Each output's value shape, `BRMOutput.dims`: StanBlocks' `ModelOutput.dims`,
+# evaluated against the bound data, transformed data and ragged-plate layouts
+# (snags `StanBlocks/snags/stan-descriptor-aa56f7f3` and
+# `StanBlocks/snags/modeloutput-dims-5ab23309`), so `prod(dims)` is the output's
+# BridgeStan name count. StanBlocks is the one source. The width BRM gives a
+# categorical predictor's contrast or cell-mean vector from the frozen level set
+# that drove its emission (the count `brm_population_effect_coordinates`
+# checks) cross-checks it. A StanBlocks that predates `dims` leaves every
+# `dims === nothing` (guarded by `hasproperty`, as `_brm_output_segments` is),
+# so `brm_output_coordinates` keeps reporting a carrier absent from the names as
+# drift.
 function _brm_output_dims(outputs, plan, stan)
-    values = Dict{Symbol,Any}(i.name => i.value for i in stan.inputs)
-    categorical = nothing
+    published = Dict{Symbol,Any}(o.name => _brm_published_dims(o) for o in stan.outputs)
+    categorical = _brm_categorical_carrier_dims(plan)
     resolved = BRMOutput[]
     for o in outputs
-        dims = _brm_resolved_dims(values, o.size)
-        if isnothing(dims) && any(x -> !(x isa Union{Integer,Symbol}), o.size)
-            isnothing(categorical) && (categorical = _brm_categorical_carrier_dims(plan))
-            dims = get(categorical, o.name, nothing)
-        end
+        dims = get(published, o.name, nothing)
+        width = get(categorical, o.name, nothing)
+        isnothing(dims) || isnothing(width) || dims == width || error(
+            "brm_descriptor: StanBlocks resolves output `$(o.name)` (declared ",
+            "size `$(o.size)`) to dims $dims, but its categorical predictor's ",
+            "frozen levels give $width. The two must agree on the element count.")
         push!(resolved, BRMOutput(o.name, o.kind, o.type, o.size, o.constraints,
                                   o.generative, o.source, o.role, o.declaration,
                                   o.logical, o.labels, o.segments, o.component, dims))
     end
     resolved
 end
+
+_brm_published_dims(o) =
+    hasproperty(o, :dims) ? Tuple(Int(x) for x in getproperty(o, :dims)) : nothing
 
 function _brm_categorical_carrier_dims(plan)
     dims = Dict{Symbol,Tuple{Int}}()
@@ -1749,13 +1761,13 @@ function _brm_output_addresses(outputs, plan)
     end
 
     # A grouped term's per-group latent block (`hsgp(...; by=g)`'s basis
-    # weights) is allocated beside the term from the same formula walk the
-    # emitter runs (`_sb_collect_group_block_terms`), as a `zflat_<field>_<g>`
-    # draw reshaped into `b_<field>_<g>` (`_sb_emit_group_blocks!`).
+    # weights) is allocated beside the term from the same block plan the
+    # emitter reads (`_sb_group_block_plan`), as a `zflat_<suffix>` draw
+    # reshaped into `b_<suffix>` (`_sb_emit_group_blocks!`).
     lp_names = Set{Symbol}(e.logical for e in _brm_population_effect_entries(brmi))
-    for gb in _sb_collect_group_block_terms(brmi), field in gb.fields
+    for gb in _sb_group_block_plan(_sb_collect_group_block_terms(brmi))
         gb.key in lp_names || continue
-        suffix = Symbol(field.name, :_, _sb_group_name(field.group, gb.rhs_e))
+        suffix = gb.suffix
         term = _brm_term_label(gb.f, gb.rhs_e)
         for key in (Symbol(:b_, suffix), Symbol(:zflat_, suffix))
             own!(key, gb.key)
@@ -2352,16 +2364,20 @@ _brm_term_label(::typeof(mo), t) =
     Symbol(:mo_, name(_sb_named_inner(:mo, only(getargs(t)))))
 _brm_term_label(::typeof(mo1), t) =
     Symbol(:mo1_, name(_sb_named_inner(:mo1, only(getargs(t)))))
-function _brm_term_label(::typeof(hsgp), t)
-    axes = Tuple(name(_sb_named_inner(:hsgp, a)) for a in getargs(t))
-    suffix = join(string.(axes), "_")
+_brm_hsgp_axes_suffix(t) =
+    join((string(name(_sb_named_inner(:hsgp, a))) for a in getargs(t)), "_")
+# `_by_<g>` for a grouped `hsgp(...; by=g)`, else empty: the fixed ending of
+# its label and of its carrier, predictor-scoped or not.
+function _brm_hsgp_label_tail(t)
     kw = getkwargs(t)
-    haskey(kw, :by) || return Symbol(:hsgp_, suffix)
+    haskey(kw, :by) || return ""
     group = _as_named_column(kw.by)
     isnothing(group) && error(
         "brm_descriptor: `hsgp(...; by=...)` group is not a named column.")
-    Symbol(:hsgp_, suffix, :_by_, name(group))
+    string("_by_", name(group))
 end
+_brm_term_label(::typeof(hsgp), t) =
+    Symbol(:hsgp_, _brm_hsgp_axes_suffix(t), _brm_hsgp_label_tail(t))
 _brm_term_label(f, t) = _sb_term_key(t)
 _brm_term_label(f, t, _target) = _brm_term_label(f, t)
 _brm_term_label(::typeof(dar), t, target) =
@@ -2388,8 +2404,8 @@ _brm_term_owner_labels(::typeof(mo1), t, target) =
      _brm_term_label(mo1, t))
 function _brm_term_owner_labels(::typeof(hsgp), t, target)
     base = _brm_term_label(hsgp, t)
-    axes = Tuple(name(_sb_named_inner(:hsgp, a)) for a in getargs(t))
-    scoped = Symbol(:hsgp_, target, :_, join(string.(axes), "_"))
+    scoped = Symbol(:hsgp_, target, :_, _brm_hsgp_axes_suffix(t),
+                    _brm_hsgp_label_tail(t))
     scoped === base ? (base,) : (scoped, base)
 end
 # The other structured terms are labelled by their formula spelling
@@ -2438,7 +2454,7 @@ _brm_term_parameter_bindings(::typeof(mo1), _t) =
 function _brm_term_parameter_bindings(::typeof(hsgp), t)
     rho = _sb_gp_iso(getkwargs(t), :hsgp) ? :rho_iso : :rho
     haskey(getkwargs(t), :by) && return (; length_scale=rho, sd=:sigma)
-    n_basis = _brm_term_coordinate_count(hsgp, t, Val(:basis_weights), nothing, nothing)
+    n_basis = _brm_term_coordinate_count(hsgp, t, Val(:basis_weights), nothing)
     partial = any(!iszero, _brm_hsgp_centeredness(getkwargs(t), n_basis))
     (; length_scale=rho, sd=:sigma,
        basis_weights=partial ? :beta_partial : :beta_raw)
@@ -2524,32 +2540,16 @@ function _brm_term_coordinate_entries(brmi, logical::Symbol)
     entries
 end
 
-# `values` maps data names to their bound values: the plan's data, or the
-# descriptor's StanBlocks inputs.
-_brm_resolved_dimension(values, x::Integer) = Int(x)
-_brm_resolved_dimension(values, x::Symbol) = begin
-    value = get(values, x, nothing)
-    value isa Integer ? Int(value) : nothing
-end
-_brm_resolved_dimension(_values, _x) = nothing
+_brm_output_coordinate_count(output::BRMOutput) =
+    isnothing(output.dims) ? nothing : prod(output.dims)
 
-function _brm_resolved_dims(values, size::Tuple)
-    dims = map(x -> _brm_resolved_dimension(values, x), size)
-    any(isnothing, dims) ? nothing : dims
-end
-
-function _brm_output_coordinate_count(plan, output::BRMOutput)
-    dims = _brm_resolved_dims(plan.data, output.size)
-    isnothing(dims) ? nothing : prod(dims)
-end
-
-_brm_term_coordinate_count(_f, _t, _parameter, plan, output) =
-    _brm_output_coordinate_count(plan, output)
-_brm_term_coordinate_count(::typeof(hsgp), t, ::Val{:length_scale}, _plan, _output) =
+_brm_term_coordinate_count(_f, _t, _parameter, output) =
+    _brm_output_coordinate_count(output)
+_brm_term_coordinate_count(::typeof(hsgp), t, ::Val{:length_scale}, _output) =
     _sb_gp_iso(getkwargs(t), :hsgp) ? 1 : length(getargs(t))
-_brm_term_coordinate_count(::typeof(hsgp), _t, ::Val{:sd}, _plan, _output) = 1
+_brm_term_coordinate_count(::typeof(hsgp), _t, ::Val{:sd}, _output) = 1
 function _brm_term_coordinate_count(::typeof(hsgp), t,
-                                    ::Val{:basis_weights}, _plan, _output)
+                                    ::Val{:basis_weights}, _output)
     kw = getkwargs(t)
     K, _ = _sb_hsgp_options(kw, length(getargs(t)))
     # The periodic basis carries a cosine AND a sine column per harmonic.
@@ -2635,7 +2635,7 @@ function brm_term_coordinates(d::BRMDescriptor, logical::Symbol,
 
     coordinates = _brm_element_coordinates(output, constrained_names)
     expected_count = _brm_term_coordinate_count(
-        getf(entry.value), entry.value, Val(parameter), d.plan, output)
+        getf(entry.value), entry.value, Val(parameter), output)
     if isnothing(expected_count)
         isempty(coordinates) && error(
             "brm_descriptor: term `$term` parameter role `$parameter` resolves " *

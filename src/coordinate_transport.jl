@@ -22,8 +22,9 @@
 A known boundary of the semantic [`brm_coordinate_transport`](@ref).
 `reason` is `:unsupported_coverage` when the semantic inventory does not cover
 the model, or `:parameterization_mismatch` when a known correspondence is not
-one of the transport's relations (for example, centered effects or exact-total
-blocks). `message::String` retains the diagnostic rendered by `showerror`.
+one of the transport's relations (for example, exact-total blocks or a
+reordered correlation factor). `message::String` retains the diagnostic
+rendered by `showerror`.
 
 Neither reason returns a partial map or permits a matched timing comparison.
 Other failures, including invalid inputs and failed physical checks, propagate
@@ -81,10 +82,12 @@ _rk_coordinate_records(plan) = _brm_transport_error(:unsupported_coverage,
     "no cross-backend coordinate inventory")
 
 # Implemented by `BayesianRegressionModelsReactiveKernelsExt`: the built
-# layout's coordinate names, each coordinate's layout transform, and the named
-# constrained values at a point.
+# layout's coordinate names, each coordinate's layout transform and the
+# constrained lower bound of a `:floored` one, and the named constrained values
+# at a point.
 function _rk_layout_coordinate_names end
 function _rk_layout_coordinate_transforms end
+function _rk_layout_coordinate_floors end
 function _rk_constrained_values end
 
 """
@@ -106,8 +109,9 @@ of the same [`BRMI`](@ref):
   `:exp` (the RK value is `exp` of the Stan value, e.g. a random-intercept
   scale against Stan's `log_scale`), `:cholesky` (a correlation-factor
   coordinate; the whole factors are compared, see
-  [`brm_check_coordinate_transport`](@ref)), or `:simplex` (one free
-  coordinate of a simplex block; see below);
+  [`brm_check_coordinate_transport`](@ref)), `:simplex` (one free
+  coordinate of a simplex block; see below), or `:centered` (one standardized
+  draw of a centered random-effect block; see below);
 - `stan_value` — the Stan constrained parameter name holding the physical
   value this coordinate parameterizes. It equals `stan` except inside a Stan
   array of vectors, whose unconstrained values BridgeStan stores array-major
@@ -121,6 +125,11 @@ coordinates: RK samples stick-breaking fractions `σ(u[j] + log(K-j))`, while
 Stan samples the inverse isometric log-ratio transform. Its `j`-th RK and Stan
 coordinates are paired only as block positions; the block moves through the
 nonlinear map recorded in [`BRMCoordinateTransport`](@ref)`.simplexes`.
+A `:centered` pair joins RK's standardized draw `z` of one (level, margin) with
+the effect `b` of the same (level, margin) that a centered SB block
+(`centered_groups`) samples. At each point `b = diag(tau) * L * z` per level,
+with that point's scales `tau` and correlation factor `L`, so the block moves
+through the map recorded in [`BRMCoordinateTransport`](@ref)`.centered`.
 """
 struct BRMCoordinatePair
     address::NamedTuple
@@ -157,11 +166,25 @@ equals Stan's normalized log density with Jacobian
 (`propto=false, jacobian=true`) plus this offset, because the two simplex
 transforms' log-Jacobians are `sum(log, x)` and `sum(log, x) + log(K)/2`.
 
-With no simplex block, `stan_u == rk_u[permutation]` for points and gradients
-alike ([`brm_rk_to_stan`](@ref), [`brm_stan_to_rk`](@ref)) and
-`logdensity_offset == 0`. With a simplex block, points and gradients move
-differently: use [`brm_rk_point_to_stan`](@ref),
-[`brm_stan_point_to_rk`](@ref) and [`brm_stan_gradient_to_rk`](@ref).
+`centered` lists each centered SB random-effect block: its `group`, `id`,
+ordered `margins`, SB `binding` and effect carrier `stan_carrier`, margin
+count `K`, level count `G`, the RK coordinates of its scales (`rk_scales`, one
+per margin, log scales) and of its correlation factor (`rk_cholesky`, empty
+for `K == 1`), and the `K × G` matrices `rk` / `stan` of standardized-draw and
+effect coordinates by (margin, SB level), with their positions
+(`scale_positions`, `cholesky_positions`, `rk_positions`, `stan_positions`).
+`stan_values` names each effect's constrained Stan value. The block's density
+offset depends on the point: at transported points the RK log density equals
+Stan's plus `logdensity_offset` plus `G * log(det(diag(tau) * L))` per
+centered block, the log-Jacobian of `z -> b`; use
+[`brm_stan_logdensity_to_rk`](@ref). Reading `logdensity_offset` from a
+transport with a centered block is an error naming that function.
+
+With no simplex or centered block, `stan_u == rk_u[permutation]` for points
+and gradients alike ([`brm_rk_to_stan`](@ref), [`brm_stan_to_rk`](@ref)) and
+`logdensity_offset == 0`. Otherwise points and gradients move differently:
+use [`brm_rk_point_to_stan`](@ref), [`brm_stan_point_to_rk`](@ref),
+[`brm_stan_gradient_to_rk`](@ref) and [`brm_stan_logdensity_to_rk`](@ref).
 """
 struct BRMCoordinateTransport
     rk_names::Vector{Symbol}
@@ -171,18 +194,34 @@ struct BRMCoordinateTransport
     correlations::Vector{NamedTuple}
     simplexes::Vector{NamedTuple}
     logdensity_offset::Float64
+    centered::Vector{NamedTuple}
 end
 
-# A transport without simplex blocks is a pure permutation.
+# A transport without simplex or centered blocks is a pure permutation.
 BRMCoordinateTransport(rk_names, stan_names, pairs, permutation, correlations) =
     BRMCoordinateTransport(rk_names, stan_names, pairs, permutation, correlations,
         NamedTuple[], 0.0)
+BRMCoordinateTransport(rk_names, stan_names, pairs, permutation, correlations,
+        simplexes, logdensity_offset) =
+    BRMCoordinateTransport(rk_names, stan_names, pairs, permutation, correlations,
+        simplexes, logdensity_offset, NamedTuple[])
+
+# A centered block's density offset depends on the point, so the constant
+# field alone would silently mis-state it.
+function Base.getproperty(t::BRMCoordinateTransport, field::Symbol)
+    field === :logdensity_offset && !isempty(getfield(t, :centered)) && error(
+        "BRMCoordinateTransport: this transport maps $(length(getfield(t, :centered))) " *
+        "centered random-effect block(s), whose log-density offset depends on the " *
+        "point. Use `brm_stan_logdensity_to_rk(transport, rk_u, stan_value)`.")
+    getfield(t, field)
+end
 
 Base.length(t::BRMCoordinateTransport) = length(t.pairs)
 Base.show(io::IO, t::BRMCoordinateTransport) = print(io,
     "BRMCoordinateTransport(", length(t.pairs), " coordinates, ",
     length(t.correlations), " correlation factors, ",
-    length(t.simplexes), " simplexes)")
+    length(t.simplexes), " simplexes",
+    isempty(t.centered) ? "" : ", $(length(t.centered)) centered blocks", ")")
 
 """
     brm_coordinate_transport(rk::RKBRMI, sb::SBBRMI, stan_names) -> BRMCoordinateTransport
@@ -208,8 +247,9 @@ transform, and authored `Dirichlet` simplexes as `:simplex` blocks; all keep
 their declaration name on both backends), `Ordinal` per-threshold
 coefficients by (stage, term), ordinary-prior population
 coefficients (including shared-design and separate categorical blocks),
-plain non-centered random-effect blocks (`(1 | g)`, `(0 + x | g)`,
-`(1 + x | g)`, `(… | id | g)`) with sampled scales, ungrouped HSGP terms
+plain random-effect blocks (`(1 | g)`, `(0 + x | g)`, `(1 + x | g)`,
+`(… | id | g)`) with sampled scales, non-centered or centered on the SB side
+(see below), ungrouped HSGP terms
 (isotropic or per-axis length scales, marginal scale and basis weights, paired
 by their formula axes and parameter roles), monotonic `mo`/`mo1` terms (the
 coefficient as a population coefficient, the increments as a `:simplex`
@@ -223,17 +263,26 @@ providers' declarations identically for this pairing. Missing-value completions
 pair RK `<column>.y_mis.<i>` with Stan `<column>_y_mis.<i>` when the completed
 column feeds a downstream likelihood. Any coordinate outside
 that coverage — on either side — is an error naming it; there is no partial
-transport. An `SBBRMI` built with exact total-effect blocks or centered groups
-has no sampled counterpart for the absorbed or centered coordinates; build it
-with `total_groups=()` and without `centered_groups` for this comparison.
+transport. An `SBBRMI` built with exact total-effect blocks has no sampled
+counterpart for the absorbed coordinates; build it with `total_groups=()` for
+this comparison.
 
-Every non-simplex pair has equal unconstrained values on both sides, and the
-log-Jacobian of each backend's transform is evaluated at the same physical
-point. Without simplex blocks, points and gradients move by the same
-permutation ([`brm_rk_to_stan`](@ref), [`brm_stan_to_rk`](@ref)). With them,
-use [`brm_rk_point_to_stan`](@ref), [`brm_stan_point_to_rk`](@ref) and
-[`brm_stan_gradient_to_rk`](@ref), and add `logdensity_offset` to the Stan
-density. Confirm the physical agreement at concrete points with
+A block in `centered_groups` samples the effects `b` themselves, with
+`diag(tau) * L` as their covariance factor, while RK samples standardized
+draws `z`. Its effects pair with RK's draws by (level, margin) as `:centered`
+pairs, its scales and correlation factor pair as for a non-centered block, and
+the block moves through the exact per-point map `b = diag(tau) * L * z`, using
+that point's `tau` and `L` (`t.centered`). Its SB margins must be in RK's
+margin order.
+
+Every non-simplex, non-centered pair has equal unconstrained values on both
+sides, and the log-Jacobian of each backend's transform is evaluated at the
+same physical point. Without simplex or centered blocks, points and gradients
+move by the same permutation ([`brm_rk_to_stan`](@ref),
+[`brm_stan_to_rk`](@ref)). With them, use [`brm_rk_point_to_stan`](@ref),
+[`brm_stan_point_to_rk`](@ref) and [`brm_stan_gradient_to_rk`](@ref), and move
+the Stan density with [`brm_stan_logdensity_to_rk`](@ref). Confirm the
+physical agreement at concrete points with
 [`brm_check_coordinate_transport`](@ref).
 
 For an already retained artifact build, use `RKBRMI(brmi, artifact.plan, built)`
@@ -262,14 +311,37 @@ function brm_coordinate_transport(rk::RKBRMI, sb::SBBRMI, stan_names::AbstractVe
     pairs = BRMCoordinatePair[]
     correlations = NamedTuple[]
     simplexes = NamedTuple[]
+    centered = NamedTuple[]
     for record in records
-        _brm_transport_pairs!(pairs, correlations, simplexes, Val(record.kind),
-            record, rk, d, stan, stan_pos)
+        _brm_transport_pairs!(pairs, correlations, simplexes, centered,
+            Val(record.kind), record, rk, d, stan, stan_pos)
     end
-    _brm_transport_validate(rk_names, stan, pairs, correlations, simplexes)
+    t = _brm_transport_validate(rk_names, stan, pairs, correlations, simplexes,
+        centered)
+    _brm_transport_centered_scales(rk, t)
+    t
 end
 
-function _brm_transport_validate(rk_names, stan, pairs, correlations, simplexes)
+# The centered map rebuilds each block's scales as `exp` of their coordinates:
+# RK's `:exp` transform, or `:floored` (`lo + exp(u)`) at a zero floor.
+function _brm_transport_centered_scales(rk, t)
+    isempty(t.centered) && return nothing
+    transforms = _rk_layout_coordinate_transforms(rk)
+    floors = _rk_layout_coordinate_floors(rk)
+    for block in t.centered, i in block.scale_positions
+        transforms[i] === :exp || transforms[i] === :floored && iszero(floors[i]) ||
+            _brm_transport_error(:unsupported_coverage,
+                "brm_coordinate_transport: centered block `$(block.binding)` scale " *
+                "`$(t.rk_names[i])` has RK transform `$(repr(transforms[i]))`" *
+                (transforms[i] === :floored ? " at floor $(floors[i])" : "") *
+                "; the centered map rebuilds scales sampled as `exp` of their " *
+                "coordinate only")
+    end
+    nothing
+end
+
+function _brm_transport_validate(rk_names, stan, pairs, correlations, simplexes,
+        centered=NamedTuple[])
     rk_pos = Dict{Symbol,Int}(n => i for (i, n) in enumerate(rk_names))
     length(rk_pos) == length(rk_names) || error(
         "brm_coordinate_transport: RK coordinate names are not unique")
@@ -311,13 +383,14 @@ function _brm_transport_validate(rk_names, stan, pairs, correlations, simplexes)
               "\n  Covered: scalar parameters, response cutpoints and " *
               "thresholds, `Ordinal` per-threshold coefficients, authored " *
               "`Dirichlet` simplexes, ordinary-prior " *
-              "population and categorical coefficients, plain non-centered random-effect " *
+              "population and categorical coefficients, plain non-centered or " *
+              "centered random-effect " *
               "blocks with sampled scales, ungrouped HSGP terms, monotonic " *
               "terms, submodel provider declarations, and missing-value " *
               "completions (RK `<column>.y_mis` with SB `<column>_y_mis`). Other " *
               "constructs (R2D2/horseshoe priors, smooths, GP, grouped or " *
               "hyper-predicted HSGP, AR, measurement error, multi-membership " *
-              "and stratified groups, centered or exact-total SB emissions) " *
+              "and stratified groups, exact-total SB emissions) " *
               "are not paired yet.")
     end
     ordered = sort(pairs; by=pair -> rk_pos[pair.rk])
@@ -330,8 +403,14 @@ function _brm_transport_validate(rk_names, stan, pairs, correlations, simplexes)
             stan_positions=[stan_pos[n] for n in block.stan])
         for block in simplexes]
     offset = -sum((log(block.K) / 2 for block in blocks); init=0.0)
+    centered_blocks = NamedTuple[(; block...,
+            scale_positions=[rk_pos[n] for n in block.rk_scales],
+            cholesky_positions=[rk_pos[n] for n in block.rk_cholesky],
+            rk_positions=map(n -> rk_pos[n], block.rk),
+            stan_positions=map(n -> stan_pos[n], block.stan))
+        for block in centered]
     BRMCoordinateTransport(rk_names, stan, ordered, permutation, correlations,
-        blocks, offset)
+        blocks, offset, centered_blocks)
 end
 
 _brm_stan_name(stan_pos, name, address) = begin
@@ -342,8 +421,8 @@ _brm_stan_name(stan_pos, name, address) = begin
 end
 
 # Scalar parameters keep their authored name on both sides.
-function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:scalar}, record,
-        rk, d, stan, stan_pos)
+function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
+        ::Val{:scalar}, record, rk, d, stan, stan_pos)
     name = String(record.declaration)
     address = (; kind=:scalar, name=record.declaration)
     haskey(stan_pos, name) || error(
@@ -394,8 +473,8 @@ function _brm_transport_population_stan(d, predictor, coefficient, stan, stan_po
     stan[coordinates[only(position)]]
 end
 
-function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:population}, record,
-        rk, d, stan, stan_pos)
+function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
+        ::Val{:population}, record, rk, d, stan, stan_pos)
     address = (; kind=:population, predictor=record.predictor,
         coefficient=record.coefficient)
     name = _brm_transport_population_stan(d, record.predictor,
@@ -416,8 +495,8 @@ _brm_transport_level(x) = x isa CA.CategoricalValue ? CA.unwrap(x) : x
 
 # A categorical block: in a shared SB design the columns pair by their shared
 # label; a separate SB contrast block pairs by fitted level.
-function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:population_block},
-        record, rk, d, stan, stan_pos)
+function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
+        ::Val{:population_block}, record, rk, d, stan, stan_pos)
     shared = _brm_transport_population_binding(d, record.predictor)
     if !isnothing(shared) && all(label -> label in shared.labels, record.labels)
         for (i, label) in enumerate(record.labels)
@@ -513,15 +592,11 @@ function _brm_transport_ranef_block(d, record)
     block.generated && _brm_transport_error(:parameterization_mismatch,
         "brm_coordinate_transport: SB block `$(block.binding)` is drawn in " *
         "generated quantities and has no sampled coordinates")
-    block.noncentered || _brm_transport_error(:parameterization_mismatch,
-        "brm_coordinate_transport: SB block `$(block.binding)` is centered; its " *
-        "coordinates are the effects, not the standardized draws RK samples. " *
-        "Build the SBBRMI without `centered_groups` for this comparison.")
     (; block, margins)
 end
 
-function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:ranef}, record,
-        rk, d, stan, stan_pos)
+function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
+        ::Val{:ranef}, record, rk, d, stan, stan_pos)
     (; block, margins) = _brm_transport_ranef_block(d, record)
     K = length(record.margins)
     K == block.n_terms || error(
@@ -534,8 +609,16 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:ranef}, re
             "`$(block.binding)` matches $(length(j)) SB margins $(Tuple(margins))")
         only(j)
     end
+    # A centered block's effects are `diag(tau) * L * z` in SB margin order.
+    block.noncentered || sb_margin == collect(1:K) || _brm_transport_error(
+        :parameterization_mismatch,
+        "brm_coordinate_transport: centered block `$(block.binding)` orders its " *
+        "margins $(Tuple(margins)) on SB and $(record.margins) on RK; its " *
+        "effects cannot be mapped margin by margin")
     base = (; group=record.group, id=record.id)
     # Scales: one per margin.
+    rk_scales = Vector{Symbol}(undef, K)
+    rk_scale_values = Vector{Tuple{Symbol,Tuple}}(undef, K)
     spec = _RANEF_FAMILIES[block.family]
     tau = get(spec, :tau, nothing)
     # A known-value block (`sd(...) = value`) samples only its free scales,
@@ -557,6 +640,8 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:ranef}, re
         rk_name, rk_decl, rk_index = isnothing(record.scales) ?
             (Symbol(record.scale, ".", k), record.scale, (k,)) :
             (record.scales[k], record.scales[k], ())
+        rk_scales[k] = rk_name
+        rk_scale_values[k] = (rk_decl, rk_index)
         if length(free_margins) < block.n_terms
             carrier = string(block.binding, "_tau_free")
             name = string(carrier, ".", only(findall(==(sb_margin[k]), free_margins)))
@@ -583,24 +668,49 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:ranef}, re
                 rk_index, :exp))
         end
     end
-    # Standardized draws: one per (level, margin), paired by level label.
+    # Standardized draws: one per (level, margin), paired by level label. A
+    # centered block pairs each with the effect of the same (level, margin).
     rk_levels = _rk_grouping_levels(rk.plan.columns[record.group])
-    length(rk_levels) == block.n_groups || error(
+    G = length(rk_levels)
+    G == block.n_groups || error(
         "brm_coordinate_transport: grouping `$(record.group)` has " *
-        "$(length(rk_levels)) RK and $(block.n_groups) SB levels")
+        "$G RK and $(block.n_groups) SB levels")
     positions = ranef_coordinates(block, stan)
+    layout = spec.layout
+    rk_z = Matrix{Symbol}(undef, K, G)
+    stan_b = Matrix{String}(undef, K, G)
+    stan_values = Matrix{String}(undef, K, G)
+    rk_level = Vector{Int}(undef, G)
     for (g, level) in enumerate(rk_levels)
         h = findall(l -> isequal(l, level), block.levels)
         length(h) == 1 || error(
             "brm_coordinate_transport: level $(repr(level)) of grouping " *
             "`$(record.group)` matches $(length(h)) SB levels")
+        h = only(h)
+        rk_level[h] = g
         for (k, margin) in enumerate(record.margins)
             address = (; kind=:ranef_z, base..., level, margin)
-            push!(pairs, BRMCoordinatePair(address,
-                Symbol(record.z, ".", g, ".", k),
-                stan[positions[sb_margin[k], only(h)]], record.z, (g, k), :identity))
+            rk_name = Symbol(record.z, ".", g, ".", k)
+            stan_name = stan[positions[sb_margin[k], h]]
+            if block.noncentered
+                push!(pairs, BRMCoordinatePair(address, rk_name, stan_name,
+                    record.z, (g, k), :identity))
+            else
+                # An array-of-vectors carrier's unconstrained name at a
+                # position can belong to another element (`ranef_coordinates`).
+                value = _ranef_coord_name(block, layout, sb_margin[k], h)
+                push!(pairs, BRMCoordinatePair(address, rk_name, stan_name,
+                    record.z, (g, k), :centered, value))
+                rk_z[k, h], stan_b[k, h], stan_values[k, h] = rk_name, stan_name, value
+            end
         end
     end
+    block.noncentered || push!(centered, (; base..., margins=record.margins,
+        binding=block.binding, stan_carrier=String(block.z), K, G, rk_scales,
+        rk_cholesky=isnothing(record.L) ? Symbol[] :
+            [Symbol(record.L, ".", m) for m in 1:(K * (K - 1)) ÷ 2],
+        rk=rk_z, stan=stan_b, stan_values, rk_declaration=record.z, rk_level,
+        rk_scale_values, rk_L=record.L))
     # Student-t mixing weights: one per level, paired by level label. Both
     # backends must agree that the block is Student-t.
     rk_mixing = get(record, :mixing, nothing)
@@ -659,7 +769,7 @@ _brm_transport_is_simplex(output) = string(output.type) == "simplex"
 # `rk_declaration` with the K-1 free coordinates of SB carrier `output`. A
 # `column` names one simplex column of a two-axis RK declaration.
 function _brm_transport_simplex!(pairs, simplexes, address, rk_names,
-        rk_declaration, output, stan, plan; column=nothing)
+        rk_declaration, output, stan; column=nothing)
     _brm_transport_is_simplex(output) || error(
         "brm_coordinate_transport: RK simplex $(address) pairs with SB carrier " *
         "`$(output.name)` of type `$(output.type)`, not a simplex")
@@ -668,7 +778,7 @@ function _brm_transport_simplex!(pairs, simplexes, address, rk_names,
     length(names) == K - 1 || error(
         "brm_coordinate_transport: simplex $(address) has $(K - 1) free RK and " *
         "$(length(names)) free Stan coordinates")
-    count = _brm_output_coordinate_count(plan, output)
+    count = _brm_output_coordinate_count(output)
     isnothing(count) || count == K || error(
         "brm_coordinate_transport: SB simplex `$(output.name)` has $count " *
         "elements; RK's has $K")
@@ -686,8 +796,8 @@ end
 # column that SB labels with the same term's public label (`mo_<c>`, whichever
 # carrier the occurrence emitted). In a joint block (`column`), the predictor
 # owns one simplex column and one coefficient entry.
-function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:monotonic},
-        record, rk, d, stan, stan_pos)
+function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
+        ::Val{:monotonic}, record, rk, d, stan, stan_pos)
     head = record.head === :mo ? mo : mo1
     entry = _brm_term_entry(d, record.predictor,
         e -> getf(e.value) === head &&
@@ -701,7 +811,7 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:monotonic}
     rk_names = column === nothing ? [Symbol(increments, ".", j) for j in 1:free] :
         [Symbol(increments, ".", j, ".", column) for j in 1:free]
     _brm_transport_simplex!(pairs, simplexes, address, rk_names, increments, output,
-        stan, d.plan; column)
+        stan; column)
     record.beta || return
     coefficient = (; kind=:population, predictor=record.predictor,
         coefficient=entry.term)
@@ -717,8 +827,8 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:monotonic}
 end
 
 # An ungrouped HSGP component, paired by its formula axes and parameter roles.
-function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:hsgp},
-        record, rk, d, stan, stan_pos)
+function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
+        ::Val{:hsgp}, record, rk, d, stan, stan_pos)
     term_axes(t) = Tuple(name(_sb_named_inner(:hsgp, a)) for a in getargs(t))
     entry = _brm_term_entry(d, record.predictor,
         e -> getf(e.value) === hsgp && !haskey(getkwargs(e.value), :by) &&
@@ -797,7 +907,7 @@ function _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
         address = (; kind, target, declaration)
         if only(transforms) === :simplex
             _brm_transport_simplex!(pairs, simplexes, address,
-                [e.name for e in elements], declaration, output, stan, d.plan)
+                [e.name for e in elements], declaration, output, stan)
         elseif only(transforms) === :lkj
             names = _brm_transport_elements(output, stan, address)
             length(names) == length(elements) || error(
@@ -826,14 +936,14 @@ function _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
     end
 end
 
-function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:submodel},
-        record, rk, d, stan, stan_pos)
+function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
+        ::Val{:submodel}, record, rk, d, stan, stan_pos)
     _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
         :submodel, record.target, rk, d, stan, stan_pos)
 end
 
-function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:missing_value},
-        record, rk, d, stan, stan_pos)
+function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
+        ::Val{:missing_value}, record, rk, d, stan, stan_pos)
     _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
         :missing_value, record.target, rk, d, stan, stan_pos;
         only_declaration=Symbol(record.target, ".y_mis"))
@@ -852,8 +962,8 @@ const _BRM_TRANSPORT_VECTOR_FAMILIES = Dict(
 # `Dirichlet` simplex — keeps its declaration name on both backends, like a
 # scalar, and pairs element by element with the same-named SB draw carrier.
 # A declaration with no such carrier stays unpaired, so the validator names it.
-function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:vector},
-        record, rk, d, stan, stan_pos)
+function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
+        ::Val{:vector}, record, rk, d, stan, stan_pos)
     declaration = record.declaration
     idxs = _brm_carrier_indices(d.outputs,
         o -> o.name === declaration && !isnothing(o.declaration) &&
@@ -889,7 +999,7 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:vector},
     isempty(rk_names) && isempty(_brm_element_coordinates(output, stan)) && return
     if transform === :simplex
         _brm_transport_simplex!(pairs, simplexes, address, rk_names, declaration,
-            output, stan, d.plan)
+            output, stan)
         return
     end
     names = stan[_brm_element_coordinates(output, stan)]
@@ -909,7 +1019,7 @@ end
 # also RK's column-major `(t, s)` order, while BridgeStan's names enumerate the
 # block stage-fastest; each pair keeps the unconstrained name at its true
 # position and the constrained `<carrier>.<s>.<t>` for the physical check.
-function _brm_transport_pairs!(pairs, correlations, simplexes,
+function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         ::Val{:threshold_coefficients}, record, rk, d, stan, stan_pos)
     declaration = record.declaration
     idxs = _brm_carrier_indices(d.outputs,
@@ -942,8 +1052,8 @@ function _brm_transport_pairs!(pairs, correlations, simplexes,
     end
 end
 
-function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{kind}, record,
-        rk, d, stan, stan_pos) where {kind}
+function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
+        ::Val{kind}, record, rk, d, stan, stan_pos) where {kind}
     error("brm_coordinate_transport: internal: no pairing for RK record kind `$kind`")
 end
 
@@ -952,12 +1062,12 @@ end
     brm_stan_to_rk(t::BRMCoordinateTransport, v) -> Vector
 
 Move an unconstrained point, or a gradient with respect to it, between the RK
-and Stan coordinate orders of a transport without simplex blocks. Both are the
-same permutation: each pair has equal unconstrained values, so a Stan gradient
-maps back to RK order exactly as the point does. A transport with simplex
-blocks refuses both, since its points and gradients move differently; use
-[`brm_rk_point_to_stan`](@ref), [`brm_stan_point_to_rk`](@ref) and
-[`brm_stan_gradient_to_rk`](@ref). Neither function mutates `v`.
+and Stan coordinate orders of a transport without simplex or centered blocks.
+Both are the same permutation: each pair has equal unconstrained values, so a
+Stan gradient maps back to RK order exactly as the point does. A transport with
+simplex or centered blocks refuses both, since its points and gradients move
+differently; use [`brm_rk_point_to_stan`](@ref), [`brm_stan_point_to_rk`](@ref)
+and [`brm_stan_gradient_to_rk`](@ref). Neither function mutates `v`.
 """
 function brm_rk_to_stan(t::BRMCoordinateTransport, v::AbstractVector)
     _brm_transport_permutation_only(t, "brm_rk_to_stan")
@@ -969,11 +1079,13 @@ function brm_stan_to_rk(t::BRMCoordinateTransport, v::AbstractVector)
     _brm_stan_order_to_rk(t, v)
 end
 
-_brm_transport_permutation_only(t, caller) = isempty(t.simplexes) || error(
-    "$caller: this transport pairs $(length(t.simplexes)) simplex block(s), whose " *
-    "points and gradients do not move by one permutation. Use " *
-    "`brm_rk_point_to_stan` / `brm_stan_point_to_rk` for points and " *
-    "`brm_stan_gradient_to_rk` for gradients.")
+_brm_transport_permutation_only(t, caller) =
+    isempty(t.simplexes) && isempty(t.centered) || error(
+    "$caller: this transport pairs $(length(t.simplexes)) simplex block(s) and " *
+    "$(length(t.centered)) centered block(s), whose points and gradients do not " *
+    "move by one permutation. Use `brm_rk_point_to_stan` / " *
+    "`brm_stan_point_to_rk` for points, `brm_stan_gradient_to_rk` for gradients " *
+    "and `brm_stan_logdensity_to_rk` for log densities.")
 
 function _brm_rk_order_to_stan(t, v)
     length(v) == length(t.rk_names) || error(
@@ -1067,6 +1179,63 @@ function _brm_simplex_pullback(u::AbstractVector, g::AbstractVector)
     out
 end
 
+# A centered block's effect factor `C = diag(tau) * L` at RK coordinates `u`,
+# with `tau` and `L`: the scales are `exp` of their coordinates, and RK and
+# Stan share the `cholesky_factor_corr` transform of the free values.
+function _brm_centered_factor(block, u::AbstractVector)
+    tau = exp.(u[block.scale_positions])
+    L = _adaptive_cholesky_corr(u[block.cholesky_positions], block.K)
+    tau .* L, tau, L
+end
+
+# `log |det(d b / d z)|` of a centered block at RK coordinates `u`: each of its
+# `G` levels maps `z -> C * z` with a triangular `C`.
+_brm_centered_logjacobian(block, u::AbstractVector) =
+    block.G * sum(log, diag(first(_brm_centered_factor(block, u))))
+
+# `J' * GL` for `L = _adaptive_cholesky_corr(raw, K)`, where `GL` is a gradient
+# with respect to the entries of `L`. Row `i` holds `L[i, j] = s[j] * z[j]` for
+# `j < i` and `L[i, i] = s[i]`, with `z[j] = tanh(raw[p])`, `s[1] = 1` and
+# `s[j + 1] = s[j] * sqrt(1 - z[j]^2)`; each row is reversed from its diagonal.
+function _brm_cholesky_corr_pullback(raw::AbstractVector, K::Int, GL::AbstractMatrix)
+    out = zeros(promote_type(float(eltype(raw)), eltype(GL)), length(raw))
+    p = 0
+    for i in 2:K
+        z = tanh.(raw[(p + 1):(p + i - 1)])
+        w = sqrt.(1 .- z .* z)
+        s = cumprod(vcat(one(eltype(w)), w))
+        gs = GL[i, i]
+        for j in (i - 1):-1:1
+            out[p + j] = (GL[i, j] * w[j] - gs * z[j]) * s[j] * w[j]
+            gs = gs * w[j] + GL[i, j] * z[j]
+        end
+        p += i - 1
+    end
+    out
+end
+
+# Adds a centered block's pullback to `out`, the permuted Stan gradient `g`:
+# the effects `B = C * Z` pull back to `C' * dB` on the standardized draws and
+# to the block's scale and correlation coordinates, plus the gradient of its
+# log-Jacobian `G * (sum(log, tau) + sum(log, diag(L)))`.
+function _brm_centered_pullback!(out, block, u::AbstractVector, g::AbstractVector)
+    C, tau, L = _brm_centered_factor(block, u)
+    Z = u[block.rk_positions]
+    dB = g[block.stan_positions]
+    out[block.rk_positions] = transpose(C) * dB
+    # `d B[k, h] / d log(tau[k]) == B[k, h]`.
+    out[block.scale_positions] .+= vec(sum(dB .* (C * Z); dims=2)) .+ block.G
+    isempty(block.cholesky_positions) && return out
+    # `d B[i, h] / d L[i, j] == tau[i] * Z[j, h]`; `d log(L[i, i]) == 1 / L[i, i]`.
+    GL = (tau .* dB) * transpose(Z)
+    for i in 1:block.K
+        GL[i, i] += block.G / L[i, i]
+    end
+    out[block.cholesky_positions] .+= _brm_cholesky_corr_pullback(
+        u[block.cholesky_positions], block.K, GL)
+    out
+end
+
 """
     brm_rk_point_to_stan(t::BRMCoordinateTransport, u_rk) -> Vector
     brm_stan_point_to_rk(t::BRMCoordinateTransport, u_stan) -> Vector
@@ -1074,17 +1243,24 @@ end
 Move an unconstrained POINT between the RK and Stan coordinate frames. Paired
 coordinates move by `t.permutation`; each `t.simplexes` block goes through the
 physical simplex, from RK's stick-breaking coordinates to Stan's isometric
-log-ratio coordinates or back. The two functions are inverses and both
-describe the same physical parameter point. They equal
+log-ratio coordinates or back; each `t.centered` block's standardized draws
+`z` become the effects `b = diag(tau) * L * z` per level, or back, with the
+point's own scales `tau` and correlation factor `L`. The two functions are
+inverses and both describe the same physical parameter point. They equal
 [`brm_rk_to_stan`](@ref) / [`brm_stan_to_rk`](@ref) for a transport without
-simplex blocks. Neither mutates its input. Use
-[`brm_stan_gradient_to_rk`](@ref) for gradients.
+simplex or centered blocks. Neither mutates its input. Use
+[`brm_stan_gradient_to_rk`](@ref) for gradients and
+[`brm_stan_logdensity_to_rk`](@ref) for log densities.
 """
 function brm_rk_point_to_stan(t::BRMCoordinateTransport, u::AbstractVector)
     out = _brm_rk_order_to_stan(t, u)
     for block in t.simplexes
         logx, _ = _brm_rk_simplex_log(u[block.rk_positions])
         out[block.stan_positions] = _brm_stan_simplex_free(logx)
+    end
+    for block in t.centered
+        out[block.stan_positions] =
+            first(_brm_centered_factor(block, u)) * u[block.rk_positions]
     end
     out
 end
@@ -1095,19 +1271,27 @@ function brm_stan_point_to_rk(t::BRMCoordinateTransport, y::AbstractVector)
         out[block.rk_positions] =
             _brm_rk_simplex_free(_brm_stan_simplex_log(y[block.stan_positions]))
     end
+    # A block's scales and correlation factor are already in RK order.
+    for block in t.centered
+        out[block.rk_positions] = LowerTriangular(first(_brm_centered_factor(block, out))) \
+            y[block.stan_positions]
+    end
     out
 end
 
 """
     brm_stan_gradient_to_rk(t::BRMCoordinateTransport, u_rk, stan_gradient) -> Vector
 
-Pull back a gradient with respect to Stan's unconstrained coordinates, taken at
-`brm_rk_point_to_stan(t, u_rk)`, to RK's coordinates at `u_rk`. Paired
+Pull back the gradient of Stan's normalized log density with Jacobian
+(`propto=false, jacobian=true`), taken at `brm_rk_point_to_stan(t, u_rk)`, to
+RK's coordinates at `u_rk`; the result is RK's log-density gradient. Paired
 coordinates move by `t.permutation`; a simplex block multiplies by the
-transpose of the exact Jacobian of its stick-breaking-to-log-ratio map. Since
-`t.logdensity_offset` is constant, the pulled-back gradient of Stan's
-normalized log density with Jacobian equals RK's log-density gradient. Neither
-input is mutated.
+transpose of the exact Jacobian of its stick-breaking-to-log-ratio map, whose
+log-Jacobian difference is the constant `t.logdensity_offset`. A centered
+block multiplies by the transpose of the Jacobian of `z -> b`, which also
+moves its scale and correlation coordinates, and adds the gradient of that
+map's log-Jacobian (see [`brm_stan_logdensity_to_rk`](@ref)). Neither input
+is mutated.
 """
 function brm_stan_gradient_to_rk(t::BRMCoordinateTransport, u::AbstractVector,
         g::AbstractVector)
@@ -1119,7 +1303,30 @@ function brm_stan_gradient_to_rk(t::BRMCoordinateTransport, u::AbstractVector,
         out[block.rk_positions] =
             _brm_simplex_pullback(u[block.rk_positions], g[block.stan_positions])
     end
+    for block in t.centered
+        _brm_centered_pullback!(out, block, u, g)
+    end
     out
+end
+
+"""
+    brm_stan_logdensity_to_rk(t::BRMCoordinateTransport, u_rk, stan_value) -> Real
+
+RK's log density at `u_rk`, from Stan's normalized log density with Jacobian
+(`propto=false, jacobian=true`) `stan_value` at
+`brm_rk_point_to_stan(t, u_rk)`: `stan_value + t.logdensity_offset` (the
+constant simplex offset) plus, for each centered block, the log-Jacobian
+`G * log(det(diag(tau) * L))` of its map `z -> b` over its `G` levels at
+`u_rk`. Works for every transport; without centered blocks it equals
+`stan_value + t.logdensity_offset`.
+"""
+function brm_stan_logdensity_to_rk(t::BRMCoordinateTransport, u::AbstractVector,
+        stan_value::Real)
+    length(u) == length(t.rk_names) || error(
+        "brm_stan_logdensity_to_rk: got $(length(u)) point values for " *
+        "$(length(t.rk_names)) RK coordinates")
+    stan_value + getfield(t, :logdensity_offset) +
+        sum((_brm_centered_logjacobian(block, u) for block in t.centered); init=0.0)
 end
 
 _brm_physical(::Val{:identity}, stan_value) = stan_value
@@ -1142,15 +1349,19 @@ end
 Confirm at the RK unconstrained point `u_rk` that both backends describe the
 same physical parameter point: every paired constrained value agrees under its
 `relation`, every correlation factor agrees as a whole matrix, including
-its structurally fixed unit diagonal norm and zero upper triangle, and every
-simplex agrees as a whole vector of `K` elements. The Stan point is
+its structurally fixed unit diagonal norm and zero upper triangle, every
+simplex agrees as a whole vector of `K` elements, and every centered block's
+Stan effects equal `diag(tau) * L * z` computed from RK's own constrained
+scales, correlation factor and standardized draws. The Stan point is
 `brm_rk_point_to_stan(t, u_rk)`. `stan_model` is the compiled
 `BridgeStan.StanModel` whose `param_unc_names` built `t`.
-Returns `(; pairs::Int, factors::Int, simplexes::Int, max_error::Float64)`:
-`pairs` counts checked elements outside correlation factors and simplexes,
-`factors` counts whole correlation matrices, `simplexes` whole simplexes, and
-`max_error` is the largest absolute physical difference over these elements
-and every matrix and simplex entry. Every comparison must meet
+Returns `(; pairs::Int, factors::Int, simplexes::Int, centered::Int,
+max_error::Float64)`: `pairs` counts checked elements outside correlation
+factors, simplexes and centered blocks, `factors` counts whole correlation
+matrices, `simplexes` whole simplexes, `centered` whole centered blocks (all
+`K × G` effects), and `max_error` is the largest absolute physical difference
+over these elements and every matrix, simplex and effect entry. Every
+comparison must meet
 `atol + rtol * max(abs(rk_value), abs(stan_value))`. Any disagreement is an error
 naming the coordinate. Densities and gradients are not compared here.
 """
@@ -1181,7 +1392,7 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
     end
     checked = 0
     for pair in t.pairs
-        pair.relation in (:cholesky, :simplex) && continue
+        pair.relation in (:cholesky, :simplex, :centered) && continue
         value = _brm_rk_declaration_value(rk_values, pair.rk_declaration)
         rk_value = isempty(pair.rk_index) ? value : value[pair.rk_index...]
         compare("$(pair.address) (`$(pair.rk)` / `$(pair.stan_value)`)", rk_value,
@@ -1210,6 +1421,20 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
                 stan_value(string(block.stan_carrier, ".", i)))
         end
     end
+    for block in t.centered
+        z = _brm_rk_declaration_value(rk_values, block.rk_declaration)
+        tau = map(block.rk_scale_values) do (declaration, index)
+            value = _brm_rk_declaration_value(rk_values, declaration)
+            isempty(index) ? value : value[index...]
+        end
+        L = isnothing(block.rk_L) ? Matrix{Float64}(I, block.K, block.K) :
+            _brm_rk_declaration_value(rk_values, block.rk_L)
+        for h in 1:block.G, k in 1:block.K
+            effect = tau[k] * sum(L[k, j] * z[block.rk_level[h], j] for j in 1:k)
+            compare("centered effect `$(block.stan_values[k, h])`", effect,
+                stan_value(block.stan_values[k, h]))
+        end
+    end
     (; pairs=checked, factors=length(t.correlations),
-       simplexes=length(t.simplexes), max_error)
+       simplexes=length(t.simplexes), centered=length(t.centered), max_error)
 end

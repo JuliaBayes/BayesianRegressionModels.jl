@@ -2702,6 +2702,170 @@ _sb_level_index(raw::AbstractVector) = _brm_level_index(raw)
 _sb_fit_levels(raw::AbstractVector) = _brm_fit_levels(raw)
 _sb_apply_levels(levels, raw::AbstractVector) = _brm_apply_levels(levels, raw)
 
+# ---- releveled `factor(x; ref=...)` terms -----------------------------------
+#
+# A releveled factor lowers to its own block (`x__ref_k`, or `x__ref_<level>`
+# for a string level), which names no data column. Its `:factor` and
+# `:ranef_factor_dummy` records therefore carry an `_SBFactorSource` as
+# `raw_ref`: the block, the data column it codes and its reference, so replay
+# re-codes the new frame's column exactly as lowering coded the training one
+# (the `:population_factor_dummy` rule, whose record carries the same source
+# and reference). A factor whose block is its column keeps that column name.
+struct _SBFactorSource
+    block::Symbol
+    source::Symbol
+    ref::Union{Int,String}
+end
+
+# Values with an explicit level order, which the categorical pipeline reads
+# through `_brm_fit_levels` like a `CategoricalVector`'s declared levels.
+abstract type _SBLeveledVector{T} <: AbstractVector{T} end
+Base.size(x::_SBLeveledVector) = size(x.values)
+Base.getindex(x::_SBLeveledVector, i::Int) = x.values[i]
+Base.IndexStyle(::Type{<:_SBLeveledVector}) = IndexLinear()
+_brm_fit_levels(x::_SBLeveledVector) = x.levels
+
+# The column a releveled factor term lowers to: integer levels with the
+# reference swapped into level 1, or string values whose level order puts the
+# reference first, together with the source its records replay from.
+struct _SBReleveledFactor{T,V<:AbstractVector{T},L<:AbstractVector} <: _SBLeveledVector{T}
+    values::V
+    levels::L
+    source::_SBFactorSource
+end
+
+# A frozen re-emission's view of a releveled factor's data column: the replay
+# rows over the FITTED level set, so lowering validates the reference and names
+# the block against the fit, not against the levels the replay rows happen to
+# carry (one new subject carries one level). See `_sb_fit_factor_levels`.
+struct _SBFittedLevels{T,V<:AbstractVector{T},L<:AbstractVector} <: _SBLeveledVector{T}
+    values::V
+    levels::L
+end
+
+# `factor(x; ref=k)` on integer levels swaps level `k` with level 1, so the
+# treatment coding's level-1 reference is `k`. An integer-leveled
+# `CategoricalVector` codes its unwrapped values.
+_sb_integer_factor_values(raw::CA.CategoricalVector) = Int.(CA.unwrap.(raw))
+_sb_integer_factor_values(raw) = raw
+_sb_relevel_codes(raw::AbstractVector{<:Integer}, ref::Integer) =
+    ref == 1 ? raw : Int[r == ref ? 1 : r == 1 ? ref : r for r in raw]
+
+# The sorted string levels with `ref` swapped into first place, the order a
+# string `factor(...)` codes; `source` names the column in the errors.
+function _sb_string_factor_levels(fit::AbstractVector, ref, source::Symbol)
+    ref isa AbstractString || error(
+        "sbimpl: `factor($source; ref=...)` on string data names the " *
+        "reference by its level value, got $(repr(ref))")
+    levels = collect(fit)
+    k = findfirst(isequal(ref), levels)
+    isnothing(k) && error(
+        "sbimpl: `factor($source; ref=$(repr(ref)))` ref is not an " *
+        "observed level (levels $(repr(levels)))")
+    levels[1], levels[k] = levels[k], levels[1]
+    levels
+end
+
+# The `raw_ref` of a categorical block's record, from its lowered values.
+_sb_factor_replay_ref(raw::_SBReleveledFactor, _block::Symbol) = raw.source
+_sb_factor_replay_ref(_raw, block::Symbol) = block
+
+# The block a categorical record codes, and a replay frame's values for it in
+# the coding the record's levels use.
+_sb_factor_block(raw_ref::Symbol) = raw_ref
+_sb_factor_block(raw_ref::_SBFactorSource) = raw_ref.block
+_sb_factor_replay_values(raw_ref::Symbol, df) = _sb_df_column(df, raw_ref)
+_sb_factor_replay_values(raw_ref::_SBFactorSource, df) =
+    _sb_factor_replay_values(raw_ref, raw_ref.ref, _sb_df_column(df, raw_ref.source))
+function _sb_factor_replay_values(raw_ref::_SBFactorSource, ref::Int, raw)
+    values = _sb_integer_factor_values(raw)
+    values isa AbstractVector{<:Integer} || error(
+        "sbimpl: reprocess: `factor($(raw_ref.source); ref=$ref)` requires " *
+        "integer-coded categorical data, got $(typeof(raw))")
+    _sb_relevel_codes(values, ref)
+end
+_sb_factor_replay_values(_raw_ref::_SBFactorSource, ::String, raw) =
+    _brm_factor_values(raw)
+
+# A fresh replay (`freeze_constants=false`) re-derives the level set in the
+# coding the record's levels use: sorted codes, or sorted strings with the
+# reference first.
+_sb_factor_refit_levels(_raw_ref::Symbol, values) = _sb_fit_levels(values)
+_sb_factor_refit_levels(raw_ref::_SBFactorSource, values) =
+    _sb_factor_refit_levels(raw_ref, raw_ref.ref, values)
+_sb_factor_refit_levels(_raw_ref::_SBFactorSource, ::Int, values) =
+    _sb_fit_levels(values)
+_sb_factor_refit_levels(raw_ref::_SBFactorSource, ref::String, values) =
+    _sb_string_factor_levels(_sb_fit_levels(values), ref, raw_ref.source)
+
+# A frozen re-emission lowers every `factor(x; ref=...)` term over the level set
+# the fit coded `x` with, read off its categorical records: lowering checks the
+# reference against that set and names a string block from it. Every other node
+# is rebuilt unchanged by the shared rebind map (the `_BRMConstantSubstitution`
+# pattern). `levels` maps a data column to its sorted fitted levels;
+# `conflicts` names a column whose records disagree, refused only where a
+# releveled factor would read it.
+struct _SBFittedFactorLevels
+    levels::Dict{Symbol,AbstractVector}
+    conflicts::Dict{Symbol,String}
+end
+
+_sb_factor_source_column(raw_ref::Symbol) = raw_ref
+_sb_factor_source_column(raw_ref::_SBFactorSource) = raw_ref.source
+_sb_factor_record_levels(e::PreprocEntry) =
+    e.kind === :factor ? e.const_ : e.const_.levels
+# A record's levels in the source column's own values, sorted: an integer
+# relevel's codes swap back (the swap is its own inverse). A bare
+# `CategoricalVector` column records its `CategoricalValue` levels.
+_sb_level_value(x::CA.CategoricalValue) = CA.unwrap(x)
+_sb_level_value(x) = x
+_sb_fitted_source_levels(_raw_ref::Symbol, levels) = sort(map(_sb_level_value, levels))
+_sb_fitted_source_levels(raw_ref::_SBFactorSource, levels) =
+    _sb_fitted_source_levels(raw_ref, raw_ref.ref, levels)
+_sb_fitted_source_levels(_raw_ref::_SBFactorSource, ref::Int, levels) =
+    sort(_sb_relevel_codes(collect(levels), ref))
+_sb_fitted_source_levels(_raw_ref::_SBFactorSource, ::String, levels) =
+    sort(collect(levels))
+
+function _sb_fit_factor_levels(brmi::BRMI, frozen)
+    levels = Dict{Symbol,AbstractVector}()
+    conflicts = Dict{Symbol,String}()
+    for (key, e) in frozen
+        e.kind in (:factor, :ranef_factor_dummy) || continue
+        source = _sb_factor_source_column(e.raw_ref)
+        fitted = _sb_fitted_source_levels(e.raw_ref, _sb_factor_record_levels(e))
+        known = get!(levels, source, fitted)
+        isequal(known, fitted) || (conflicts[source] =
+            "sbimpl: frozen replay: categorical records of column `$source` " *
+            "disagree on its fitted levels ($(repr(known)) and, at `$key`, " *
+            "$(repr(fitted))), so `factor($source; ref=...)` has no single " *
+            "fitted level set to replay over")
+    end
+    isempty(levels) && return brmi
+    _brm_rebind_brmi(brmi, _SBFittedFactorLevels(levels, conflicts))
+end
+
+function _brm_rebind_value(x::NamedColumn, s::_SBFittedFactorLevels)
+    payload = parent(x)
+    payload isa Union{DataColumn,MissingColumn} && return x
+    NamedColumn(name(x), _brm_rebind_value(payload, s))
+end
+function _brm_rebind_value(x::ExprColumn{typeof(factor)}, s::_SBFittedFactorLevels)
+    args, kwargs = getargs(x), getkwargs(x)
+    inner = length(args) == 1 && haskey(kwargs, :ref) ? _as_named_column(only(args)) : nothing
+    backing = isnothing(inner) ? nothing : _as_data_column(parent(inner))
+    levels = isnothing(backing) || !(parent(backing) isa AbstractVector) ? nothing :
+        get(s.levels, name(inner), nothing)
+    isnothing(levels) && return invoke(_brm_rebind_value, Tuple{ExprColumn,Any}, x, s)
+    haskey(s.conflicts, name(inner)) && error(s.conflicts[name(inner)])
+    fitted = _SBFittedLevels(_sb_fitted_values(parent(backing)), levels)
+    ExprColumn(factor, NamedColumn(name(inner), DataColumn(fitted)); kwargs...)
+end
+# Constants are resolved from their own records; their inputs are not factors.
+_brm_rebind_value(x::ExprColumn{typeof(constant)}, ::_SBFittedFactorLevels) = x
+_sb_fitted_values(raw::_SBFittedLevels) = raw.values
+_sb_fitted_values(raw) = _brm_factor_values(raw)
+
 # Random-effect group coding has the same frozen-level geometry as `factor`,
 # but deserves its own diagnostic: the missing coordinate is a fitted group
 # effect, not a treatment contrast.  Keep this separate from `_sb_apply_levels`
@@ -3583,6 +3747,8 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
        s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts, held_out=(),
        resample_covariates=(), _frozen_preproc=nothing, _marginal_id_targets=nothing)
     brmi = _brm_resolve_optional_priors(brmi)
+    # A frozen re-emission codes releveled factors over their fitted levels.
+    isnothing(_frozen_preproc) || (brmi = _sb_fit_factor_levels(brmi, _frozen_preproc))
     source_parent = brmi
     fresh_covariates = _sb_covariate_selection(brmi,resample_covariates)
     isempty(fresh_covariates) || (brmi = _sb_covariate_brmi(brmi,fresh_covariates))
@@ -3755,10 +3921,10 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
         marginal_candidates, mod)
     # Prepass 2.5: group-block terms. For each `mu ~ f(...)` where f has a
     # _sb_term_group_block declaration, allocate one ranef_correlated_draws
-    # block per (f, group-column) pair. The lookup is threaded into _sb_emit!
-    # so _sb_sampling_backed! can route declaring terms to their emit hook
-    # with the pre-allocated block name and group-index name in hand.
-    group_block_lookup = _sb_emit_group_blocks!(stmts, data, gb_terms)
+    # block per (f, group-column) pair. Each predictor's own lookup is threaded
+    # into _sb_emit! so _sb_sampling_backed! can route declaring terms to their
+    # emit hook with that predictor's block name and group-index name in hand.
+    group_blocks = _sb_emit_group_blocks!(stmts, data, gb_terms)
     # Prepass 3: target -> observation-source map. Lets purely-intercept
     # linear predictors (`loc ~ 1`, `log(y_scale) ~ 1`) borrow N from the
     # observed `~` target that consumes them, instead of the hash-order
@@ -3785,6 +3951,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
                 PreprocEntry(:axis_extent, nothing, declared_axis, false))
             extent_name
         end
+        group_block_lookup = get(group_blocks, key, Dict{Symbol, NamedTuple}())
         _sb_emit_prepared!(stmts, data, get(nodes, key, nothing), key, parent(nc); id_lookup, obs_n, cv_groups,
                   centered_groups, group_block_lookup, effect_overrides, mod,
                   r2d2=(; overrides=r2d2_overrides, names=r2d2_names,
@@ -5053,13 +5220,14 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             :group_index, (; levels, n_groups_key=e.const_.n_groups_key),
             e.raw_ref, true)
     elseif e.kind === :ranef_factor_dummy
-        raw = _sb_df_column(df, e.raw_ref)
+        source = _sb_factor_source_column(e.raw_ref)
+        raw = _sb_factor_replay_values(e.raw_ref, df)
         raw isa AbstractVector || error(
-            "sbimpl: reprocess: categorical random-effect predictor `$(e.raw_ref)` " *
+            "sbimpl: reprocess: categorical random-effect predictor `$source` " *
             "must be a vector, got $(typeof(raw))")
-        levels = freeze ? e.const_.levels : _sb_fit_levels(raw)
+        levels = freeze ? e.const_.levels : _sb_factor_refit_levels(e.raw_ref, raw)
         length(levels) == e.const_.n_levels || error(
-            "sbimpl: reprocess: categorical random-effect predictor `$(e.raw_ref)` " *
+            "sbimpl: reprocess: categorical random-effect predictor `$source` " *
             "has $(length(levels)) levels, but the fitted design has " *
             "$(e.const_.n_levels). Preserve the fitted level count or rebuild " *
             "the model.")
@@ -5259,14 +5427,14 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         end
         new_preproc[key] = e
     elseif e.kind === :factor || e.kind === :mo
-        v = _sb_df_column(df, e.raw_ref)
-        levels = freeze ? e.const_ : _sb_fit_levels(v)
+        v = _sb_factor_replay_values(e.raw_ref, df)
+        levels = freeze ? e.const_ : _sb_factor_refit_levels(e.raw_ref, v)
         new_data[key] = _sb_apply_levels(levels, v)   # errors loudly on an unseen level
         new_preproc[key] = PreprocEntry(e.kind, levels, e.raw_ref, true)
         if e.kind === :factor
             # The `<x>_n_levels` count key co-emitted by `_sb_emit_cat!`: frozen
             # training count under freeze=true, re-counted under freeze=false.
-            n_name = Symbol(e.raw_ref, :_n_levels)
+            n_name = Symbol(_sb_factor_block(e.raw_ref), :_n_levels)
             new_data[n_name] = length(levels)
             push!(handled, n_name)
         end
@@ -5536,14 +5704,23 @@ function _sb_emit_prepared!(stmts, data, node::_BRMPreparedParameter, key, sourc
     _sb_emit_sampled_declaration!(stmts, data, key, getf(rhs), rhs)
 end
 function _sb_emit_sampled_declaration!(stmts, data, key, callable, rhs)
+    # A law over a value read per subject (a `@plate` or kernel result, or data
+    # grouped per subject) declares no parameter: no parameter has a ragged
+    # shape. It observes a model-scope response with its column omitted, so it
+    # emits the bound response's likelihood statement, per-subject argument
+    # plates included (`_sb_grouped_argument!`).
+    _sb_reads_grouped_value(rhs) && return _sb_likelihood!(stmts, key, rhs, data)
     _sb_emit_vector_prior!(stmts, data, key, callable, rhs) && return
     _sb_emit_prior!(stmts, key, callable, rhs) && return
     error("sbimpl: sampled declaration `$key` has no Stan prior translation for `$callable`")
 end
-# `weighted` wraps only observations, so a sampled `weighted` declaration is an
-# observation with its response omitted: it emits the weighted likelihood
-# statement, which StanBlocks forward-simulates from the fitted predictive law.
-_sb_emit_sampled_declaration!(stmts, data, key, ::typeof(weighted), rhs) =
+# `weighted` and `censored` wrap only observations (a censored law puts mass on
+# its bounds, which no parameter can be sampled from), so a sampled declaration
+# of either is an observation with its response omitted: it emits the
+# likelihood statement, which StanBlocks forward-simulates from the fitted
+# predictive law.
+_sb_emit_sampled_declaration!(stmts, data, key,
+                              ::Union{typeof(weighted),typeof(censored)}, rhs) =
     _sb_likelihood!(stmts, key, rhs, data)
 function _sb_emit_prepared!(stmts, data, node::_BRMPreparedAssignment, key, source; kwargs...)
     _, rhs = getargs(source, 2)
@@ -9124,6 +9301,7 @@ _sb_cat_levels_data(_d) = nothing
 
 _sb_cat_levels_vec(v::AbstractVector{<:Integer}) = v
 _sb_cat_levels_vec(v::CA.CategoricalVector) = v
+_sb_cat_levels_vec(v::_SBReleveledFactor{<:AbstractString}) = v
 _sb_cat_levels_vec(_v) = nothing
 
 # A bare integer-typed column in a population formula is treatment-coded
@@ -9319,7 +9497,8 @@ function _sb_emit_cat!(stmts, data, target::Symbol, t::NamedColumn, summands;
     # and with it the per-level prior vector of a cell-mean block, whose
     # `<c>_lvl_<k>` addresses are positions in that fitted order -- instead of
     # re-deriving both from the new rows. Mirrors `_sb_mo_levels_for_emission`.
-    levels = _sb_cat_levels_for_emission(data, idx_name, name(t), parent(backing))
+    raw_ref = _sb_factor_replay_ref(parent(backing), name(t))
+    levels = _sb_cat_levels_for_emission(data, idx_name, raw_ref, parent(backing))
     n_levels, idx = length(levels), _sb_apply_levels(levels, parent(backing))
     data[idx_name] = idx
     data[n_name]   = n_levels
@@ -9327,7 +9506,7 @@ function _sb_emit_cat!(stmts, data, target::Symbol, t::NamedColumn, summands;
     # re-codes a new df against it and updates the `<x>_n_levels` count key
     # (derived from raw_ref). Dimension-coupled (unseen level / changed count).
     _sb_record_preproc!(data, idx_name,
-        PreprocEntry(:factor, levels, name(t), true))
+        PreprocEntry(:factor, levels, raw_ref, true))
     if cellmeans
         _sb_emit_cat_cells!(stmts, col_name, idx_name, n_name, n_levels, prior,
                             r2d2; mod)
@@ -9369,8 +9548,8 @@ function _sb_emit_cat!(stmts, data, target::Symbol, t::NamedColumn, summands;
     push!(summands, col_name)
 end
 
-function _sb_cat_levels_for_emission(data, idx_name::Symbol, source::Symbol, raw)
-    frozen = _sb_frozen_preproc_entry(data, idx_name, :factor, source)
+function _sb_cat_levels_for_emission(data, idx_name::Symbol, raw_ref, raw)
+    frozen = _sb_frozen_preproc_entry(data, idx_name, :factor, raw_ref)
     isnothing(frozen) ? _sb_fit_levels(raw) : frozen.const_
 end
 
@@ -9494,8 +9673,9 @@ function _sb_ranef_factor_dummies!(cols, data, t::NamedColumn, levels, first_lev
     # A frozen re-emission (`resample_groups`) keeps the FITTED level set, read
     # off the recorded first dummy, so a frame carrying only some levels still
     # emits every fitted column -- the `_sb_cat_levels_for_emission` rule.
+    raw_ref = _sb_factor_replay_ref(levels, name(t))
     frozen = _sb_frozen_preproc_entry(
-        data, Symbol(name(t), :_dummy_, first_level), :ranef_factor_dummy, name(t))
+        data, Symbol(name(t), :_dummy_, first_level), :ranef_factor_dummy, raw_ref)
     fitted_levels = isnothing(frozen) ? _sb_fit_levels(levels) : frozen.const_.levels
     n_levels, idx = length(fitted_levels), _sb_apply_levels(fitted_levels, levels)
     for lvl in first_level:n_levels
@@ -9504,7 +9684,7 @@ function _sb_ranef_factor_dummies!(cols, data, t::NamedColumn, levels, first_lev
         _sb_record_preproc!(data, col_name, PreprocEntry(
             :ranef_factor_dummy,
             (; levels=fitted_levels, level=lvl, n_levels),
-            name(t), true))
+            raw_ref, true))
         push!(cols, col_name)
     end
 end
@@ -11062,9 +11242,9 @@ end
 # which covers both: the biomarker family is a single summand of its RHS, hsgp is one of several.
 # Every declaring summand is its own term INSTANCE — there is no `(key, f)`
 # dedup, so N instances of the same term (e.g. `hsgp(t, by=g) + hsgp(s, by=g)`)
-# each get collected and allocated their own block. Identical instances (same
-# block name) are coalesced later, at emit time. A subsequent emit step
-# allocates one block per declared field and builds the lookup.
+# each get collected and allocated their own block. Identical instances on one
+# predictor are coalesced later, by `_sb_group_block_plan`. A subsequent emit
+# step allocates one block per declared field and builds the lookup.
 Base.@nospecializeinfer function _sb_collect_group_block_terms(@nospecialize(brmi::BRMI))
     result = Any[]
     for (key, op_nc) in pairs(brmi.operations)
@@ -11133,37 +11313,68 @@ function _sb_emit_block_draw!(stmts, prior::ExprColumn, block_name, idx_name,
                          n_name, n_terms_name, suffix)
 end
 
-# Allocate one block per declared field and return a lookup
-# Dict{block_name::Symbol => (; block_name, idx_name, n_per_group)}.
-# Keyed by the fully-disambiguated block NAME (`b_<field>_<gname>`), so N
-# distinct instances (different x and/or group) each get their own block and
-# only genuinely identical instances (same block name) are coalesced.
+# The block each declaring term instance draws from: one entry per (instance,
+# field) of `gb_terms`, in order. A field's base suffix is `<field>_<gname>`;
+# for legacy single-field terms field == nameof(f), and for hsgp the field name
+# embeds the axes, so two HSGPs on the same group never collide. Identical
+# instances on ONE predictor share the base block; the same field and grouping
+# on a later predictor gets its own, `<field>_<predictor>_<gname>` (+ serial
+# when that spelling is taken), so every predictor owns independent weights.
+# The emitter, the descriptor's ownership pass and adaptive centering all read
+# the block names from this one plan.
+_sb_group_block_base(fld, rhs_e) = Symbol(fld.name, :_, _sb_group_name(fld.group, rhs_e))
+function _sb_group_block_plan(gb_terms)
+    first_owner = Dict{Symbol,Symbol}()
+    for gb in gb_terms, fld in gb.fields
+        get!(first_owner, _sb_group_block_base(fld, gb.rhs_e), gb.key)
+    end
+    taken = Set{Symbol}(keys(first_owner))
+    scoped = Dict{Tuple{Symbol,Symbol},Symbol}()
+    plan = NamedTuple[]
+    for gb in gb_terms, fld in gb.fields
+        base = _sb_group_block_base(fld, gb.rhs_e)
+        suffix = first_owner[base] === gb.key ? base : get!(scoped, (gb.key, base)) do
+            stem = Symbol(fld.name, :_, gb.key, :_, _sb_group_name(fld.group, gb.rhs_e))
+            candidate, serial = stem, 2
+            while candidate in taken
+                candidate = Symbol(stem, :_, serial)
+                serial += 1
+            end
+            push!(taken, candidate)
+            candidate
+        end
+        push!(plan, (; gb.key, gb.f, gb.rhs_e, field=fld, base, suffix))
+    end
+    plan
+end
+
+# Allocate one block per planned suffix and return a per-predictor lookup
+# Dict{predictor => Dict{base block name => (; block_name, idx_name, n_per_group)}}.
+# The inner key is the base `b_<field>_<gname>` that `_sb_find_group_block`
+# rebuilds from the term call; `block_name` is the block this predictor owns.
 function _sb_emit_group_blocks!(stmts, data, gb_terms)
-    lookup = Dict{Symbol, NamedTuple}()
-    for (; f, rhs_e, fields) in gb_terms
-        for fld in fields
-            group_col = _sb_resolve_group_col(fld.group, rhs_e, data)
-            gname = name(group_col)
-            # Block name `b_<field>_<gname>`; for legacy single-field terms
-            # field == nameof(f), so this is byte-for-byte the old name. For hsgp
-            # the field name embeds x, so two HSGPs on the same group never collide.
-            suffix = Symbol(fld.name, :_, gname)
+    lookup = Dict{Symbol, Dict{Symbol, NamedTuple}}()
+    allocated = Dict{Symbol, NamedTuple}()
+    for (; key, rhs_e, field, base, suffix) in _sb_group_block_plan(gb_terms)
+        info = get(allocated, suffix, nothing)
+        if isnothing(info)
+            group_col = _sb_resolve_group_col(field.group, rhs_e, data)
             block_name = Symbol(:b_, suffix)
-            haskey(lookup, block_name) && continue   # identical instance already allocated
             n_terms_name = Symbol(:n_terms_, suffix)
-            data[n_terms_name] = fld.n_per_group
+            data[n_terms_name] = field.n_per_group
             _sb_record_static!(data, n_terms_name)
             idx_name, n_name = _sb_ensure_group_data!(data, group_col)
-            _sb_emit_block_draw!(stmts, fld.prior, block_name, idx_name, n_name, n_terms_name, suffix)
-            lookup[block_name] = (; block_name, idx_name, n_per_group=fld.n_per_group)
+            _sb_emit_block_draw!(stmts, field.prior, block_name, idx_name, n_name, n_terms_name, suffix)
+            info = allocated[suffix] = (; block_name, idx_name, n_per_group=field.n_per_group)
         end
+        get!(Dict{Symbol, NamedTuple}, lookup, key)[Symbol(:b_, base)] = info
     end
     lookup
 end
 
 # Look up block_info for a declaring term call at emit time, or nothing. Rebuilds
-# each field's block name (via `_sb_group_name`, matching the emit pass) and
-# resolves it against the block-name-keyed lookup. Returns a NamedTuple carrying
+# each field's base block name (via `_sb_group_name`, matching the emit pass) and
+# resolves it against the predictor's block-name-keyed lookup. Returns a NamedTuple carrying
 # a `fields` map (field-name => per-field info); for single-field terms the lone
 # field's keys are also spliced at top level so legacy consumers that destructure
 # `(; block_name, idx_name)` keep working.
@@ -11172,7 +11383,7 @@ function _sb_find_group_block(f, rhs_e, group_block_lookup)
     isnothing(fields) && return nothing
     fmap = Dict{Symbol,NamedTuple}()
     for fld in fields
-        block_name = Symbol(:b_, fld.name, :_, _sb_group_name(fld.group, rhs_e))
+        block_name = Symbol(:b_, _sb_group_block_base(fld, rhs_e))
         info = get(group_block_lookup, block_name, nothing)
         isnothing(info) && return nothing
         fmap[fld.name] = info
@@ -11805,7 +12016,10 @@ _sb_collect_terms_expr!(acc, ::typeof(*), x) = push!(acc, x)
 # downstream categorical pipeline (treatment-coded dummies relative to
 # level 1) reuses unchanged. An integer-leveled `CategoricalVector` codes its
 # unwrapped values the same way; a string-leveled one or a plain string column
-# goes through `_sb_string_factor_column` (level VALUES, `ref="level"`).
+# goes through `_sb_string_factor_column` (level VALUES, `ref="level"`). The
+# recoded column is an `_SBReleveledFactor`, which remembers the source its
+# records replay from. The reference is checked against the column's level set,
+# which a replay re-emission supplies from the fit (`_SBFittedLevels`).
 _sb_collect_terms_expr!(acc, ::typeof(factor), x::ExprColumn) = begin
     args = getargs(x); kw = getkwargs(x)
     length(args) == 1 || error("sbimpl: `factor(...)` expects 1 positional arg, got $(length(args))")
@@ -11816,7 +12030,7 @@ _sb_collect_terms_expr!(acc, ::typeof(factor), x::ExprColumn) = begin
     isnothing(backing) && error("sbimpl: `factor($(name(inner)))` expects a raw data column")
     data = parent(backing)
     if data isa CA.CategoricalVector && CA.leveltype(data) <: Integer
-        backing = DataColumn(Int.(CA.unwrap.(data)))
+        backing = DataColumn(_sb_integer_factor_values(data))
         data = parent(backing)
     end
     _brm_is_string_categorical_data(data) &&
@@ -11827,16 +12041,18 @@ _sb_collect_terms_expr!(acc, ::typeof(factor), x::ExprColumn) = begin
     ref_raw = get(kw, :ref, 1)
     ref = _as_integer(ref_raw)
     isnothing(ref) && error("sbimpl: `factor(...; ref=k)` expects an integer level, got $(typeof(ref_raw))")
-    1 <= ref <= maximum(raw) || error("sbimpl: `factor($(name(inner)); ref=$ref)` ref out of range (max level $(maximum(raw)))")
-    new_name = ref == 1 ? name(inner) : Symbol(name(inner), :__ref_, ref)
-    new_backing = ref == 1 ? backing :
-        DataColumn(Int[r == ref ? 1 : r == 1 ? ref : r for r in raw])
-    push!(acc, NamedColumn(new_name, new_backing))
+    max_level = maximum(_brm_fit_levels(raw))
+    1 <= ref <= max_level || error("sbimpl: `factor($(name(inner)); ref=$ref)` ref out of range (max level $max_level)")
+    ref == 1 && return push!(acc, NamedColumn(name(inner), backing))
+    block = Symbol(name(inner), :__ref_, ref)
+    codes = _sb_relevel_codes(raw, ref)
+    push!(acc, NamedColumn(block, DataColumn(_SBReleveledFactor(
+        codes, _sb_fit_levels(codes), _SBFactorSource(block, name(inner), Int(ref))))))
 end
 # A string `factor(...)` term as the categorical column `_sb_emit_cat!` codes:
 # the backend-neutral string design's `sort(unique)` level order with the
 # reference swapped into first place (`_brm_string_factor_population_columns`),
-# carried as a `CategoricalVector` so emitted labels keep the level values. Its
+# carried with that level order so emitted labels keep the level values. Its
 # name is the term's block name (`c`, or `c__ref_<level>` for a non-default
 # reference), which the cell-means choice and prior addresses resolve against.
 function _sb_string_factor_column(term, inner, data::AbstractVector)
@@ -11844,23 +12060,23 @@ function _sb_string_factor_column(term, inner, data::AbstractVector)
     any(ismissing, values) && error(
         "sbimpl: `factor($(name(inner)))` has missing values; a categorical " *
         "predictor needs a level on every row")
-    fit = collect(_brm_fit_levels(values))
+    fit = _brm_fit_levels(values)
     isempty(fit) && error("sbimpl: `factor($(name(inner)))` observes no level")
     ref = get(getkwargs(term), :ref, first(fit))
-    ref isa AbstractString || error(
-        "sbimpl: `factor($(name(inner)); ref=...)` on string data names the " *
-        "reference by its level value, got $(repr(ref))")
-    k = findfirst(isequal(ref), fit)
-    isnothing(k) && error(
-        "sbimpl: `factor($(name(inner)); ref=$(repr(ref)))` ref is not an " *
-        "observed level (levels $(repr(fit)))")
+    levels = _sb_string_factor_levels(fit, ref, name(inner))
     block = _brm_categorical_term_block(term)
     Base.isidentifier(block) || error(
         "sbimpl: `factor($(name(inner)); ref=$(repr(ref)))` names its emitted " *
         "block `$block`, which is not a valid identifier; choose a reference " *
         "level whose value is identifier-safe")
-    fit[1], fit[k] = fit[k], fit[1]
-    NamedColumn(block, DataColumn(CA.categorical(values; levels=fit)))
+    if block === name(inner)
+        # A replay re-emission's levels are the fitted ones: report an unseen
+        # replay level as every other categorical replay does.
+        _brm_apply_fitted_levels(levels, values; prefix="sbimpl")
+        return NamedColumn(block, DataColumn(CA.categorical(values; levels)))
+    end
+    NamedColumn(block, DataColumn(_SBReleveledFactor(
+        collect(values), levels, _SBFactorSource(block, name(inner), String(ref)))))
 end
 
 # `(t1 + t2 + ... || g)` zerocorr ranefs: independent variances per term,
@@ -12442,22 +12658,26 @@ end
 # Return a stable axis-derived name for the first structured term, then scope
 # only collisions by predictor. This preserves every historical single-term
 # spelling while allowing two distributional predictors to use the same axis.
+# `tail` is the fixed ending of the carrier (`_by_<g>` for a grouped `hsgp`):
+# the collision check is on the carrier actually bound, `<family>_<suffix><tail>`,
+# and the returned suffix excludes it.
 function _sb_unique_structured_term_names(stmts, family::Symbol,
-                                          suffix::AbstractString, target)
+                                          suffix::AbstractString, target;
+                                          tail::AbstractString="")
     bound(name) = any(stmts) do stmt
         Meta.isexpr(stmt, :call) && length(stmt.args) >= 2 && stmt.args[1] === :~ &&
             _sb_plan_lhs_name(stmt.args[2]) === name
     end
-    col = Symbol(family, :_, suffix)
+    col = Symbol(family, :_, suffix, tail)
     bound(col) || return String(suffix), col
     stem = string(something(target, :term), "_", suffix)
-    candidate = Symbol(family, :_, stem)
+    candidate = stem
     serial = 2
-    while bound(candidate)
-        candidate = Symbol(family, :_, stem, :_, serial)
+    while bound(Symbol(family, :_, candidate, tail))
+        candidate = string(stem, "_", serial)
         serial += 1
     end
-    replace(String(candidate), string(family, "_") => ""; count=1), candidate
+    candidate, Symbol(family, :_, candidate, tail)
 end
 
 # `gp(x...)` is the exact GP term. It records an N x d predictor matrix and
@@ -12618,8 +12838,9 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     cov === :periodic && return _sb_hsgp_periodic_term!(
         stmts, data, t, names, raw, is_raw, K, kw, period, term_overrides,
         target, options)
+    axes_suffix = join(string.(names), "_")
     suffix, col_name = _sb_unique_structured_term_names(
-        stmts, :hsgp, join(string.(names), "_"), target)
+        stmts, :hsgp, axes_suffix, target)
     centeredness = _brm_hsgp_centeredness(kw, prod(K))
     partial = any(!iszero, centeredness)
     domain_fits = _sb_hsgp_domain_fits(kw, n_axes; required=!is_raw)
@@ -12691,10 +12912,14 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
             "and cannot be combined with `by=`")
         block_info = _sb_find_group_block(hsgp, t, group_block_lookup)
         isnothing(block_info) && error(
-            "sbimpl: `hsgp($suffix, by=...)` found no allocated per-group weight ",
+            "sbimpl: `hsgp($axes_suffix, by=...)` found no allocated per-group weight ",
             "block — prepass 2.5 should have allocated it")
         info = block_info
         gname = name(_sb_resolve_group_col((; kwarg=:by), t, data))
+        # A repeat over the same axes and group on another predictor takes
+        # `hsgp_<target>_<axes>_by_<g>`, like the ungrouped carrier.
+        suffix, col_name = _sb_unique_structured_term_names(
+            stmts, :hsgp, axes_suffix, target; tail="_by_$gname")
         PHI_name = Symbol(:PHI_hsgp_, suffix, :_by_, gname)
         omega2_name = Symbol(:omega2_hsgp_, suffix, :_by_, gname)
         rho_lower_name = Symbol(:rho_lower_hsgp_, suffix, :_by_, gname)
@@ -12717,7 +12942,6 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
              omega2_key=omega2_name, rho_lower_key=rho_lower_name,
              _sb_hsgp_option_const(options, fitted.support)..., floor_const...),
             names, false))
-        col_name = Symbol(:hsgp_, suffix, :_by_, gname)
         rho_plan = _sb_hyper_plan_for(hyper_plans, :length_scale)
         sigma_plan = _sb_hyper_plan_for(hyper_plans, :sd)
         if isnothing(rho_plan) && isnothing(sigma_plan)
@@ -13395,14 +13619,8 @@ function _sb_grouped_argument_ports!(ports, argument::NamedColumn, lengths)
     if backing isa DataColumn
         raw = parent(backing)
         raw isa AbstractVector{<:AbstractVector} || return false
-        actual = length.(raw)
-        length(actual) == length(lengths) &&
-            all(pair -> first(pair) == last(pair) || first(pair) == 1,
-                zip(actual, lengths)) || error(
-            "sbimpl: observation argument `$(name(argument))` has group lengths " *
-            "$actual; expected $lengths")
         ports[name(argument)] = argument
-        return actual != lengths
+        return _sb_grouped_port_broadcasts(argument, length.(raw), lengths)
     end
     # A kernel result is one cell per subject, so it slices per observed group
     # exactly like ragged data. Its subject grouping is irrelevant here: a
@@ -13411,6 +13629,18 @@ function _sb_grouped_argument_ports!(ports, argument::NamedColumn, lengths)
     false
 end
 _sb_grouped_argument_ports!(_ports, _argument, _lengths) = false
+# Whether a grouped data argument has singleton groups to broadcast over the
+# observed groups' `lengths`. An omitted response has no observed lengths: its
+# data arguments are read as they are grouped.
+function _sb_grouped_port_broadcasts(argument, actual, lengths)
+    length(actual) == length(lengths) &&
+        all(pair -> first(pair) == last(pair) || first(pair) == 1,
+            zip(actual, lengths)) || error(
+        "sbimpl: observation argument `$(name(argument))` has group lengths " *
+        "$actual; expected $lengths")
+    actual != lengths
+end
+_sb_grouped_port_broadcasts(_argument, _actual, ::Nothing) = false
 # A row-wise callable (`addprop`) gives one group's rows the values it gives
 # them over all rows, so it runs in the cell like arithmetic. Applied to the
 # whole flattened argument, it would run once per group, every group's rows
@@ -13430,17 +13660,46 @@ function _sb_grouped_ports(argument, lengths)
     _sb_grouped_argument_ports!(ports, argument, lengths) ? ports : nothing
 end
 
-function _sb_grouped_argument!(stmts, data, target, argument, index)
-    response = get(data, target, nothing)
-    response isa AbstractVector{<:AbstractVector} || return argument
+# Whether a law reads a value grouped per subject — a kernel (`@plate`) result
+# or pre-grouped data — in any argument or keyword: the values the argument
+# plates above slice per group.
+_sb_reads_grouped_value(_x) = false
+_sb_reads_grouped_value(x::NamedColumn) =
+    !isnothing(_sb_kernel_producer(x)) ||
+    (parent(x) isa DataColumn && parent(parent(x)) isa AbstractVector{<:AbstractVector})
+_sb_reads_grouped_value(x::ExprColumn) =
+    any(_sb_reads_grouped_value, getargs(x)) ||
+    any(_sb_reads_grouped_value, values(getkwargs(x)))
+
+_sb_grouped_argument!(stmts, data, target, argument, index) =
+    _sb_grouped_argument!(stmts, data, target, get(data, target, nothing),
+                          argument, index)
+_sb_grouped_argument!(_stmts, _data, _target, _response, argument, _index) = argument
+function _sb_grouped_argument!(stmts, data, target,
+                               response::AbstractVector{<:AbstractVector},
+                               argument, index)
     ports = _sb_grouped_ports(argument, length.(response))
     isnothing(ports) ? argument :
         _sb_grouped_argument_plate!(stmts, data, target, target, argument, index, ports)
 end
+# An omitted model-scope response has no groups of its own. Its computed
+# argument runs over the cells of a value it reads: a kernel result's, which
+# are the cells that value was computed on, else grouped data's.
+# An omitted `ragged(y, group)` join grouped its arguments over its row
+# partition already (`_sb_ragged_likelihood_rhs`); they are read in place here.
+function _sb_grouped_argument!(stmts, data, target, ::Nothing, argument, index)
+    ports = _sb_grouped_ports(argument, nothing)
+    isnothing(ports) && return argument
+    names = sort!(collect(keys(ports)))
+    kernel = findfirst(n -> !isnothing(_sb_kernel_producer(ports[n])), names)
+    _sb_grouped_argument_plate!(stmts, data, target,
+        names[something(kernel, 1)], argument, index, ports)
+end
 
 # Evaluate a computed observation argument one group at a time, in a plate over
 # the observed `cells` (the bound response, or an omitted join's row partition)
-# and the argument's grouped ports.
+# and the argument's grouped ports. When `cells` names one of those ports (an
+# omitted model-scope response), that port's cell is the observed cell.
 function _sb_grouped_argument_plate!(stmts, data, target, cells, argument, index, ports)
     expression = _sb_scalar_expr(argument, data)
     names = sort!(collect(keys(ports)))
@@ -13449,16 +13708,20 @@ function _sb_grouped_argument_plate!(stmts, data, target, cells, argument, index
     _brm_cell_value_refs!(taken, expression)
     entry = _rk_ast_fresh_name("$(target)_argument_$index", taken)
     params = [_rk_ast_fresh_name("$(entry)_cell_$i", taken) for i in eachindex(names)]
-    observed = _rk_ast_fresh_name("$(entry)_observed", taken)
+    own = findfirst(==(cells), names)
+    observed = isnothing(own) ? _rk_ast_fresh_name("$(entry)_observed", taken) :
+        params[own]
     for (name, param) in zip(names, params)
         # Materialize singleton cells on the observed cell's row axis before
         # applying elementwise arithmetic or calling an exact vector law.
-        rows = :(num_elements($param) == 1 ?
+        rows = param === observed ? param : :(num_elements($param) == 1 ?
             rep_vector($param[1], num_elements($observed)) : $param)
         expression = _sb_subst_sym(expression, name, rows)
     end
-    plate = Expr(:do, Expr(:call, :plate, cells, names...),
-        Expr(:->, Expr(:tuple, observed, params...), Expr(:block, expression)))
+    iterables, formals = isnothing(own) ? ((cells, names...), (observed, params...)) :
+        (names, params)
+    plate = Expr(:do, Expr(:call, :plate, iterables...),
+        Expr(:->, Expr(:tuple, formals...), Expr(:block, expression)))
     push!(stmts, Expr(:call, :~, entry, plate))
     NamedColumn(entry, MissingColumn())
 end

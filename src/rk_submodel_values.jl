@@ -7,10 +7,14 @@ retain ordinary population-formula preparation. The caller owns all four
 mutable collections. `rhs` retains the original positional and keyword column
 references; parameter-dependent values must remain named source references.
 
-Append ordinary `@rkppl` definitions (`name(args...) = begin ... end`) and/or
-ordinary Julia function definitions, then ordinary main statements producing
-`target`. `data` holds preparation-only inputs, and `bindings` holds exact
-callable identities. All declarations, priors and observations must be visible
+Append ordinary `@rkppl` submodel definitions and/or ordinary Julia function
+definitions, then ordinary main statements producing `target`. A submodel is
+an assignment definition, written bare (`name(args...) = begin ... end`) or
+with its macro (`ReactiveKernelsPPL.@rkppl name(args...) = begin ... end`);
+both spellings emit the bare assignment, which evaluation applies `@rkppl` to.
+Explicit `ReactiveKernels.@kernel` graph definitions keep their macro. `data`
+holds preparation-only inputs, and `bindings` holds exact callable identities.
+All declarations, priors and observations must be visible
 in this source; the extension never receives a lowered PPL plan or derivative.
 An emitted entry owns its callable name: bind its existing leaf functions under
 separate names, or bind an existing entry without defining it again. Defining
@@ -44,6 +48,7 @@ function _rk_prepare_submodel_values(program)
         claimed = _rk_submodel_rhs!(definitions, statements, columns, bindings,
             operation.name, getf(rhs), rhs)
         claimed === nothing && continue
+        definitions = Expr[_rk_canonical_source_definition(d) for d in definitions]
         outputs = Set{Symbol}()
         foreach(statement -> _rk_source_outputs!(outputs, statement), statements)
         operation.name in outputs || error(
