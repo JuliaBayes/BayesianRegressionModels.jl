@@ -619,11 +619,13 @@ end
 _brm_raw_column(_) = nothing
 
 # Most records name their source column(s) in `raw_ref`. An exact-total basis
-# (`total_A_<lp>`, and the S2Z `s2z_B_<lp>`) instead records the linear
-# predictor it decomposes — a model value, not a dataframe column.
+# (`total_A_<lp>`, and the S2Z `s2z_B_<lp>`) and its per-group design
+# (`total_W_<lp>`) instead record the linear predictor they decompose — a model
+# value, not a dataframe column.
 _brm_preproc_column(e::PreprocEntry) = _brm_preproc_column(Val(e.kind), e.raw_ref)
 _brm_preproc_column(::Val, raw_ref) = _brm_raw_column(raw_ref)
 _brm_preproc_column(::Val{:total_basis}, _) = nothing
+_brm_preproc_column(::Val{:total_group_design}, _) = nothing
 
 # The dataframe columns an observation's `data_source` key holds. A plain
 # response IS its column. A joint response names its member columns. A ragged

@@ -1014,9 +1014,9 @@ function population_draws(model, draws::AbstractMatrix, unc_names; groups,
         for i in axes(draws,1)
             conditional = _total_conditional(block,coordinates,view(draws,i,:))
             beta = conditional.mean + conditional.factor.U\randn(rng,length(conditional.mean))
-            mu = block.A*beta
+            mu = _total_location(block,beta)
             for k in axes(coordinates.totals,2), g in axes(coordinates.totals,1)
-                out[i,coordinates.totals[g,k]] = mu[k]
+                out[i,coordinates.totals[g,k]] = mu[g,k]
             end
         end
     end
@@ -1171,6 +1171,7 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
         length(matching) == 1 || throw(ArgumentError("total prediction target has no matching fitted block $(bt.binding)"))
         bf = totals_from[only(matching)]
         (bf.columns == bt.columns && bf.population_columns == bt.population_columns &&
+         bf.group_columns == bt.group_columns &&
          bf.A == bt.A && bf.location == bt.location && bf.precision == bt.precision &&
          bf.mixture == bt.mixture &&
          (isempty(bf.mixture) ||
@@ -1198,7 +1199,7 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
             gf = source_groups[g]
             gf == 0 || (plan_idx[ct.totals[g,k]] = cf.totals[gf,k])
         end
-        push!(total_plans,(;block=bf,source=cf,target=ct,source_groups))
+        push!(total_plans,(;block=bf,target_block=bt,source=cf,target=ct,source_groups))
     end
     matched_totals == length(totals_from) || throw(ArgumentError(
         "total prediction cannot change to a conventional parameterization"))
@@ -1329,11 +1330,13 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
         for i in axes(draws,1)
             conditional = _total_conditional(plan.block,plan.source,view(draws,i,:))
             beta = conditional.mean + conditional.factor.U\randn(rng,length(conditional.mean))
-            mu = plan.block.A*beta
+            # A fresh group's total is drawn around its own mean: the target's
+            # W carries the new groups' group-level predictor values.
+            mu = _total_location(plan.target_block,beta)
             for g in eachindex(plan.source_groups)
                 plan.source_groups[g] == 0 || continue
-                for k in eachindex(mu)
-                    out[i,plan.target.totals[g,k]] = mu[k]+conditional.tau[k]*randn(rng)
+                for k in axes(mu,2)
+                    out[i,plan.target.totals[g,k]] = mu[g,k]+conditional.tau[k]*randn(rng)
                 end
             end
         end

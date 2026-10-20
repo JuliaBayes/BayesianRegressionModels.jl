@@ -140,7 +140,7 @@ export S2ZEffectBlock, s2z_effect_blocks, recover_s2z_draws, select_s2z_rho,
        select_s2z_centeredness
 export brm_s2z_contrast, brm_s2z_theta, brm_s2z_deviations, brm_s2z_effects, brm_s2z_recover_rng,
        brm_s2z_group, brm_s2z_group_deviations
-export brm_total, brm_total_recover_rng, brm_total_deviations
+export brm_total, brm_total_recover_rng, brm_total_deviations, brm_total_location
 export weighted, AbstractWeights, AnalyticWeights, FrequencyWeights,
        ProbabilityWeights, UnitWeights, Weights,
        aweights, fweights, pweights, uweights, weights
