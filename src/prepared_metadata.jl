@@ -18,7 +18,8 @@
 #   raw_ref      -- the source: a column-node tree (zscale/center/standardize/
 #                   protect, re-materialised by shared expression replay) or a
 #                   column NAME Symbol (factor/mo/spline) or axis-name Tuple
-#                   (gp/hsgp)
+#                   (gp/hsgp); a releveled `factor(x; ref=...)` block records
+#                   an `_SBFactorSource` (block, column `x`, reference)
 #   dim_coupled  -- true when a fitted level set drives parameter dimension
 struct PreprocEntry
     kind::Symbol
