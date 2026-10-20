@@ -30,7 +30,7 @@ rk_artifact_version() = 4
 # (`rk_translate_artifact`) consult. It currently equals the extension's
 # `_RK_PLAN_TYPES`; it is kept as its own predicate so a future plan kind
 # can join the RK backend without silently becoming an artifact kind.
-const _RK_ARTIFACT_PLAN_TYPES = Union{_RKStructuralPlan,_RKKernelPlan,_RKValuePlan,_RKHeldOutPlan,_RKHeldOutRowsPlan,_RKUnconditionedPlan}
+const _RK_ARTIFACT_PLAN_TYPES = Union{_RKStructuralPlan,_RKKernelPlan,_RKValuePlan,_RKHeldOutPlan,_RKUnconditionedPlan}
 
 """
     emit_rk_artifact(brmi::BRMI; case_id, provenance=nothing, brm_pin=nothing, held_out=())
@@ -214,11 +214,6 @@ end
 function show_rk_plan(plan::_RKHeldOutPlan)
     "held_out    = [$(join(sort!(string.(collect(plan.held_out))), ", "))]\n" *
         show_rk_plan(plan.parent)
-end
-
-function show_rk_plan(plan::_RKHeldOutRowsPlan)
-    "held_out rows = [$(join(("$name: $(_rk_held_out_row_count(mask))" for (name, mask) in
-        sort!(collect(plan.rows); by=first)), ", "))]\n" * show_rk_plan(plan.parent)
 end
 
 function show_rk_plan(plan::_RKUnconditionedPlan)
