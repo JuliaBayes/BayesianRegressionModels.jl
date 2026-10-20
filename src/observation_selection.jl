@@ -53,8 +53,12 @@ _brm_held_out_entry!(names, rows, entry, prefix) = error(
 # of a flat response, one `Bool` vector per array of a response bound as one
 # array per subject (an observation inside `@plate for`). `true` holds a row
 # out. Returns the mask as fresh `Vector{Bool}` / `Vector{Vector{Bool}}`.
-function _brm_held_out_mask(mask, response, name::Symbol; prefix="BRM")
+# `replay` names the replay's own `held_out=` in a shape error: a replay
+# re-applies the fit's masks by default, which fit only data of the fit's shape.
+function _brm_held_out_mask(mask, response, name::Symbol; prefix="BRM",
+                            replay::Bool=false)
     describe = "the row mask for `held_out` response `$name`"
+    hint = replay ? _brm_held_out_replay_hint(name) : ""
     response isa AbstractVector || error(
         "$prefix: $describe needs a response bound as a vector; `$name` is a " *
         "$(typeof(response))")
@@ -63,15 +67,20 @@ function _brm_held_out_mask(mask, response, name::Symbol; prefix="BRM")
         "$(typeof(mask))")
     length(mask) == length(response) || error(
         "$prefix: $describe has length $(length(mask)), but the response has " *
-        "$(length(response)) $(_brm_held_out_nested(response) ? "arrays" : "values")")
+        "$(length(response)) $(_brm_held_out_nested(response) ? "arrays" : "values")." *
+        hint)
     _brm_held_out_nested(response) || return _brm_held_out_flat_mask(mask, describe, prefix)
     map(enumerate(zip(mask, response))) do (i, (inner, values))
         inner isa AbstractVector && length(inner) == length(values) || error(
             "$prefix: $describe entry $i must be a Bool vector of length " *
-            "$(length(values)), like response array $i; got $(repr(inner))")
+            "$(length(values)), like response array $i; got $(repr(inner))." * hint)
         _brm_held_out_flat_mask(inner, describe, prefix)
     end
 end
+_brm_held_out_replay_hint(name) =
+    " A replay keeps the fit's row masks, which fit only data of the fit's " *
+    "shape: pass the replay data's own mask, `held_out=(; $name = mask)`, or " *
+    "`held_out=()` to hold nothing out."
 _brm_held_out_nested(response) =
     !isempty(response) && all(value -> value isa AbstractVector, response)
 function _brm_held_out_flat_mask(mask, describe, prefix)
@@ -90,7 +99,8 @@ _brm_held_out_no_rows(mask::Vector{Vector{Bool}}) = !any(any, mask)
 # nor none). `response(source)` returns the source's bound values for mask
 # validation.
 function _brm_resolve_held_out(request, aliases, sources, unbound; prefix="BRM",
-                               cover_all::Bool=false, response=nothing)
+                               cover_all::Bool=false, response=nothing,
+                               replay::Bool=false)
     requested = union(request.names, keys(request.rows))
     rows = Dict{Symbol,Any}()
     isempty(requested) && return (; whole=Set{Symbol}(), rows)
@@ -123,7 +133,7 @@ function _brm_resolve_held_out(request, aliases, sources, unbound; prefix="BRM",
             "$prefix: `held_out` gives response `$name` a second row mask")
         response === nothing && error(
             "$prefix: a per-row `held_out` mask is not supported by this backend yet")
-        validated = _brm_held_out_mask(mask, response(source), name; prefix)
+        validated = _brm_held_out_mask(mask, response(source), name; prefix, replay)
         if _brm_held_out_all_rows(validated)
             push!(whole, source)
         elseif !_brm_held_out_no_rows(validated)

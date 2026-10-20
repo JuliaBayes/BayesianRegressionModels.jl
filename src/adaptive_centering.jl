@@ -755,6 +755,13 @@ ordinary scalar path (their downstream gather is linear); an `mm` block with
 any slope term, including a slope-only `(0 + x | mm(...))`, shares the ordinary
 correlated emission and adapts with it.
 
+A block emitted in generated quantities ([`RanefBlock`](@ref)`.generated`: no
+observed likelihood reaches it, for example because its response is omitted)
+has no sampler coordinate: Stan re-draws its effects, so it has nothing to
+adapt and is skipped, as [`transport_draws`](@ref) and
+[`population_draws`](@ref) skip it. Its scale or correlation parameters, if
+they remain sampled, stay untouched coordinates of the wrapped density.
+
 Correlated `cdar(step; by=group, cor=C)` walks are not ordinary random-effect
 blocks either; they have their own metadata contract in
 [`_adaptive_cdar_centering_blocks`](@ref) and join the online plan through the
@@ -762,7 +769,8 @@ WarmupHMC extension exactly like the ungrouped-HSGP companion below.
 """
 function adaptive_centering_blocks(model, unc_names)
     pos = _ranef_name_positions(unc_names)
-    ranefs = ranef_blocks(model)
+    # A generated block has no sampler coordinate; see the docstring.
+    ranefs = filter(r -> !r.generated, ranef_blocks(model))
     r2d2 = any(r -> r.family in _ADAPTIVE_R2D2_FAMILIES, ranefs) ?
         _adaptive_r2d2_context(model, pos) : nothing
     out = AbstractAdaptiveCenteringBlock[]
@@ -930,6 +938,44 @@ function _adaptive_same_hsgp_owner(resolved, owner, role)
     resolved
 end
 
+# Whether a formula term is emitted in generated quantities: no observed
+# likelihood reaches it (for example, its response is omitted). Its weights or
+# innovations then have no sampler coordinate, so it has no adaptive cell, like
+# a generated `RanefBlock` in `adaptive_centering_blocks`. Carrier lookup
+# prefers a sampled carrier (`_brm_carrier_indices`), so a generated answer
+# means none is sampled. Only the term families with adaptive cells answer.
+_adaptive_term_generated(::Any, descriptor, logical, entry) = false
+_adaptive_term_generated(::typeof(cdar), descriptor, logical, entry) =
+    _brm_term_parameter_output(descriptor, logical, entry, :innovations).kind ===
+        :generated_quantity
+function _adaptive_term_generated(::typeof(hsgp), descriptor, logical, entry)
+    kw = getkwargs(entry.value)
+    haskey(kw, :by) || return _brm_term_parameter_output(
+        descriptor, logical, entry, :basis_weights).kind === :generated_quantity
+    # A grouped term's flat weight carrier has no parameter role.
+    flat = last(_adaptive_grouped_hsgp_weights(entry, kw))
+    idx = _brm_carrier_indices(descriptor.outputs, o -> o.name === flat)
+    !isempty(idx) && descriptor.outputs[first(idx)].kind === :generated_quantity
+end
+
+# Everything the adaptive builders skip because it is emitted in generated
+# quantities: random-effect blocks, exact-total blocks and HSGP/cdar terms. The
+# WarmupHMC wrapper names them when it finds no cell at all, so a model whose
+# every block is generated says why instead of claiming it has none.
+function _adaptive_generated_labels(model)
+    labels = Symbol[b.binding for b in ranef_blocks(model) if b.generated]
+    append!(labels, (b.binding for b in _total_blocks_by_placement(model).generated))
+    descriptor = brm_descriptor(model)
+    for predictor in linear_predictors(descriptor.plan.parent)
+        for entry in _brm_term_coordinate_entries(descriptor.plan.parent, predictor.name)
+            _adaptive_term_generated(getf(entry.value), descriptor,
+                                     predictor.name, entry) &&
+                push!(labels, entry.term)
+        end
+    end
+    labels
+end
+
 """
     _adaptive_hsgp_centering_blocks(model, unc_names)
 
@@ -954,6 +1000,8 @@ the compiled spectrum.  Length scales and marginal SDs may be `<lower=a>` or `<l
 metadata is intentionally fail-closed: unknown covariances, grouped periodic
 terms, a scale without a finite lower bound or with an offset/multiplier, and
 declaration/artifact coordinate drift raise before a reparametrizer is built.
+A term emitted in generated quantities (no observed likelihood reaches it) has
+no sampler coordinate and is skipped, like a generated random-effect block.
 """
 function _adaptive_hsgp_centering_blocks(model, unc_names)
     descriptor = brm_descriptor(model)
@@ -965,6 +1013,7 @@ function _adaptive_hsgp_centering_blocks(model, unc_names)
         logical = predictor.name
         for entry in _brm_term_coordinate_entries(plan.parent, logical)
             getf(entry.value) === hsgp || continue
+            _adaptive_term_generated(hsgp, descriptor, logical, entry) && continue
             kw = getkwargs(entry.value)
             covariance = _sb_gp_cov(kw, :hsgp)
             if covariance === :periodic
@@ -1174,6 +1223,14 @@ function _adaptive_periodic_hsgp_block!(
     out
 end
 
+# The grouped term's weight field and its flat standardized weight carrier,
+# in the emitter's naming (`_sb_hsgp_by`).
+function _adaptive_grouped_hsgp_weights(entry, kw)
+    axnames = Tuple(name(_sb_named_inner(:hsgp, a)) for a in getargs(entry.value))
+    field = Symbol(:hsgpw_, join(string.(axnames), "_"))
+    field, Symbol(:zflat_, field, :_, name(kw[:by]))
+end
+
 # Grouped squared-exponential HSGP weights for online adaptation. Spectral
 # hyperparameters stay shared across groups, so one term contributes one
 # ordinary `_HSGPAdaptiveCenteringBlock` per group level: each block's
@@ -1184,10 +1241,8 @@ end
 # addresses frequency `b` in level `g`.
 function _adaptive_grouped_hsgp_blocks!(
         out, descriptor, plan, pos, unc_names, logical, entry, kw)
-    args = getargs(entry.value)
-    K, _ = _sb_hsgp_options(kw, length(args))
+    K, _ = _sb_hsgp_options(kw, length(getargs(entry.value)))
     B = prod(K)
-    axnames = Tuple(name(_sb_named_inner(:hsgp, a)) for a in args)
     gname = name(kw[:by])
     n_key = Symbol(:n_, gname)
     G = get(plan.data, n_key, nothing)
@@ -1196,8 +1251,7 @@ function _adaptive_grouped_hsgp_blocks!(
         "`$logical` has no integer group count under `$n_key`; refusing " *
         "an ambiguous weight layout.",
     )
-    field = Symbol(:hsgpw_, join(string.(axnames), "_"))
-    flat_name = Symbol(:zflat_, field, :_, gname)
+    field, flat_name = _adaptive_grouped_hsgp_weights(entry, kw)
     flat_names = ["$(flat_name).$i" for i in 1:(G*B)]
     flat = _adaptive_named_indices(pos, flat_names, entry.term,
         "grouped HSGP basis weights")
@@ -1282,6 +1336,25 @@ function _brm_hsgp_omega2(plan, owner, what, n_weights, n_scales)
     omega2
 end
 
+# The log-scale an HSGP cell reads is its exact spectral weight while that is
+# above `exp(-110)`, and a smooth floor at `exp(-150)` below. A long length
+# scale drives a basis weight's exact log-scale towards `-rho^2 * omega2 / 4`
+# (measured -473 on a 2-D field at `rho = 11`, snag adaptive-hsgp-ce-024ae486).
+# A cell partially centred on such a scale has a source coordinate `s^c * z`
+# whose spread underflows to zero, and its candidate frames underflow and
+# overflow to NaN losses. Floored, every frame of such a weight is a fixed
+# rescaling of `z` (the non-centred geometry), and `exp(±2c * log_scale)` stays
+# a normal Float64 for every control `c`. The transform is exact for any
+# function of coordinates it does not rewrite, so the floor moves coordinates,
+# never the posterior. Between the two bounds the softplus differs from the
+# exact value by less than `exp(-40)`; above `exp(-110)` they are identical.
+const _ADAPTIVE_HSGP_LOG_SCALE_FLOOR = -150.0
+const _ADAPTIVE_HSGP_LOG_SCALE_EXACT = _ADAPTIVE_HSGP_LOG_SCALE_FLOOR + 40.0
+
+_adaptive_hsgp_floor(value) = value > _ADAPTIVE_HSGP_LOG_SCALE_EXACT ? value :
+    _ADAPTIVE_HSGP_LOG_SCALE_FLOOR +
+    _adaptive_softplus(value - _ADAPTIVE_HSGP_LOG_SCALE_FLOOR)
+
 function _adaptive_hsgp_log_scale(x::AbstractVector,
                                   block::_HSGPAdaptiveCenteringBlock,
                                   basis::Int)
@@ -1295,7 +1368,8 @@ function _adaptive_hsgp_log_scale(x::AbstractVector,
         sigma = _adaptive_constrain(x[block.sd], block.sd_lower, block.sd_upper)
         rho = _adaptive_constrain(x[block.length_scales[1]],
             block.length_scale_lower[1], block.length_scale_upper[1])
-        return _brm_hsgp_periodic_log_scale(block.harmonics[basis], sigma, rho)
+        return _adaptive_hsgp_floor(
+            _brm_hsgp_periodic_log_scale(block.harmonics[basis], sigma, rho))
     end
     sigma = _adaptive_constrain(x[block.sd], block.sd_lower, block.sd_upper)
     value = log(sigma)
@@ -1307,7 +1381,7 @@ function _adaptive_hsgp_log_scale(x::AbstractVector,
         value += 0.5 * log(rho * 2.5066282746310002)
         value -= 0.25 * rho * rho * block.omega2[basis, axis]
     end
-    value
+    _adaptive_hsgp_floor(value)
 end
 
 # The cdar path has its own metadata type for the same reason the HSGP path
@@ -1400,7 +1474,8 @@ prior narrows either); the cells read both through Stan's own transform. The
 metadata is intentionally fail-closed: a persistence interval leaving `[0, 1]`,
 a scale without a finite lower bound, a missing or misshapen frozen factor, and
 declaration/artifact coordinate drift all raise before a reparametrizer is
-built.
+built. A walk emitted in generated quantities (no observed likelihood reaches
+it) has no sampler coordinate and is skipped.
 """
 function _adaptive_cdar_centering_blocks(model, unc_names)
     descriptor = brm_descriptor(model)
@@ -1411,6 +1486,7 @@ function _adaptive_cdar_centering_blocks(model, unc_names)
         logical = predictor.name
         for entry in _brm_term_coordinate_entries(plan.parent, logical)
             getf(entry.value) === cdar || continue
+            _adaptive_term_generated(cdar, descriptor, logical, entry) && continue
 
             innovations = brm_term_coordinates(
                 descriptor, logical, unc_names;

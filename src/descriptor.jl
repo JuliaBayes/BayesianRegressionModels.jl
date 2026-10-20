@@ -179,6 +179,36 @@ BRM adds:
   output's own coordinates* — so it composes directly with the vector
   [`brm_output_coordinates`](@ref) returns, and a consumer never re-derives
   per-subject boundaries from a length column.
+- `component` — which part of a random-effect block this output is, or
+  `nothing` for an output that belongs to no block. Every `:random_effect`
+  output of a StanBlocks (`SBBRMI`) descriptor has one, and so does a block's
+  scale when it is its own statement (a known-value block's sampled scales, an
+  exact total block's scale). A Turing descriptor's random-effect site is a
+  whole block and carries `nothing`, as does a sum-to-zero block
+  (`s2z_groups`, role `:s2z_effect`):
+
+  | component | what it is |
+  | --- | --- |
+  | `:scale` | the per-margin between-group SDs `tau` (per stratum for a stratified `gr(g, by=b)` block), sampled or derived (R2D2) |
+  | `:log_scale` | the sampled log SD of a scalar `(1 \\| g)` block, whose SD is `exp(log_scale)` |
+  | `:correlation_cholesky` | the Cholesky factor `L` of the correlation matrix (`L L'`), per stratum for a stratified block |
+  | `:standardized` | the standard-normal draw the effects are scaled from (`effects = diag(tau) L z`), in any of its shapes |
+  | `:effects` | the per-level effects on the link scale — under `centered_groups` the sampled coordinate itself |
+  | `:contribution` | the per-row values the block adds to its linear predictor |
+  | `:mixing_weight` | a Student-t block's per-level mixing weight |
+  | `:level_scale`, `:level_correlation_cholesky` | a stratified block's stratum `tau` and `L`, gathered per level |
+  | `:auxiliary` | an intermediate of the block's construction that is none of the above: a value StanBlocks hoists out of the block's plate (a centred block's covariance factor `diag(tau) L`), the permuted factor and onion draws of an omitted response's completion |
+
+  The block is the output's `declaration.target` — the `binding` that
+  [`brm_ranef_draws`](@ref) and [`ranef_blocks`](@ref) report — and its
+  margins are `brm_ranef_draws`' `margins`, so posterior coordinates group and
+  label by block and component without reading an emitted name:
+
+  ```julia
+  for o in brm_outputs(d; role=:random_effect, component=:scale)
+      o.declaration.target, brm_output_coordinates(o, constrained_names)
+  end
+  ```
 
 `role` is derived from the declaration, never from the output's name — a user
 variable may legitimately be called `beta_pop` or end in `_gen`.
@@ -196,12 +226,18 @@ struct BRMOutput
     logical::Union{Nothing,Symbol}
     labels::Union{Nothing,Vector{Symbol}}
     segments::Union{Nothing,Vector{Int}}
+    component::Union{Nothing,Symbol}
 end
 
 # Preserve the earlier positional constructors for downstream code that creates
-# display-only BRMOutput values. `segments` and `logical` are appended rather
-# than inserted precisely so those calls keep compiling; descriptor-derived
-# values always supply both explicitly below.
+# display-only BRMOutput values. `segments`, `logical` and `component` are
+# appended rather than inserted precisely so those calls keep compiling;
+# `brm_descriptor` assigns `component` in its last pass
+# (`_brm_ranef_components`).
+BRMOutput(name, kind, type, size, constraints, generative, source, role,
+          declaration, logical, labels, segments) =
+    BRMOutput(name, kind, type, size, constraints, generative, source, role,
+              declaration, logical, labels, segments, nothing)
 BRMOutput(name, kind, type, size, constraints, generative, source, role,
           declaration, logical, labels) =
     BRMOutput(name, kind, type, size, constraints, generative, source, role,
@@ -1162,7 +1198,9 @@ hand, so an operation that appears can be executed.
 `BRMDescriptor`; their `inputs` are the dataframe columns in `d.columns`, not
 Stan data keys. `:reprocess` forwards both `freeze_constants=` and the checked
 new-population `resample_groups=` CV/GQ re-emission described by
-[`reprocess`](@ref).
+[`reprocess`](@ref). Both forward `held_out=`: the default keeps the
+descriptor's hold-outs, and new data of another shape passes its own row masks
+(or `held_out=()`), as for [`reprocess`](@ref) and [`generative_plan`](@ref).
 
 The builder form's `held_out` keyword names one response or a collection of
 responses — a strict subset; holding out every observation is refused. A
@@ -1421,6 +1459,7 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
         outputs[i] = BRMOutput(o.name,o.kind,o.type,o.size,o.constraints,o.generative,
             o.source,role,o.declaration,block.predictor,labels,o.segments)
     end
+    outputs = _brm_ranef_components(outputs, plan, stan)
 
     # --- schema -------------------------------------------------------------
     columns = Tuple(sort!(collect(df_columns)))
@@ -1433,6 +1472,72 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
                   Tuple(inputs), Tuple(outputs), Tuple(ops), columns,
                   Tuple(unpredictable), _brm_submodels(plan, outputs),
                   requested_highlights)
+end
+
+# The block component of every random-effect carrier (`BRMOutput.component`),
+# read from the emission table (`_RANEF_FAMILIES`, src/prediction.jl) per block
+# declaration, plus each exact total block's recovered deviations and scale.
+# A table name that is no output itself is a traced binding: its emitted
+# carriers are found by walking the traced value, as for kernel cell values,
+# and claimed only where no direct name already did. A value StanBlocks derives
+# inside one of those carriers' plates (a hoisted loop invariant such as a
+# centred block's `diag(tau) L`) is owned by it under the same longest-prefix
+# rule `_brm_owner` applies, and is `:auxiliary`.
+# Any other `:random_effect` output the table does not name is an error, not a
+# `nothing`: a consumer grouping or labelling coordinates by component would
+# otherwise drop it silently.
+function _brm_ranef_components(outputs, plan, stan)
+    components = Dict{Symbol,Symbol}()
+    function claim!(name, component)
+        get!(components, name, component) === component || error(
+            "brm_descriptor: carrier `$name` is both a `$(components[name])` and a ",
+            "`$component` random-effect component; `_RANEF_FAMILIES` ",
+            "(src/prediction.jl) names it twice.")
+    end
+    output_names = Set{Symbol}(o.name for o in outputs)
+    model_names = Set{Symbol}(keys(stan.model))
+    # block binding => its named carriers other than the binding itself
+    carriers = Dict{Symbol,Vector{Symbol}}()
+    traced = Tuple{Symbol,Symbol,Symbol}[]
+    for d in plan.declarations
+        d.role === :prior || continue
+        family = _ranef_declared_family(d, plan.bindings)
+        family isa Symbol || continue
+        spec = get(_RANEF_FAMILIES, family, nothing)
+        isnothing(spec) && continue
+        mine = get!(carriers, d.target, Symbol[])
+        for (name, component) in _ranef_component_carriers(d.target, spec, d.keywords)
+            name === d.target || push!(mine, name)
+            name in output_names ? claim!(name, component) :
+                                   push!(traced, (d.target, name, component))
+        end
+    end
+    for block in total_effect_blocks(plan)
+        claim!(block.deviations, :effects)
+        claim!(block.scales, :scale)
+    end
+    for (block, name, component) in traced,
+            emitted in _brm_binding_carriers(stan, output_names, model_names, name, output_names)
+        get!(components, emitted, component)
+        push!(carriers[block], emitted)
+    end
+    for o in outputs
+        (o.role === :random_effect && !haskey(components, o.name) &&
+         !isnothing(o.declaration)) || continue
+        any(c -> startswith(String(o.name), String(c) * "_"),
+            get(carriers, o.declaration.target, ())) && (components[o.name] = :auxiliary)
+    end
+    unnamed = [o for o in outputs if o.role === :random_effect && !haskey(components, o.name)]
+    isempty(unnamed) || error(
+        "brm_descriptor: random-effect output(s) ",
+        join(("`$(o.name)`" * (isnothing(o.declaration) ? "" :
+              " (block `$(o.declaration.target)`)") for o in unnamed), ", "),
+        " have no block component. List each emitted internal under its family's ",
+        "`internals` in `_RANEF_FAMILIES` (src/prediction.jl).")
+    BRMOutput[BRMOutput(o.name, o.kind, o.type, o.size, o.constraints, o.generative,
+                        o.source, o.role, o.declaration, o.logical, o.labels,
+                        o.segments, get(components, o.name, nothing))
+              for o in outputs]
 end
 
 # Every operation StanBlocks derived, delegated verbatim, plus the two BRM-level
@@ -1482,16 +1587,18 @@ function _brm_derive_operations(plan, stan, outputs, columns)
     if !isnothing(plan.builder)
         push!(ops, BRMOperation(
             :replay, "Rebuild the declaration on a new dataframe", columns, (), :brm,
-            (d, new_df; highlights=d.highlight_specs, kwargs...) -> brm_descriptor(
-                generative_plan(d.plan, new_df); highlights, kwargs...)))
+            (d, new_df; highlights=d.highlight_specs,
+             held_out=_sb_held_out_spec(d.plan), kwargs...) -> brm_descriptor(
+                generative_plan(d.plan, new_df; held_out); highlights, kwargs...)))
     end
     if _brm_reprocess_supported(plan, outputs)
         push!(ops, BRMOperation(
             :reprocess, "Re-run preprocessing on a new dataframe", columns, (), :brm,
             (d, new_df; freeze_constants::Bool=true, highlights=d.highlight_specs,
-             resample_groups=(), kwargs...) -> brm_descriptor(
-                reprocess(d.plan, new_df; freeze_constants, resample_groups);
-                highlights, kwargs...)))
+             resample_groups=(), held_out=_sb_held_out_spec(d.plan), kwargs...) ->
+                brm_descriptor(
+                    reprocess(d.plan, new_df; freeze_constants, resample_groups, held_out);
+                    highlights, kwargs...)))
     end
     ops
 end
@@ -1549,7 +1656,7 @@ brm_columns(d::BRMDescriptor) = d.columns
 
 """
     brm_outputs(d::BRMDescriptor; logical=nothing, role=nothing, kind=nothing,
-                submodel=nothing) -> Vector{BRMOutput}
+                component=nothing, submodel=nothing) -> Vector{BRMOutput}
 
 Every emitted output matching the given semantic filters, in descriptor order.
 Each filter accepts a `Symbol` or any collection of them, and an omitted filter
@@ -1560,8 +1667,13 @@ zero, one, or many; use [`brm_output`](@ref) when exactly one is required.
 brm_outputs(d; role=:posterior_predictive)          # every predictive carrier
 brm_outputs(d; logical=:pk_conc)                    # every carrier of one target
 brm_outputs(d; role=(:parameter, :random_effect))   # either role
+brm_outputs(d; component=:correlation_cholesky)     # every random-effect block's `L`
 brm_outputs(d; submodel=:effect)                    # every output one submodel call owns
 ```
+
+`component=` selects parts of random-effect blocks — scales, correlation
+factors, standardized draws, effects — by the `component` field of
+[`BRMOutput`](@ref), which lists them.
 
 `submodel=` scopes the query to one consumer `@slic` submodel call (see
 [`BRMSubmodel`](@ref)): the outputs that call owns, its `outputs` field. It
@@ -1571,17 +1683,19 @@ error. Within that scope `logical` names values the submodel body binds — its
 own `~` declarations and `=` assignments (`logical=:slope` for
 `slope ~ normal(…)` in the body called for `effect`).
 
-Filtering here is on BRM meaning (`logical` / `role` / `submodel`) or Stan
-representation (`kind`) — never on the emitted NAME, which the compiler owns.
+Filtering here is on BRM meaning (`logical` / `role` / `component` /
+`submodel`) or Stan representation (`kind`) — never on the emitted NAME, which
+the compiler owns.
 """
 function brm_outputs(d::BRMDescriptor; logical=nothing, role=nothing, kind=nothing,
-                     submodel=nothing)
-    isnothing(submodel) ||
-        return _brm_submodel_query(d, _brm_submodel_entry(d, submodel), logical, role, kind)
+                     component=nothing, submodel=nothing)
+    isnothing(submodel) || return _brm_submodel_query(
+        d, _brm_submodel_entry(d, submodel), logical, role, kind, component)
     BRMOutput[o for o in d.outputs
               if _brm_matches(o.logical, logical) &&
                  _brm_matches(o.role, role) &&
-                 _brm_matches(o.kind, kind)]
+                 _brm_matches(o.kind, kind) &&
+                 _brm_matches(o.component, component)]
 end
 
 _brm_matches(_value, ::Nothing) = true
@@ -1667,13 +1781,15 @@ end
 _brm_symbols(name::Symbol) = (name,)
 _brm_symbols(names) = names
 
-function _brm_submodel_query(d::BRMDescriptor, s::BRMSubmodel, logical, role, kind)
+function _brm_submodel_query(d::BRMDescriptor, s::BRMSubmodel, logical, role, kind,
+                             component)
     wanted = isnothing(logical) ? nothing :
         Set{Symbol}(o.name for name in _brm_symbols(logical)
                     for o in _brm_submodel_carriers(d, s, name))
     BRMOutput[o for o in s.outputs
               if (isnothing(wanted) || o.name in wanted) &&
-                 _brm_matches(o.role, role) && _brm_matches(o.kind, kind)]
+                 _brm_matches(o.role, role) && _brm_matches(o.kind, kind) &&
+                 _brm_matches(o.component, component)]
 end
 
 function _brm_submodel_output(d::BRMDescriptor, s::BRMSubmodel, name::Symbol, role)
@@ -2157,6 +2273,48 @@ function brm_term_coordinates(d::BRMDescriptor, logical::Symbol,
        link=entry.link, inverse_link=InverseFunctions.inverse(entry.link))
 end
 
+"""
+    brm_length_scale_floor(d::BRMDescriptor, logical::Symbol; term::Symbol)
+
+The fitted length-scale validity floor of one `hsgp` term: the value
+`length_scale_floor` stands for in that term's `length_scale(...)` prior and
+the lower bound of its default declaration. `logical` and `term` address the
+term exactly as in [`brm_term_coordinates`](@ref) (`term=:hsgp_t` for
+`hsgp(t)`), but no posterior draws are needed: the floor is fitted data.
+
+Returns a `Float64` for an isotropic term (the strictest axis's floor, which
+its one length scale is bounded by) and a `Vector{Float64}` with one floor per
+axis for `iso=false`. A `k = 1` basis has no usable floor and returns `0.0`.
+Grouped (`by=`), periodic, model-derived-axis and hyper-predicted terms are
+covered. A descriptor of `reprocess(...; freeze_constants=false)` returns the
+re-derived floor. The value is the same whether or not the term's prior names
+`length_scale_floor`:
+
+```julia
+d = brm_descriptor(builder, df; mod=@__MODULE__)
+floor = brm_length_scale_floor(d, :mu; term=:hsgp_t)
+"allowed length-scale interval [\$(round(floor; sigdigits=3)), 24.0]"
+```
+
+A term that is not an `hsgp` term, or an address that names no unique term,
+errors with the available labels.
+"""
+function brm_length_scale_floor(d::BRMDescriptor, logical::Symbol; term::Symbol)
+    entry = _brm_term_entry(d, logical, e -> e.term === term, "term `$term`")
+    getf(entry.value) === hsgp || error(
+        "brm_length_scale_floor: term `$term` on logical predictor `$logical` " *
+        "is a `$(nameof(getf(entry.value)))` term; only an `hsgp` term has a " *
+        "length-scale validity floor")
+    owner = _brm_term_owner_output(d, logical, entry).declaration
+    floor = get(owner.keywords, :rho_lower, nothing)
+    value = floor isa Symbol ? get(d.plan.data, floor, nothing) : floor
+    value isa Union{Real,AbstractVector{<:Real}} || error(
+        "brm_length_scale_floor: term `$term` on logical predictor `$logical` " *
+        "has no fitted validity floor (found $(repr(floor))). Re-reflect the " *
+        "model that produced this descriptor.")
+    value isa Real ? Float64(value) : collect(Float64, value)
+end
+
 # The one formula term on `logical` that `select` accepts. `what` names the
 # selection in the error, so a public label lookup and an internal semantic
 # lookup (e.g. by HSGP axes) report the same available labels.
@@ -2177,10 +2335,10 @@ function _brm_term_entry(d::BRMDescriptor, logical::Symbol, select, what)
     only(entries)
 end
 
-# The declaration-owned output that carries one parameter role of a formula
-# term, resolved from the term to its logical owner without parsing a name.
-function _brm_term_parameter_output(d::BRMDescriptor, logical::Symbol, entry,
-                                    parameter::Symbol)
+# The logical output that owns one formula term on `logical`: the term's
+# collected value, whose declaration carries the term's sampled parameters and
+# fitted inputs. Resolved without parsing an emitted name.
+function _brm_term_owner_output(d::BRMDescriptor, logical::Symbol, entry)
     term = entry.term
     emitted_lp = _sb_lp_emitted_name(logical, entry.link)
     owner_labels = _brm_term_owner_labels(
@@ -2199,7 +2357,16 @@ function _brm_term_parameter_output(d::BRMDescriptor, logical::Symbol, entry,
         "brm_descriptor: term `$term` on logical predictor `$logical` has " *
         "$(length(owners)) logical output owners across emitted candidates " *
         "$(owner_labels); expected exactly one.")
-    owner = only(owners).declaration
+    only(owners)
+end
+
+# The declaration-owned output that carries one parameter role of a formula
+# term, resolved from the term to its logical owner without parsing a name.
+function _brm_term_parameter_output(d::BRMDescriptor, logical::Symbol, entry,
+                                    parameter::Symbol)
+    term = entry.term
+    value_output = _brm_term_owner_output(d, logical, entry)
+    owner = value_output.declaration
 
     bindings = _brm_term_parameter_bindings(getf(entry.value), entry.value)
     hyper_plans = _brm_term_hyper_plans(d.plan, logical, entry.value)
@@ -2209,7 +2376,7 @@ function _brm_term_parameter_output(d::BRMDescriptor, logical::Symbol, entry,
         (keys(bindings)..., :value) : keys(bindings)
     # The term's collected value is the owner output itself: the carrier this
     # predictor's occurrence of the term emits, under the shared formula label.
-    parameter === :value && :value in roles && return only(owners)
+    parameter === :value && :value in roles && return value_output
     if parameter in (:length_scale, :sd) &&
        any(p -> p.hyper === parameter, hyper_plans)
         roles = Tuple(k for k in keys(hyper_bindings) if

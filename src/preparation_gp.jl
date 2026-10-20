@@ -42,13 +42,19 @@ end
 _brm_zero_rho_lower(lower::Real) = zero(lower)
 _brm_zero_rho_lower(lower::AbstractArray) = zero.(lower)
 
-function _brm_hsgp_declared_rho_lower(term, target, context, default_lower)
+function _brm_hsgp_declared_rho_lower(term, target, context, default_lower,
+                                      geometry, remedy)
     # An explicit length-scale prior replaces the whole declaration, including
     # the approximation-validity floor supplied by the default HSGP prior --
     # unless it names that floor through `length_scale_floor` (decision 1fk9b29).
     spec = _brm_term_prior_spec(term, target, context, :term_length_scale)
-    isnothing(spec) || _brm_has_floor_marker(spec.expression) ? default_lower :
-        _brm_zero_rho_lower(default_lower)
+    isnothing(spec) && return default_lower
+    _brm_has_floor_marker(spec.expression) ||
+        return _brm_zero_rho_lower(default_lower)
+    _brm_check_hsgp_floor_upper(spec.expression, default_lower,
+        _brm_term_prior_spelling(spec), geometry, remedy;
+        prefix="BRM term preparation")
+    default_lower
 end
 
 # `anchor` subtracts the basis row at the anchor from every row, so the term is
@@ -148,6 +154,8 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
         rho_lower = _brm_hsgp_declared_rho_lower(
             term, target, context,
             _brm_hsgp_rho_lower_data(fits, K, true),
+            _brm_hsgp_floor_geometry(K, c, fits, true),
+            _brm_hsgp_floor_remedy(true),
         )
         state = (; target, latent=true, explicit_domain=true, axis_source=source,
                  K, c, centeredness, cov, iso,
@@ -194,6 +202,8 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
         basis = _brm_hsgp_basis_state(axes, K, cov, iso, period; anchor, mask)
         basis = merge(basis, (; rho_lower=_brm_hsgp_declared_rho_lower(
             term, target, context, basis.rho_lower,
+            _brm_hsgp_periodic_floor_geometry(K, period),
+            _BRM_HSGP_PERIODIC_FLOOR_REMEDY,
         )))
         state = (; target, latent=false, explicit_domain=false, K, c, centeredness,
                  cov, iso, period, basis..., by=by_state,
@@ -212,6 +222,8 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
                                       fits, orthogonal, anchor, mask)
         basis = merge(basis, (; rho_lower=_brm_hsgp_declared_rho_lower(
             term, target, context, basis.rho_lower,
+            _brm_hsgp_floor_geometry(K, c, fits, !isnothing(domain_fits)),
+            _brm_hsgp_floor_remedy(!isnothing(domain_fits)),
         )))
         state = (; target, latent=false, explicit_domain=!isnothing(domain_fits),
                  K, c, centeredness, cov, iso, period, basis...,

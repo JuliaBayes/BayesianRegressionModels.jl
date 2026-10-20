@@ -100,6 +100,12 @@ periodic one) over an axis with no rows, gathered per subject through
 density and gradient equal a twin that declares the same term but never reads
 it, and `reprocess` moves the Stan program onto data with rows.
 
+`hsgp_constant_axis.jl` checks that a fresh HSGP fit refuses a constant axis at
+every row count, including those whose computed mean rounds an ulp away from
+the axis value, on the shared fit, the vectorised backend's basis, a fresh
+`SBBRMI` build and a `freeze_constants=false` reprocess. A frozen replay keeps
+the fitted interval on that axis, and an explicit `domain=` fits it fresh.
+
 `plate_ragged_omitted_response.jl` checks a censored ragged observation inside
 `@plate` with its data column bound, omitted, and reprocessed. It requires the
 StanBlocks revision pinned by `setup_env.jl` and checks the public flat
