@@ -7897,9 +7897,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
                               obs_n, ran_terms, direct_terms, target,
                               group_block_lookup, term_overrides)
                 for col in col_exprs[first_column:end]
-                    label=t isa ExprColumn && getf(t)===interval_censored ?
-                        name(_sb_named_inner(:interval_censored,only(getargs(t)))) :
-                        col isa Symbol ? col : :Intercept
+                    label=_sb_pop_column_label(t,col)
                     push!(description_columns,(;label,source=t===1 ? nothing : _brm_raw_column(t),
                         effect_addresses=(label,),effect_block=label,preprocess=nothing,term=t))
                 end
@@ -8259,19 +8257,27 @@ function popcoefnames(brmi::BRMI, lhs::Symbol)
                   "fixed-effect terms; for group-structured terms (e.g. `hsgp(x, by=g)`) ",
                   "read the parameter names off the transpiled `SBBRMI` instead.")
         end
-        for c in cols
-            # Non-intercept pop columns are Symbol references; a stray Expr
-            # (only the intercept probe emits one) maps back to :Intercept.
-            label = if t isa ExprColumn && getf(t) === interval_censored
-                name(_sb_named_inner(:interval_censored, only(getargs(t))))
-            else
-                c isa Symbol ? c : :Intercept
-            end
-            push!(labels, label)
-        end
+        append!(labels, (_sb_pop_column_label(t, c) for c in cols))
     end
     labels
 end
+
+# The public label of one `beta_pop` column `col` that population term `t`
+# emitted. `popcoefnames` and the emitter's design record (the `design_columns`
+# of the `pop_<lp>` binding, which the descriptor exposes as `labels`) both
+# take it from here, so the two cannot disagree. Non-intercept columns are
+# Symbol references and label themselves; a stray Expr (only the intercept
+# probe emits one) maps back to `:Intercept`. The formula term, not the column
+# reference, names two families: an `interval_censored` column by its inner
+# data column, and a `mo(c)` column by its term label `mo_<c>` — a repeated
+# `mo(c)` emits a predictor-scoped `mo_<lp>_<c>` carrier, but its public label
+# stays `mo_<c>` on every predictor (snag mo-term-in-sever-fe459870).
+_sb_pop_column_label(t, col) = col isa Symbol ? col : :Intercept
+_sb_pop_column_label(t::ExprColumn, col) = _sb_pop_column_label(getf(t), t, col)
+_sb_pop_column_label(::Any, t, col) = col isa Symbol ? col : :Intercept
+_sb_pop_column_label(::typeof(interval_censored), t, col) =
+    name(_sb_named_inner(:interval_censored, only(getargs(t))))
+_sb_pop_column_label(::typeof(mo), t, col) = _brm_term_label(mo, t)
 
 # ---- consumer helper: name the `cat_<lp>_<c>_beta` contrast blocks ----------
 #
