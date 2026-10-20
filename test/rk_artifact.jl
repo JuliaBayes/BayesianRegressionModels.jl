@@ -243,6 +243,8 @@ end
     end
     ranef_plan = BRM._brm_rk_plan(ranef_brmi)
     @test length(ranef_plan.ranef_buckets) == 1
+    # The block's levels read a fit-role copy of `g` (reprocess freezes it).
+    @test occursin("(g_fit = fit-role input of g)", BRM.show_rk_plan(ranef_plan))
     ranef_text = BRM.show_rk_plan(ranef_plan)
     @test occursin("ranef       = ", ranef_text)
 end

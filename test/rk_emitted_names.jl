@@ -50,9 +50,11 @@ main_statements(brmi) = filter(s -> !(s isa LineNumberNode), emitted_main(brmi).
     @test :(X_c = hcat(x1)) in stmts
     @test occursin("pop_c ~ brm_population_effects(X_c, 1, 0.0, 1.0)", main)
     @test !occursin(r"X_log_a\b|X_log_b\b|X_d\b|X_e\b", main)
-    # The `p` and id-less buckets over `subject` read one level position.
-    @test count("brm_level_indices(subject, subject)", main) == 1
-    @test :(subject_level = brm_level_indices(subject, subject)) in stmts
+    # The `p` and id-less buckets over `subject` read one level position,
+    # among the levels of `subject`'s fit-role copy (the training groups on a
+    # frozen `reprocess`).
+    @test count("brm_level_indices(subject, subject_fit)", main) == 1
+    @test :(subject_level = brm_level_indices(subject, subject_fit)) in stmts
     # Each bucket gathers its draws inline, so RK sees the per-row index.
     @test occursin("b_p_subject[subject_level, 1]", main)
     @test occursin("b_subject[subject_level, 1]", main)
@@ -130,5 +132,5 @@ end
     @test occursin("pop_Intercept_x1_x2 ~ brm_joint_population_effects(X_Intercept_x1_x2, 3, 2, 0.0, 1.0)", main)
     @test :(pop_mu = pop_Intercept_x1_x2[:, 1]) in stmts
     @test :(pop_nu = pop_Intercept_x1_x2[:, 2]) in stmts
-    @test :(subject_level = brm_level_indices(subject, subject)) in stmts
+    @test :(subject_level = brm_level_indices(subject, subject_fit)) in stmts
 end

@@ -225,6 +225,18 @@ function _brm_hsgp_rows(kw, term, context)
     (; source, mask=_brm_hsgp_row_mask(raw, n, source))
 end
 
+# The axes a basis interval is fitted to: the term's masked axes, or on a
+# frozen replay the training data's masked axes (`_brm_fit_source`).
+function _brm_hsgp_training_axes(sources, axes::Tuple, rows, fitted_axes::Tuple)
+    _brm_frozen_replay() === nothing && return fitted_axes
+    raw = Tuple(_brm_fit_source(source, axis) for (source, axis) in zip(sources, axes))
+    mask = isnothing(rows) ? nothing : _brm_hsgp_row_mask(
+        _brm_fit_source(rows.source, rows.mask), length(first(raw)), rows.source)
+    training = Tuple(_brm_axis_values(axis, mask, "training axis `$source`")
+        for (source, axis) in zip(sources, raw))
+    _brm_hsgp_masked_axes(training, mask)
+end
+
 _brm_hsgp_masked_axes(axes::Tuple, mask::Nothing) = axes
 _brm_hsgp_masked_axes(axes::Tuple, mask::AbstractVector{Bool}) =
     map(axis -> axis[mask], axes)

@@ -181,7 +181,8 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
         nothing
     else
         source, raw = _brm_term_data(:hsgp, by, context)
-        levels = _brm_fit_levels(raw)
+        # A frozen replay keeps the training groups (`_brm_fit_source`).
+        levels = _brm_fit_levels(_brm_fit_source(source, raw))
         (; source, levels, idx=_brm_apply_levels(levels, raw))
     end
     n_basis = cov === :periodic ? 2 * only(K) : prod(K)
@@ -211,8 +212,15 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
                  _brm_gp_priors(term, target, context)...)
     else
         domain_fits = _brm_hsgp_domain_fits(kw, length(axes))
+        # A frozen replay fits the interval to the training axes and refuses
+        # replay values past it (unless `extrapolate=:clamp`).
+        training_axes = _brm_hsgp_training_axes(sources, axes, rows, fitted_axes)
         fits = isnothing(domain_fits) ?
-            _brm_fit_hsgp(fitted_axes, K, c; anchor) : domain_fits
+            _brm_fit_hsgp(training_axes, K, c; anchor) : domain_fits
+        training_axes === fitted_axes || extrapolate === :clamp ||
+            _brm_hsgp_replay_axes(fitted_axes, fits, nothing, :error;
+                prefix="RK reprocess", names=sources,
+                fixed_domain=!isnothing(domain_fits))
         isnothing(domain_fits) ||
             _brm_check_hsgp_domain(domain_fits, fitted_axes;
                                    prefix="BRM term preparation")
@@ -228,7 +236,7 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
         state = (; target, latent=false, explicit_domain=!isnothing(domain_fits),
                  K, c, centeredness, cov, iso, period, basis...,
                  orthogonal, by=by_state, anchor, extrapolate,
-                 support=_brm_hsgp_support(fitted_axes, fits), rows,
+                 support=_brm_hsgp_support(training_axes, fits), rows,
                  _brm_gp_priors(term, target, context)...)
     end
     deps = (sources..., (isnothing(by_state) ? () : (by_state.source,))...,

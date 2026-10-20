@@ -1561,8 +1561,11 @@ Base.@nospecializeinfer function _brm_simple_random_effect_plans(
             raw isa AbstractVector || error(
                 "BRM backend lowering: grouping column `$group` must be a " *
                 "vector")
-            levels = collect(_brm_fit_levels(raw))
-            n_levels, indices = _brm_level_index(raw)
+            # A frozen replay keeps the training groups (`_brm_fit_source`).
+            training = _brm_fit_source(group, raw)
+            levels = collect(_brm_fit_levels(training))
+            n_levels, indices = training === raw ? _brm_level_index(raw) :
+                (length(levels), _brm_apply_fitted_levels(levels, raw))
             length(levels) == n_levels || error(
                 "BRM backend lowering: inconsistent fitted levels for " *
                 "group `$group`")
@@ -1794,8 +1797,9 @@ function _brm_population_column(term::ExprColumn, fitted=_brm_unfitted)
     label = _brm_wrapper_col_name(kind, inner)
     const_ = fitted(label, kind, inner)
     if isnothing(const_)
-        const_ = kind === :center ? _brm_fit_center(values) :
-                                   _brm_fit_zscale(values)
+        fit_values = _brm_fit_values(inner, values)
+        const_ = kind === :center ? _brm_fit_center(fit_values) :
+                                   _brm_fit_zscale(fit_values)
     end
     transformed = kind === :center ? _brm_apply_center(const_, values) :
                                      _brm_apply_zscale(const_, values)
@@ -1827,6 +1831,41 @@ function _brm_population_fixed_term(term)
     preprocess = _BRMPopulationPreprocess(:protect, nothing, inner)
     _BRMPopulationFixedTerm(
         label, first(sources), collect(Float64, values), preprocess)
+end
+
+# ---- frozen replay: fits read the training columns --------------------------
+#
+# A frozen replay (`reprocess(rk::RKBRMI, new_data)`) plans the new data with
+# every data-fitted quantity taken from the TRAINING data: level sets,
+# standardization anchors, basis fits. Planning runs under this task-local
+# context, and each fit site reads its source column through
+# `_brm_fit_source(name, values)`, which answers the training column of the
+# same name. Outside a replay it returns `values` unchanged. Group columns in
+# `resample` keep the replay data's own levels (new-population prediction).
+struct _BRMFrozenReplay
+    training::Dict{Symbol,Any}
+    resample::Set{Symbol}
+end
+
+const _BRM_FROZEN_REPLAY = :BayesianRegressionModels_frozen_replay
+
+_brm_frozen_replay() = get(task_local_storage(), _BRM_FROZEN_REPLAY, nothing)
+_brm_with_frozen_replay(f, frozen::_BRMFrozenReplay) =
+    task_local_storage(f, _BRM_FROZEN_REPLAY, frozen)
+
+function _brm_fit_source(name::Symbol, values)
+    frozen = _brm_frozen_replay()
+    frozen === nothing && return values
+    name in frozen.resample && return values
+    get(frozen.training, name, values)
+end
+
+# The values a fit of the data expression `inner` reads: `values`, or its
+# values on the training data on a frozen replay.
+function _brm_fit_values(inner, values)
+    frozen = _brm_frozen_replay()
+    frozen === nothing && return values
+    collect(Float64, _brm_replay_expression(inner, frozen.training))
 end
 
 _brm_fit_levels(raw::CA.CategoricalVector) = CA.levels(raw)
@@ -1985,14 +2024,25 @@ function _brm_categorical_population_columns(
     frozen = fitted(_brm_cellmeans_level_address(block, first_level),
                     :population_factor_dummy, source)
     if isnothing(frozen)
-        n_levels, indices = _brm_level_index(raw)
+        training = isnothing(levels) ? _brm_fit_source(source, raw) : raw
+        if !isnothing(levels)
+            # `levels` carries the fitted level values when `raw` is already
+            # recoded (string `factor(...; ref=...)` recodes to integer codes
+            # into `levels`), so the level set is `levels` itself, also when a
+            # replay frame observes only some of them.
+            n_levels, indices = length(levels), raw
+        elseif training === raw
+            n_levels, indices = _brm_level_index(raw)
+            levels = _brm_fit_levels(raw)
+        else
+            # A frozen replay codes the training level set.
+            levels = _brm_fit_levels(training)
+            n_levels = length(levels)
+            indices = _brm_apply_fitted_levels(levels, raw)
+        end
         # Treatment coding drops a single-level factor (its lone level is the
         # reference); cell means keep its one coefficient.
         n_levels >= first_level || return ()
-        # `levels` carries the fitted level values when `raw` is already
-        # recoded (string `factor(...; ref=...)` recodes to integer codes);
-        # otherwise the levels are derived from `raw` exactly as before.
-        levels = isnothing(levels) ? _brm_fit_levels(raw) : levels
     else
         levels, n_levels = frozen.levels, frozen.n_levels
         indices = _brm_apply_fitted_levels(levels, raw)
@@ -2062,7 +2112,8 @@ function _brm_string_factor_population_columns(term, inner, raw::AbstractVector;
     any(ismissing, values) && return nothing
     kwargs = getkwargs(term)
     all(k -> k === :ref || k === :cmc, keys(kwargs)) || return nothing
-    fit_levels = _brm_fit_levels(values)
+    # A frozen replay codes the training levels (`_brm_fit_source`).
+    fit_levels = _brm_fit_levels(_brm_factor_values(_brm_fit_source(name(inner), raw)))
     isempty(fit_levels) && return nothing
     ref_raw = get(kwargs, :ref, first(fit_levels))
     ref_raw isa AbstractString || return nothing
@@ -2073,7 +2124,7 @@ function _brm_string_factor_population_columns(term, inner, raw::AbstractVector;
     block = ref_raw == first(fit_levels) ? source :
         Symbol(string(source, "__ref_", ref_raw))
     lookup = Dict(level => code for (code, level) in enumerate(fit_levels))
-    codes = Int[lookup[value] for value in values]
+    codes = _brm_apply_fitted_levels(fit_levels, values)
     ref_code = lookup[ref_raw]
     recoded = Int[code == ref_code ? 1 : code == 1 ? ref_code : code
                   for code in codes]
