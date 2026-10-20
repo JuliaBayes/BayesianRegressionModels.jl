@@ -1336,6 +1336,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         push!(stmts, Expr(:(=), name, call))
     end
     for derived in plan.derived
+        # A fit-role input is bound data (`_rk_fit_twin!`), not a definition.
+        derived.expression.head === :_rk_fit_input && continue
         expression = _rk_ast_data_expr!(defs, stmts, bindings, taken, derived.expression)
         push!(stmts, Expr(:(=), derived.name, expression))
     end

@@ -1794,8 +1794,9 @@ function _brm_population_column(term::ExprColumn, fitted=_brm_unfitted)
     label = _brm_wrapper_col_name(kind, inner)
     const_ = fitted(label, kind, inner)
     if isnothing(const_)
-        const_ = kind === :center ? _brm_fit_center(values) :
-                                   _brm_fit_zscale(values)
+        fit_values = _brm_fit_values(inner, values)
+        const_ = kind === :center ? _brm_fit_center(fit_values) :
+                                   _brm_fit_zscale(fit_values)
     end
     transformed = kind === :center ? _brm_apply_center(const_, values) :
                                      _brm_apply_zscale(const_, values)
@@ -1854,6 +1855,14 @@ function _brm_fit_source(name::Symbol, values)
     frozen === nothing && return values
     name in frozen.resample && return values
     get(frozen.training, name, values)
+end
+
+# The values a fit of the data expression `inner` reads: `values`, or its
+# values on the training data on a frozen replay.
+function _brm_fit_values(inner, values)
+    frozen = _brm_frozen_replay()
+    frozen === nothing && return values
+    collect(Float64, _brm_replay_expression(inner, frozen.training))
 end
 
 _brm_fit_levels(raw::CA.CategoricalVector) = CA.levels(raw)

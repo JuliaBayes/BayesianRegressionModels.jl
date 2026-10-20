@@ -2459,6 +2459,9 @@ function _rk_eval_dotted(value, data::AbstractDict,
         haskey(memo, value) && return memo[value]
         for spec in derived
             spec.name === value || continue
+            # A fit-role input is bound data: its values are recorded.
+            spec.expression.head === :_rk_fit_input &&
+                return only(spec.expression.args)
             result = _rk_eval_dotted(
                 spec.expression, data, derived, memo)
             memo[value] = result
@@ -2469,6 +2472,11 @@ function _rk_eval_dotted(value, data::AbstractDict,
     end
     value isa Expr || error("RK backend: internal: cannot evaluate " *
                             "derived value `$(repr(value))`")
+    if value.head === :_rk_data_preparation
+        args = map(a -> _rk_eval_dotted(a, data, derived, memo),
+            value.args[2:end])
+        return _rk_eval_data_preparation(Val(first(value.args)), args...)
+    end
     if value.head === :call && !isempty(value.args)
         fn = value.args[1]
         if fn isa _RKDataCall
@@ -2801,10 +2809,73 @@ function _rk_transform_inner_name(f::Function, inner, target::Symbol,
     staged
 end
 
-function _rk_transform_defexpr(f::Function, vname::Symbol)
-    centered = Expr(:call, :.-, vname, Expr(:call, :mean, vname))
-    f === center ? centered :
-        Expr(:call, :./, centered, Expr(:call, :std, vname))
+# The anchors read `fit`, the fit-role twin of `vname` (`_rk_fit_twin!`): the
+# same values when the model is built, the training values on a frozen replay.
+function _rk_transform_defexpr(f::Function, vname::Symbol, fit::Symbol)
+    centered = Expr(:call, :.-, vname,
+        Expr(:_rk_data_preparation, :brm_covariate_mean, fit))
+    f === center ? centered : Expr(:call, :./, centered,
+        Expr(:_rk_data_preparation, :brm_covariate_sd, fit))
+end
+
+# The data-preparation recipes derived verification evaluates; the emitted
+# recipes (`_BRM_STATISTICAL_MODELS`) call the same fits.
+_rk_eval_data_preparation(::Val{:brm_covariate_mean}, values) =
+    _brm_fit_mean_numeric(values, :predictor, :center, ArgumentError)
+_rk_eval_data_preparation(::Val{:brm_covariate_sd}, values) =
+    _brm_fit_zscale_numeric(values, :predictor, ArgumentError).scale
+_rk_eval_data_preparation(::Val{recipe}, _args...) where {recipe} = error(
+    "RK backend: internal: derived verification cannot evaluate `$recipe`")
+
+# A fitted anchor reads a fit-role input: a bound copy of the column it fits,
+# holding the column's own values when the model is built and the TRAINING
+# column on a frozen `reprocess` replay (`_brm_fit_source`). So RKPPL's
+# bind-time evaluation computes the training anchor while the per-row
+# transform reads the new rows, in one program (user principle 077lr1b). The
+# input is recorded in `derived` (expression `:_rk_fit_input` holding its
+# values) only so derived verification can read it; it is never emitted as a
+# definition. A staged derived value gets a twin definition over the fit-role
+# inputs of the columns it reads.
+function _rk_fit_twin!(derived::Vector{_RKDerivedSpec},
+        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol},
+        data::AbstractDict, vname::Symbol)
+    label = _rk_fit_label(vname)
+    for spec in derived
+        spec.label === label && return spec.name
+    end
+    if haskey(data, vname)
+        name = _rk_fit_name!(derived, columns, taken, vname)
+        columns[name] = _brm_fit_source(vname, data[vname])
+        push!(derived, _RKDerivedSpec(name,
+            Expr(:_rk_fit_input, columns[name]), label))
+        return name
+    end
+    index = findfirst(spec -> spec.name === vname, derived)
+    index === nothing && error(
+        "RK backend: internal: fitted value `$vname` reads no data column")
+    twin(x::Symbol) = haskey(data, x) || any(spec -> spec.name === x, derived) ?
+        _rk_fit_twin!(derived, columns, taken, data, x) : x
+    twin(x::Expr) = Expr(x.head, map(twin, x.args)...)
+    twin(x) = x
+    expression = twin(derived[index].expression)
+    name = _rk_fit_name!(derived, columns, taken, vname)
+    push!(derived, _RKDerivedSpec(name, expression, label))
+    name
+end
+
+# A fit-role twin is labelled after the value it twins; the label is never a
+# design column.
+_rk_fit_label(vname::Symbol) = Symbol(vname, "#fit")
+
+function _rk_fit_name!(derived, columns, taken, vname::Symbol)
+    name = Symbol(vname, :_fit)
+    serial = 2
+    while name in taken || haskey(columns, name) || any(d -> d.name === name, derived)
+        name = Symbol(vname, :_fit_, serial)
+        serial += 1
+    end
+    push!(taken, name)
+    name
 end
 
 # Stage a `center`/`zscale`/`standardize` value as a derived definition and
@@ -2815,7 +2886,8 @@ function _rk_staged_transform(f::Function, inner, target::Symbol,
         derived::Vector{_RKDerivedSpec}, taken::Set{Symbol})
     vname = _rk_transform_inner_name(f, inner, target, origin,
         data, columns, derived, taken)
-    defexpr = _rk_transform_defexpr(f, vname)
+    defexpr = _rk_transform_defexpr(f, vname,
+        _rk_fit_twin!(derived, columns, taken, data, vname))
     staged = _rk_mint_derived!(derived, taken, columns,
         string(nameof(f)) * "_" * _rk_derived_hint(vname))
     _rk_push_derived!(derived, staged, defexpr, staged, target)
@@ -3060,7 +3132,8 @@ function _rk_term_specs(term, target::Symbol, data::AbstractDict,
             "$prefix: predictor `$target` `$(nameof(f))()` cannot be " *
             "coded by shared lowering")
         scol = only(shared)
-        defexpr = _rk_transform_defexpr(f, vname)
+        defexpr = _rk_transform_defexpr(f, vname,
+            _rk_fit_twin!(derived, columns, taken, data, vname))
         _rk_verify_derived_values!(defexpr, scol.values, scol.label,
             target, data, derived)
         dname = _rk_push_derived!(
@@ -7033,8 +7106,10 @@ function _rk_gate_name_hygiene!(predictor_specs::AbstractVector,
             "`$name`; rename it")
     end
     dnames = [spec.name for spec in derived]
+    # Data preparations and fit-role inputs (`_rk_fit_twin!`) bind their
+    # column under their own name.
     prepared_names = Set(spec.name for spec in derived
-        if spec.expression.head === :_rk_data_preparation)
+        if spec.expression.head in (:_rk_data_preparation, :_rk_fit_input))
     for spec in response_specs
         for tname in (spec.thresholds, spec.threshold_coefs)
             tname === nothing && continue
@@ -8021,6 +8096,10 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
             first(spec.expression.args) === :brm_matrix_column))
     union!(statistical_inputs, _rk_callable_broadcast_columns(
         predictor_specs, response_specs, derived, columns))
+    # A fit-role input is read whole by its anchor; on a replay it holds the
+    # training rows.
+    union!(statistical_inputs, (spec.name for spec in derived
+        if spec.expression.head === :_rk_fit_input))
     _rk_gate_crossed_columns!(columns, n_obs, mi_packed; statistical_inputs)
     _rk_gate_trials_values!(response_specs, columns, n_obs)
     _rk_gate_multinomial_trials!(response_specs, columns, n_obs)

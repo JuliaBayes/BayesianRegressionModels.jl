@@ -40,6 +40,26 @@ zscaled(d) = @brm d begin
     mu ~ 1 + zscale(x)
     y ~ Normal(mu, sigma)
 end
+centered(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + center(x)
+    y ~ Normal(mu, sigma)
+end
+standardized(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + standardize(x)
+    y ~ Normal(mu, sigma)
+end
+zscaled_log(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + zscale(log(x))
+    y ~ Normal(mu, sigma)
+end
+zscaled_interaction(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + zscale(x) & z
+    y ~ Normal(mu, sigma)
+end
 end
 const RM = ReprocessModels
 
@@ -48,6 +68,7 @@ const TRAIN = (; x=collect(range(0.3, 4.1; length=N)) .^ 1.3,
     g=categorical(["a", "b", "c"][mod1.(1:N, 3)]),
     gs=["a", "b", "c"][mod1.(1:N, 3)],
     r=[1, 2, 3, 4][mod1.(1:N, 4)],
+    z=cos.(1:N),
     y=sin.(1:N) .+ 0.1 .* (1:N))
 rows_of(data, rows) = map(v -> v isa AbstractVector ? v[rows] : v, data)
 
@@ -94,14 +115,22 @@ end
 end
 
 @stestset "zscale/center/standardize keep the training anchors" begin
-    rk = RKBRMI(RM.zscaled(TRAIN))
-    u = point(rk)
-    full = graph_value(rk, :mu, u)
-    @test_broken graph_value(reprocess(rk, rows_of(TRAIN, 2:5)), :mu, u) ≈ full[2:5]
+    for build in (RM.zscaled, RM.centered, RM.standardized, RM.zscaled_log,
+            RM.zscaled_interaction)
+        check_frozen(build, 2:5)
+        # One row has no SD of its own; the training anchors apply.
+        check_frozen(build, [7])
+    end
+    # The fit reads its anchors from a fit-role copy of the column.
+    emitted = BRM._rk_emit_ast(BRM._brm_rk_plan(RM.zscaled(TRAIN)))
+    source = sprint(Base.show_unquoted, emitted.main)
+    @test occursin("brm_covariate_mean(x_fit)", source)
+    @test occursin("brm_covariate_sd(x_fit)", source)
 end
 
 @stestset "replaying the training data is the fit" begin
-    for build in (RM.string_factor, RM.monotonic, RM.fitted_constant)
+    for build in (RM.string_factor, RM.monotonic, RM.fitted_constant, RM.zscaled,
+            RM.zscaled_log)
         rk = RKBRMI(build(TRAIN))
         u = point(rk)
         @test density(reprocess(rk, TRAIN), u) == density(rk, u)
