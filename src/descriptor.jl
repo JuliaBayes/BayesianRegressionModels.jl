@@ -2269,6 +2269,48 @@ function brm_term_coordinates(d::BRMDescriptor, logical::Symbol,
        link=entry.link, inverse_link=InverseFunctions.inverse(entry.link))
 end
 
+"""
+    brm_length_scale_floor(d::BRMDescriptor, logical::Symbol; term::Symbol)
+
+The fitted length-scale validity floor of one `hsgp` term: the value
+`length_scale_floor` stands for in that term's `length_scale(...)` prior and
+the lower bound of its default declaration. `logical` and `term` address the
+term exactly as in [`brm_term_coordinates`](@ref) (`term=:hsgp_t` for
+`hsgp(t)`), but no posterior draws are needed: the floor is fitted data.
+
+Returns a `Float64` for an isotropic term (the strictest axis's floor, which
+its one length scale is bounded by) and a `Vector{Float64}` with one floor per
+axis for `iso=false`. A `k = 1` basis has no usable floor and returns `0.0`.
+Grouped (`by=`), periodic, model-derived-axis and hyper-predicted terms are
+covered. A descriptor of `reprocess(...; freeze_constants=false)` returns the
+re-derived floor. The value is the same whether or not the term's prior names
+`length_scale_floor`:
+
+```julia
+d = brm_descriptor(builder, df; mod=@__MODULE__)
+floor = brm_length_scale_floor(d, :mu; term=:hsgp_t)
+"allowed length-scale interval [\$(round(floor; sigdigits=3)), 24.0]"
+```
+
+A term that is not an `hsgp` term, or an address that names no unique term,
+errors with the available labels.
+"""
+function brm_length_scale_floor(d::BRMDescriptor, logical::Symbol; term::Symbol)
+    entry = _brm_term_entry(d, logical, e -> e.term === term, "term `$term`")
+    getf(entry.value) === hsgp || error(
+        "brm_length_scale_floor: term `$term` on logical predictor `$logical` " *
+        "is a `$(nameof(getf(entry.value)))` term; only an `hsgp` term has a " *
+        "length-scale validity floor")
+    owner = _brm_term_owner_output(d, logical, entry).declaration
+    floor = get(owner.keywords, :rho_lower, nothing)
+    value = floor isa Symbol ? get(d.plan.data, floor, nothing) : floor
+    value isa Union{Real,AbstractVector{<:Real}} || error(
+        "brm_length_scale_floor: term `$term` on logical predictor `$logical` " *
+        "has no fitted validity floor (found $(repr(floor))). Re-reflect the " *
+        "model that produced this descriptor.")
+    value isa Real ? Float64(value) : collect(Float64, value)
+end
+
 # The one formula term on `logical` that `select` accepts. `what` names the
 # selection in the error, so a public label lookup and an internal semantic
 # lookup (e.g. by HSGP axes) report the same available labels.
@@ -2289,10 +2331,10 @@ function _brm_term_entry(d::BRMDescriptor, logical::Symbol, select, what)
     only(entries)
 end
 
-# The declaration-owned output that carries one parameter role of a formula
-# term, resolved from the term to its logical owner without parsing a name.
-function _brm_term_parameter_output(d::BRMDescriptor, logical::Symbol, entry,
-                                    parameter::Symbol)
+# The logical output that owns one formula term on `logical`: the term's
+# collected value, whose declaration carries the term's sampled parameters and
+# fitted inputs. Resolved without parsing an emitted name.
+function _brm_term_owner_output(d::BRMDescriptor, logical::Symbol, entry)
     term = entry.term
     emitted_lp = _sb_lp_emitted_name(logical, entry.link)
     owner_labels = _brm_term_owner_labels(
@@ -2311,7 +2353,16 @@ function _brm_term_parameter_output(d::BRMDescriptor, logical::Symbol, entry,
         "brm_descriptor: term `$term` on logical predictor `$logical` has " *
         "$(length(owners)) logical output owners across emitted candidates " *
         "$(owner_labels); expected exactly one.")
-    owner = only(owners).declaration
+    only(owners)
+end
+
+# The declaration-owned output that carries one parameter role of a formula
+# term, resolved from the term to its logical owner without parsing a name.
+function _brm_term_parameter_output(d::BRMDescriptor, logical::Symbol, entry,
+                                    parameter::Symbol)
+    term = entry.term
+    value_output = _brm_term_owner_output(d, logical, entry)
+    owner = value_output.declaration
 
     bindings = _brm_term_parameter_bindings(getf(entry.value), entry.value)
     hyper_plans = _brm_term_hyper_plans(d.plan, logical, entry.value)
@@ -2321,7 +2372,7 @@ function _brm_term_parameter_output(d::BRMDescriptor, logical::Symbol, entry,
         (keys(bindings)..., :value) : keys(bindings)
     # The term's collected value is the owner output itself: the carrier this
     # predictor's occurrence of the term emits, under the shared formula label.
-    parameter === :value && :value in roles && return only(owners)
+    parameter === :value && :value in roles && return value_output
     if parameter in (:length_scale, :sd) &&
        any(p -> p.hyper === parameter, hyper_plans)
         roles = Tuple(k for k in keys(hyper_bindings) if

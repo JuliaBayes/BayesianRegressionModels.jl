@@ -6,10 +6,14 @@ _brm_group_values(raw::AbstractVector) = raw
 _brm_collect_data_lengths!(_acc, _x) = nothing
 _brm_collect_data_lengths!(acc, x::NamedColumn) = begin
     p = parent(x)
-    p isa DataColumn ? push!(acc, (name(x), length(parent(p)))) :
+    p isa DataColumn ? _brm_push_data_length!(acc, name(x), parent(p)) :
         _brm_collect_data_lengths!(acc, p)
     nothing
 end
+# A scalar data column — a scalar field of the container or a `constant(...)`
+# declaration — broadcasts over whatever frame reads it, so it names no row axis.
+_brm_push_data_length!(acc, column::Symbol, values) = push!(acc, (column, length(values)))
+_brm_push_data_length!(_acc, ::Symbol, ::Number) = nothing
 _brm_collect_data_lengths!(acc, x::ExprColumn) = begin
     getf(x) === (~) && return nothing
     for a in getargs(x); _brm_collect_data_lengths!(acc, a); end
@@ -21,7 +25,8 @@ _brm_collect_data_lengths!(acc, x::Union{Tuple,AbstractVector}) = begin
     nothing
 end
 
-# `(name, length)` of every raw data column a linear predictor's terms read.
+# `(name, length)` of every row-wise raw data column a linear predictor's terms
+# read; scalar columns are skipped.
 function _brm_kernel_lp_data_lengths(lp_col)
     lens = Tuple{Symbol,Int}[]
     _brm_collect_data_lengths!(lens, getargs(parent(lp_col))[2])

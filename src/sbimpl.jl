@@ -5806,9 +5806,10 @@ function _sb_kernel_lp_buckets(lp_cols; ragged_cols=(),
     end
 end
 
-# Collect `(name, length)` for every RAW data column reachable from a formula
-# RHS. Used to check that a `ragged(x, group)` LP really is declared over the
-# same row axis its grouping column describes. Descent stops at a nested `~`
+# Collect `(name, length)` for every row-wise RAW data column reachable from a
+# formula RHS; a scalar column broadcasts and names no row axis. Used to check
+# that a `ragged(x, group)` LP really is declared over the same row axis its
+# grouping column describes. Descent stops at a nested `~`
 # ExprColumn: that is a REFERENCE to another formula's value, not part of this
 # one's design, so its data belongs to the other row axis.
 const _sb_collect_data_lengths! = _brm_collect_data_lengths!
@@ -8644,7 +8645,7 @@ const _SB_T2_BLOCKS = (:rr, :rn, :nr)
 # Shared preparation resolves addresses, term geometry, slots, ambiguity, and
 # precedence.  sbimpl only converts each winning prior to its Stan emission
 # configuration.  Val dispatch keeps newly introduced slots fail-closed.
-_sb_term_prior_spelling(entry) = string(entry.spec.expression)
+_sb_term_prior_spelling(entry) = _brm_term_prior_spelling(entry.spec)
 _sb_term_slot_config(::Val{:sd}, entry) = (; prior=entry.spec.expression)
 _sb_term_slot_config(::Val{:sd_rr}, entry) = (; prior=entry.spec.expression)
 _sb_term_slot_config(::Val{:sd_rn}, entry) = (; prior=entry.spec.expression)
@@ -8656,8 +8657,11 @@ _sb_term_slot_config(::Val{:sigma}, entry) =
             "`LogNormal(0, 1)` truncated to be positive")
 _sb_term_slot_config(::Val{:ar}, entry) =
     _sb_dar_ar_prior(entry.spec, _sb_term_prior_spelling(entry))
-_sb_term_slot_config(::Val{:length_scale}, entry) =
-    _sb_gp_scale_prior(entry.spec, _sb_term_prior_spelling(entry))
+# The address spelling travels with the length-scale configuration so the
+# emitter can name it when the fitted floor rules out a floor-marked prior.
+_sb_term_slot_config(::Val{:length_scale}, entry) = merge(
+    _sb_gp_scale_prior(entry.spec, _sb_term_prior_spelling(entry)),
+    (; spelling=_sb_term_prior_spelling(entry)))
 _sb_term_slot_config(::Val{:simplex}, entry) =
     (; spec=entry.spec, prior=entry.spec.expression)
 _sb_term_slot_config(::Val{:latent}, entry) = (; prior=entry.spec.expression)
@@ -12568,6 +12572,21 @@ function _sb_hsgp_option_const(options, support)
     out
 end
 
+# A floor-marked explicit length-scale prior must leave the fitted floor below
+# its upper bound (decision 0ddmtf8). Returns what a fresh `reprocess` needs to
+# re-check a re-derived floor; every other prior records nothing new, so its
+# preprocessing record is unchanged.
+function _sb_hsgp_floor_check(term_overrides, t, floor, geometry, remedy)
+    cfg = _sb_term_cfg(term_overrides, t, :length_scale)
+    isnothing(cfg) && return (;)
+    upper = _brm_floor_prior_upper(cfg.prior)
+    isnothing(upper) && return (;)
+    statement = "$(cfg.spelling) ~ $(cfg.prior)"
+    _brm_check_hsgp_floor_below(floor, upper, statement, geometry, remedy;
+                                prefix="sbimpl")
+    (; floor_upper=(; upper, statement))
+end
+
 # A raw HSGP axis as Float64; rows outside a `rows=` mask may be `missing`.
 _sb_hsgp_axis_values(name, raw, ::Nothing) =
     collect(Float64, _sb_real_vec(:hsgp, name, raw))
@@ -12660,6 +12679,9 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         data[omega2_name] = omega2
         _sb_record_static!(data, omega2_name)
         rho_lower = basis.rho_lower
+        _sb_hsgp_floor_check(term_overrides, t, rho_lower,
+            _brm_hsgp_floor_geometry(K, c, domain_fits, true),
+            _brm_hsgp_floor_remedy(true))
         submodel_name = orthogonal_to === :linear ?
             :_sb_hsgp_latent_orthogonal : :_sb_hsgp_latent
         submodel = _sb_gp_submodel_expr(submodel_name, term_overrides, t)
@@ -12708,10 +12730,13 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         data[PHI_name] = PHI
         data[omega2_name] = omega2
         data[rho_lower_name] = basis.rho_lower
+        floor_const = _sb_hsgp_floor_check(term_overrides, t, basis.rho_lower,
+            _brm_hsgp_floor_geometry(K, c, fits, !isnothing(domain_fits)),
+            _brm_hsgp_floor_remedy(!isnothing(domain_fits)))
         _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp,
             (; fits, K, c, iso, domain_fits, orthogonal_to,
              omega2_key=omega2_name, rho_lower_key=rho_lower_name,
-             _sb_hsgp_option_const(options, fitted.support)...),
+             _sb_hsgp_option_const(options, fitted.support)..., floor_const...),
             names, false))
         col_name = Symbol(:hsgp_, suffix, :_by_, gname)
         rho_plan = _sb_hyper_plan_for(hyper_plans, :length_scale)
@@ -12757,9 +12782,13 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     data[omega2_name] = omega2
     data[rho_lower_name] = basis.rho_lower
     partial && (data[centeredness_name] = centeredness)
+    floor_const = _sb_hsgp_floor_check(term_overrides, t, basis.rho_lower,
+        _brm_hsgp_floor_geometry(K, c, fits, !isnothing(domain_fits)),
+        _brm_hsgp_floor_remedy(!isnothing(domain_fits)))
     preproc_const = (; fits, K, c, iso, domain_fits, orthogonal_to,
                      omega2_key=omega2_name, rho_lower_key=rho_lower_name,
-                     _sb_hsgp_option_const(options, fitted.support)...)
+                     _sb_hsgp_option_const(options, fitted.support)...,
+                     floor_const...)
     partial && (preproc_const = merge(preproc_const, (; centeredness)))
     _sb_record_preproc!(data, PHI_name, PreprocEntry(
         :hsgp, preproc_const, names, false))
@@ -12834,6 +12863,10 @@ function _sb_hsgp_periodic_term!(stmts, data, t, names, raw, is_raw, K, kw,
     data[PHI_name] = basis.PHI
     data[harmonics_name] = basis.harmonics
     data[rho_lower_name] = basis.rho_lower
+    # The periodic floor depends on `k` alone, so replay never moves it.
+    _sb_hsgp_floor_check(term_overrides, t, basis.rho_lower,
+        _brm_hsgp_periodic_floor_geometry(K1, period),
+        _BRM_HSGP_PERIODIC_FLOOR_REMEDY)
     _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp,
         (; cov=:periodic, period, K=K1, iso=true,
          harmonics_key=harmonics_name, rho_lower_key=rho_lower_name,

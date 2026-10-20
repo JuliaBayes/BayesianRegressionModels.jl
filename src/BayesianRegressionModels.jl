@@ -211,6 +211,7 @@ export brm_description_record
 export brm_description_prior_anchor, brm_description_prior_references
 export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        brm_population_effect_coordinates, brm_term_coordinates,
+       brm_length_scale_floor,
        brm_ranef_sd_coordinates, brm_ranef_draws,
        BRMCoordinatePair, BRMCoordinateTransport, BRMCoordinateTransportError,
        brm_coordinate_transport,

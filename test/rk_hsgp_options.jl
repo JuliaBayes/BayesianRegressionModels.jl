@@ -114,3 +114,20 @@ end
     end
     @test isequal(data, before)
 end
+
+@stestset "HSGP floor at or above the explicit upper bound is refused" begin
+    # `t` spans [0.5, 3.5]: a k=3 basis has L = 1.5 * 1.75 = 2.625 and a
+    # floor of about 2.54.
+    # refused: the declared length-scale support is empty, so the density
+    # could never be evaluated (decision 0ddmtf8)
+    for prior in (:(Uniform(length_scale_floor, 1.0)),
+                  :(truncated(LogNormal(0.0, 1.0); lower=length_scale_floor, upper=1.0)))
+        builder = eval(:(@brm begin
+            location ~ 0 + hsgp(t; k=3)
+            length_scale(:, hsgp(t)) ~ $prior
+            y ~ Normal(location, 1.0)
+        end))
+        @test_throws "(k=3, c=1.5, L=2.625) is not below the upper bound 1.0" RKBRMI(
+            builder(RK_HSGP_OPTION_DATA))
+    end
+end
