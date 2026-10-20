@@ -234,19 +234,128 @@ end
     replayed = reprocess(masked, merge(flat, (; x=flat.x .+ 0.1)))
     @test replayed.held_out_rows == Dict(:y => late)
     @test BRM.stan_code(replayed) == BRM.stan_code(masked)
-    # refused: a mask names rows of the data it was given (held_out docs)
+    # refused: the fit's mask names the fit's rows (held_out docs); the error
+    # names the replay's own `held_out=`
     longer = map(column -> vcat(column, column[1:1]), flat)
-    @test_throws r"reprocess: the row mask for `held_out` response `y` has length 5" reprocess(
+    @test_throws r"reprocess: the row mask for `held_out` response `y` has length 5.*`held_out=\(; y = mask\)`, or `held_out=\(\)`" reprocess(
         masked, longer)
+
+    # a replay onto data of another shape takes that data's own masks
+    longer_late = vcat(late, [true])
+    remasked = reprocess(masked, longer; held_out=(; y=longer_late))
+    @test remasked.held_out_rows == Dict(:y => longer_late) && isempty(remasked.held_out)
+    @test BRM.stan_code(remasked) == BRM.stan_code(masked)
+    # the replay's masks replace the fit's: the fit's own mask leaves no trace
+    @test BRM.stan_data(remasked) ==
+          BRM.stan_data(reprocess(full, longer; held_out=(; y=longer_late)))
+    # with fresh constants, the replay is the model built on that data and mask
+    fresh = SBBRMI(joint(longer); mod=@__MODULE__, held_out=(; y=longer_late))
+    @test BRM.stan_data(reprocess(full, longer; freeze_constants=false)) ==
+          BRM.stan_data(SBBRMI(joint(longer); mod=@__MODULE__))
+    @test BRM.stan_data(reprocess(masked, longer; freeze_constants=false,
+        held_out=(; y=longer_late))) == BRM.stan_data(fresh)
+    # `held_out=()` replays with nothing held out
+    plain = reprocess(masked, longer; held_out=())
+    @test isempty(plain.held_out) && isempty(plain.held_out_rows)
+    @test BRM.stan_code(plain) == BRM.stan_code(full)
+    @test BRM.stan_data(plain) == BRM.stan_data(reprocess(full, longer))
+    @test restan_data(masked, longer; held_out=()) == BRM.stan_data(plain)
+    # whole-response hold-outs ride the same keyword
+    both_longer = reprocess(both, longer; held_out=[:z, :y => longer_late])
+    @test both_longer.held_out == Set([:z]) && both_longer.held_out_rows == Dict(:y => longer_late)
+    @test BRM.stan_code(both_longer) == BRM.stan_code(both)
 
     plan = generative_plan(joint, flat; mod=@__MODULE__, held_out=(; y=late))
     @test plan.held_out_rows == Dict(:y => late)
     @test BRM.stan_code(plan) == BRM.stan_code(masked)
     @test generative_plan(plan, flat).held_out_rows == Dict(:y => late)
     @test reprocess(plan, flat).held_out_rows == Dict(:y => late)
+    @test reprocess(plan, longer; held_out=(; y=longer_late)).held_out_rows ==
+          Dict(:y => longer_late)
+    @test isempty(generative_plan(plan, longer; held_out=()).held_out_rows)
     d = brm_descriptor(joint, flat; mod=@__MODULE__, held_out=(; y=late))
     @test d.plan.held_out_rows == Dict(:y => late)
     @test :fit in Set(op.name for op in d.operations)
+    @test_throws r"`held_out=\(\)`" brm_execute(d, :reprocess, longer)
+    @test brm_execute(d, :reprocess, longer; held_out=(; y=longer_late)).plan.held_out_rows ==
+          Dict(:y => longer_late)
+    @test isempty(brm_execute(d, :replay, longer; held_out=()).plan.held_out_rows)
+end
+
+# A conditioning window over per-subject time courses observed in a `@plate`
+# cell: fitted on the rows before a cutoff, then replayed onto a denser time
+# grid (more rows per subject) and onto a new subject, each replay with the
+# cutoff mask of its own rows. `zscale(wt)` is frozen preprocessing.
+const decay = @brm begin
+    sigma ~ Exponential(1)
+    log_k ~ 1 + zscale(wt) + (1 | subject)
+    @plate for i in eachindex(log_k)
+        m = exp.(-exp(log_k[i]) .* t[i])
+        y[i] ~ Normal(m, sigma)
+    end
+end
+const decay_data = (; subject=[:a, :b, :c], wt=[60.0, 75.0, 90.0],
+    t=[[0.5, 1.0, 2.0], [0.5, 1.0], [0.5, 1.0, 2.0, 4.0]],
+    y=[[0.6, 0.4, 0.2], [0.7, 0.5], [0.8, 0.6, 0.3, 0.1]])
+after_cutoff(t) = [ti .> 1.5 for ti in t]
+const decay_grid = (; subject=decay_data.subject, wt=decay_data.wt,
+    t=[collect(0.25:0.25:4.0) for _ in 1:3], y=[0.9 .^ (1:16) for _ in 1:3])
+const decay_kept = (; subject=decay_grid.subject, wt=decay_grid.wt,
+    t=[ti[.!m] for (ti, m) in zip(decay_grid.t, after_cutoff(decay_grid.t))],
+    y=[yi[.!m] for (yi, m) in zip(decay_grid.y, after_cutoff(decay_grid.t))])
+const decay_future = (; subject=[:a, :d], wt=[60.0, 120.0],
+    t=[collect(0.5:0.5:3.0), collect(0.5:0.5:4.0)], y=[zeros(6), zeros(8)])
+
+@testset "SBBRMI: a per-subject window replays onto data of another shape" begin
+    mask = after_cutoff(decay_data.t)
+    full = SBBRMI(decay(decay_data); mod=@__MODULE__, total_groups=())
+    fit = SBBRMI(decay(decay_data); mod=@__MODULE__, total_groups=(), held_out=(; y=mask))
+    @test fit.held_out_rows == Dict(:y => mask)
+    # refused: the fit's mask names the fit's rows (held_out docs)
+    @test_throws r"`held_out=\(; y = mask\)`, or `held_out=\(\)`" reprocess(fit, decay_grid)
+
+    # the denser grid with its own cutoff is the window fit on the grid's kept rows
+    grid_mask = after_cutoff(decay_grid.t)
+    dense = reprocess(fit, decay_grid; held_out=(; y=grid_mask))
+    @test dense.held_out_rows == Dict(:y => grid_mask)
+    @test BRM.stan_code(dense) == BRM.stan_code(fit)
+    @test BRM.stan_code(reprocess(fit, decay_grid; held_out=())) ==
+          BRM.stan_code(reprocess(full, decay_grid))
+    @test BRM.stan_data(reprocess(fit, decay_grid; held_out=())) ==
+          BRM.stan_data(reprocess(full, decay_grid))
+    masked = stan_problem(dense, "decay-dense-masked")
+    reference = stan_problem(reprocess(full, decay_kept), "decay-dense-kept")
+    @test unc_names(masked) == unc_names(reference)
+    offsets = map(stan_points(masked)) do u
+        value, gradient = LogDensityProblems.logdensity_and_gradient(masked, u)
+        kept_value, kept_gradient = LogDensityProblems.logdensity_and_gradient(reference, u)
+        @test isfinite(value)
+        @test gradient ≈ kept_gradient atol=1e-8 rtol=1e-8
+        value - kept_value
+    end
+    @test all(o -> isapprox(o, first(offsets); atol=1e-8), offsets)
+
+    # a new subject re-drawn in generated quantities: `held_out=()` replays the
+    # window fit exactly as the unmasked fit, and `zscale(wt)` keeps the fitted
+    # constants, which a fresh build would not
+    @test_throws r"`held_out=\(\)`" reprocess(fit, decay_future; resample_groups=[:subject])
+    unmasked_future = reprocess(full, decay_future; resample_groups=[:subject])
+    plain_future = reprocess(fit, decay_future; resample_groups=[:subject], held_out=())
+    @test isempty(plain_future.held_out) && isempty(plain_future.held_out_rows)
+    @test BRM.stan_code(plain_future) == BRM.stan_code(unmasked_future)
+    @test BRM.stan_data(plain_future) == BRM.stan_data(unmasked_future)
+    @test StanBlocks.stanc_check(BRM.stan_code(plain_future); warn_pedantic=false).ok
+    scaled = only(k for (k, e) in fit.preproc if e.kind === :zscale)
+    @test BRM.stan_data(plain_future)[scaled] !=
+          BRM.stan_data(SBBRMI(decay(decay_future); mod=@__MODULE__, total_groups=()))[scaled]
+    # not built yet: the re-drawn subjects reach `y`, so cv contagion moves its
+    # whole observation to generated quantities and StanBlocks refuses the
+    # subsumed row mask as unobserved (StanBlocks snag element-hold-out-0f7241b8)
+    future_mask = after_cutoff(decay_future.t)
+    future = reprocess(fit, decay_future; resample_groups=[:subject],
+        held_out=(; y=future_mask))
+    @test future.held_out_rows == Dict(:y => future_mask)
+    @test_broken (BRM.stan_code(future); true)
 end
 
 @testset "per-row hold-outs not built yet" begin

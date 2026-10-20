@@ -1043,7 +1043,10 @@ scaled around its prior location. The exact marginal prior remains correlated
 at either endpoint. Each group/term cell receives its own control automatically.
 A total block emitted in generated quantities (no observed likelihood reaches
 it) has no sampler coordinate, so it has no cell and does not count as a totals
-block when choosing the wrapper.
+block when choosing the wrapper. The same holds for every other family: an
+ordinary or R2D2 random-effect block, an HSGP term or a cdar walk emitted in
+generated quantities is skipped (see [`adaptive_centering_blocks`](@ref)). A
+model left with no cell at all raises, naming what was skipped.
 
 For an S2Z block compiled with `s2z_coordinates=:groups`, each group of each
 coefficient is one scalar cell with zero location and scale `tau_k`: `c=0` is
@@ -1144,11 +1147,17 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
             synchronize! = ir_ -> _sync_sources!(state,ir_))
         return WarmupHMC.ReparametrizedProblem(ir,problem,ad_backend;scoring_plan=scoring)
     end
-    isempty(blocks) && isempty(hsgp_blocks) && isempty(cdar_blocks) && error(
-        "BRM adaptive centering: this model has no supported random-effect " *
-        "blocks (ordinary or R2D2), squared-exponential or periodic HSGPs, or " *
-        "cdar correlated walks.",
-    )
+    if isempty(blocks) && isempty(hsgp_blocks) && isempty(cdar_blocks)
+        generated = BRM._adaptive_generated_labels(model)
+        error("BRM adaptive centering: this model has no supported random-effect " *
+            "blocks (ordinary or R2D2), squared-exponential or periodic HSGPs, or " *
+            "cdar correlated walks" * (isempty(generated) ? "." :
+            " with sampler coordinates. Emitted in generated quantities, " *
+            "because no observed likelihood reaches them (for example, their " *
+            "response is omitted): `" * join(generated, "`, `") * "`. Stan " *
+            "re-draws those, so there is nothing to adapt; bind the response " *
+            "that reads them, or sample this model without adaptive centering."))
+    end
     ordinary = BRM.AdaptiveCenteringBlock[
         b for b in blocks if b isa BRM.AdaptiveCenteringBlock]
     r2d2_blocks = BRM.R2D2AdaptiveCenteringBlock[
