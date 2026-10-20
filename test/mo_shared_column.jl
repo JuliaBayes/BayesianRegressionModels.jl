@@ -54,6 +54,55 @@ mo_df = (;
     @test byname[:pop_b_beta_pop].labels == [:x, :mo_g]
 end
 
+@testset "every predictor labels its repeated mo coefficient mo_g" begin
+    # Snag population-coeff-668403c2: three predictors carry `mo(g)` beside
+    # other population columns, the third linked (its carrier is scoped by the
+    # emitted `log_c`). `615786c2` labelled `beta_pop` from the emitted design,
+    # whose repeated column is the predictor-scoped carrier `mo_<lp>_g`, so
+    # `coefficient=:mo_g` failed on every predictor after the first. The
+    # public label is the term's own on every predictor, as `popcoefnames`
+    # and the `effect(lp, mo_g)` prior address say.
+    df = (; mo_df..., yc=ones(8))
+    builder = @brm begin
+        a ~ 1 + x + mo(g)
+        b ~ 1 + x + mo(g)
+        log(c) ~ 1 + x + mo(g)
+        ya ~ Normal(a, 1.0)
+        yb ~ Normal(b, 1.0)
+        yc ~ Normal(c, 1.0)
+    end
+    brmi = builder(df)
+    blocks = (a=:pop_a, b=:pop_b, c=:pop_log_c)
+    sb = SBBRMI(brmi; mod=@__MODULE__)
+    d = brm_descriptor(sb)
+    code = BRM.stan_code(sb)
+    @test occursin("mo_g_simplex_incr ~ dirichlet", code)
+    @test occursin("mo_b_g_simplex_incr ~ dirichlet", code)
+    @test occursin("mo_log_c_g_simplex_incr ~ dirichlet", code)
+    byname = Dict(o.name => o for o in d.outputs)
+    for (lp, block) in pairs(blocks)
+        @test popcoefnames(brmi, lp) == [:Intercept, :x, :mo_g]
+        @test byname[Symbol(block, :_beta_pop)].labels == popcoefnames(brmi, lp)
+    end
+    if MO_RUNTIME
+        prob = brm_execute(d, :fit)
+        names = BS.param_names(prob.model; include_tp=false, include_gq=false)
+        magnitudes = map(collect(pairs(blocks))) do (lp, block)
+            m = brm_population_effect_coordinates(d, lp, names; coefficient=:mo_g)
+            @test length(m.coordinates) == 1
+            # Its own predictor's third `beta_pop` column, never a sibling's.
+            @test names[only(m.coordinates)] == "$(block)_beta_pop.3"
+            only(m.coordinates)
+        end
+        @test allunique(magnitudes)
+        # `brm_start` resolves `effect(lp, mo_g)` through the same selector.
+        starts = (a=0.3, b=-0.4, c=0.5)
+        u = brm_start(sb, prob.model, map(v -> (; mo_g=v), starts))
+        theta = BS.param_constrain(prob.model, u)
+        @test theta[magnitudes] ≈ collect(starts) rtol=1e-12
+    end
+end
+
 @testset "per-predictor mo priors stay independent" begin
     builder = @brm begin
         a ~ 0 + x + mo(g)

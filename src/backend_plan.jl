@@ -1749,9 +1749,23 @@ _brm_wrapper_prefix(::Val{:*}) = :product
 _brm_wrapper_col_name(prefix::Symbol, inner::NamedColumn) =
     Symbol(_brm_wrapper_prefix(Val(prefix)), :_, name(inner))
 _brm_wrapper_col_name(prefix::Symbol, inner) =
-    Symbol(_brm_wrapper_prefix(Val(prefix)), :_expr_, string(hash(inner); base=16)[1:8])
+    Symbol(_brm_wrapper_prefix(Val(prefix)), :_expr_,
+           string(hash(_brm_term_key(inner)); base=16)[1:8])
 
-function _brm_population_column(term::ExprColumn)
+# Emitted column names describe the formula, not its current data values.
+# Hashing a bound column's full parent tree hashed the data vector's identity,
+# so the same model on a copied frame emitted different names, and a replay
+# re-emission could not find its fitted records.
+_brm_term_key(x::NamedColumn) = (:column, name(x))
+_brm_term_key(x::ExprColumn) =
+    (:call, getf(x), map(_brm_term_key, getargs(x)), map(_brm_term_key, getkwargs(x)))
+_brm_term_key(x) = x
+
+# The training fit a replay re-emission reuses: `fitted(label, kind, raw_ref)`
+# returns the constant recorded for that column, or `nothing` to fit it here.
+_brm_unfitted(_label, _kind, _raw_ref) = nothing
+
+function _brm_population_column(term::ExprColumn, fitted=_brm_unfitted)
     f = getf(term)
     kind = f === zscale ? :zscale :
            f === standardize ? :standardize :
@@ -1777,16 +1791,20 @@ function _brm_population_column(term::ExprColumn)
     isempty(sources) && return nothing
 
     values = collect(Float64, raw)
-    const_ = kind === :center ? _brm_fit_center(values) :
-                               _brm_fit_zscale(values)
+    label = _brm_wrapper_col_name(kind, inner)
+    const_ = fitted(label, kind, inner)
+    if isnothing(const_)
+        const_ = kind === :center ? _brm_fit_center(values) :
+                                   _brm_fit_zscale(values)
+    end
     transformed = kind === :center ? _brm_apply_center(const_, values) :
                                      _brm_apply_zscale(const_, values)
-    label = _brm_wrapper_col_name(kind, inner)
     preprocess = _BRMPopulationPreprocess(kind, const_, inner)
     (; label, effect_addresses=(label,), effect_block=label,
        source=first(sources), values=transformed, preprocess)
 end
 _brm_population_column(_term) = nothing
+_brm_population_column(term, _fitted) = _brm_population_column(term)
 
 function _brm_population_fixed_term(term)
     term isa ExprColumn && getf(term) === offset || return nothing
@@ -1956,16 +1974,29 @@ _brm_cellmeans_level_address(block::Symbol, level::Integer) =
 function _brm_categorical_population_columns(
         raw, source::Symbol, block::Symbol,
         effect_addresses::Tuple=(block,); ref::Union{Integer,AbstractString}=1,
-        cellmeans::Bool=false, levels::Union{Nothing,AbstractVector}=nothing)
+        cellmeans::Bool=false, levels::Union{Nothing,AbstractVector}=nothing,
+        fitted=_brm_unfitted)
     _brm_is_categorical_data(raw) || return nothing
-    n_levels, indices = _brm_level_index(raw)
-    # Treatment coding drops a single-level factor (its lone level is the
-    # reference); cell means keep its one coefficient.
-    n_levels >= (cellmeans ? 1 : 2) || return ()
-    # `levels` carries the fitted level values when `raw` is already recoded
-    # (string `factor(...; ref=...)` recodes to integer codes); otherwise the
-    # levels are derived from `raw` exactly as before.
-    levels = isnothing(levels) ? _brm_fit_levels(raw) : levels
+    first_level = cellmeans ? 1 : 2
+    # A replay re-emission codes the FITTED level set, read off the recorded
+    # first indicator (the `_sb_ranef_factor_dummies!` rule), so a frame
+    # carrying only some levels still emits every fitted column. `fitted`
+    # needs `raw` in level values; a recoded caller passes `levels` instead.
+    frozen = fitted(_brm_cellmeans_level_address(block, first_level),
+                    :population_factor_dummy, source)
+    if isnothing(frozen)
+        n_levels, indices = _brm_level_index(raw)
+        # Treatment coding drops a single-level factor (its lone level is the
+        # reference); cell means keep its one coefficient.
+        n_levels >= first_level || return ()
+        # `levels` carries the fitted level values when `raw` is already
+        # recoded (string `factor(...; ref=...)` recodes to integer codes);
+        # otherwise the levels are derived from `raw` exactly as before.
+        levels = isnothing(levels) ? _brm_fit_levels(raw) : levels
+    else
+        levels, n_levels = frozen.levels, frozen.n_levels
+        indices = _brm_apply_fitted_levels(levels, raw)
+    end
     Tuple(begin
         label = _brm_cellmeans_level_address(block, level)
         values = Float64[index == level ? 1.0 : 0.0 for index in indices]
@@ -1977,7 +2008,7 @@ function _brm_categorical_population_columns(
         addresses = cellmeans ? (label, effect_addresses...) : effect_addresses
         (; label, effect_addresses=addresses, effect_block=block, source,
            values, preprocess)
-    end for level in (cellmeans ? 1 : 2):n_levels)
+    end for level in first_level:n_levels)
 end
 
 # The fitted level value one categorical population column codes, in the
@@ -2003,11 +2034,12 @@ function _brm_population_level_value(column, level::Union{Nothing,Integer}=nothi
     value == 1 ? c.ref : value == c.ref ? 1 : value
 end
 
-function _brm_population_columns(term::NamedColumn; cellmeans::Bool=false)
+function _brm_population_columns(term::NamedColumn; cellmeans::Bool=false,
+                                 fitted=_brm_unfitted)
     backing = parent(term)
     categorical = backing isa DataColumn ?
         _brm_categorical_population_columns(
-            parent(backing), name(term), name(term); cellmeans) : nothing
+            parent(backing), name(term), name(term); cellmeans, fitted) : nothing
     !isnothing(categorical) && return categorical
     column = _brm_population_column(term)
     isnothing(column) ? nothing : (column,)
@@ -2052,7 +2084,7 @@ function _brm_string_factor_population_columns(term, inner, raw::AbstractVector;
 end
 
 function _brm_population_columns(term::ExprColumn{typeof(factor)};
-                                 cellmeans::Bool=false)
+                                 cellmeans::Bool=false, fitted=_brm_unfitted)
     args = getargs(term)
     length(args) == 1 || return nothing
     inner = only(args)
@@ -2087,20 +2119,23 @@ function _brm_population_columns(term::ExprColumn{typeof(factor)};
         Int[value == ref_raw ? 1 : value == 1 ? ref_raw : value
             for value in raw_values]
     addresses = ref_raw == 1 ? (source,) : (block, source)
+    # The recoded integers are the level values, so a fitted level set applies;
+    # the string path recodes against the frame's own levels and takes none.
     _brm_categorical_population_columns(
-        recoded, source, block, addresses; ref=ref_raw, cellmeans)
+        recoded, source, block, addresses; ref=ref_raw, cellmeans, fitted)
 end
-_brm_population_columns(term; cellmeans::Bool=false) =
-    let column = _brm_population_column(term)
+_brm_population_columns(term; cellmeans::Bool=false, fitted=_brm_unfitted) =
+    let column = _brm_population_column(term, fitted)
         isnothing(column) ? nothing : (column,)
     end
 # An offset of a model value reaches the column hook instead of the fixed data
 # terms. A backend that lowers it as graph math (RK) passes its own hook; the
 # rest refuse it here, as before.
-function _brm_population_columns(term::ExprColumn{typeof(offset)}; cellmeans::Bool=false)
+function _brm_population_columns(term::ExprColumn{typeof(offset)}; cellmeans::Bool=false,
+                                 fitted=_brm_unfitted)
     args = getargs(term)
     length(args) == 1 && _brm_reads_model_value(only(args)) && _brm_data_offset_error()
-    invoke(_brm_population_columns, Tuple{Any}, term; cellmeans)
+    invoke(_brm_population_columns, Tuple{Any}, term; cellmeans, fitted)
 end
 _brm_data_offset_error() = error(
     "BRM backend lowering: direct-BRMI `offset(...)` currently requires a " *
@@ -2183,11 +2218,11 @@ _brm_interaction_key_operand(column, is_categorical::Bool) =
     is_categorical ? column.effect_block : column.label
 
 function _brm_population_columns(term::ExprColumn{typeof(&)};
-                                 cellmeans::Bool=false)
+                                 cellmeans::Bool=false, fitted=_brm_unfitted)
     args = getargs(term)
     length(args) == 2 || return nothing
-    left = _brm_population_columns(args[1])
-    right = _brm_population_columns(args[2])
+    left = _brm_population_columns(args[1]; fitted)
+    right = _brm_population_columns(args[2]; fitted)
     (isnothing(left) || isnothing(right) ||
      any(c -> isnothing(c.source), left) ||
      any(c -> isnothing(c.source), right)) && return nothing

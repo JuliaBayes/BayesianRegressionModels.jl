@@ -683,8 +683,9 @@ end
 
 # A monotonic component: its increments are a simplex block resolved through
 # the formula term's `:simplex` role, and its coefficient is the population
-# column that SB labels with the same term's owning carrier. In a joint block
-# (`column`), the predictor owns one simplex column and one coefficient entry.
+# column that SB labels with the same term's public label (`mo_<c>`, whichever
+# carrier the occurrence emitted). In a joint block (`column`), the predictor
+# owns one simplex column and one coefficient entry.
 function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:monotonic},
         record, rk, d, stan, stan_pos)
     head = record.head === :mo ? mo : mo1
@@ -705,7 +706,7 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:monotonic}
     coefficient = (; kind=:population, predictor=record.predictor,
         coefficient=entry.term)
     stan_name = _brm_transport_population_stan(d, record.predictor,
-        output.declaration.target, stan, stan_pos)
+        entry.term, stan, stan_pos)
     isnothing(stan_name) && _brm_transport_error(:unsupported_coverage,
         "brm_coordinate_transport: monotonic coefficient $(coefficient) has no " *
         "sampled SB population coordinate")

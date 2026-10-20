@@ -2862,12 +2862,18 @@ _sb_record_preproc!(data, key::Symbol, entry::PreprocEntry) = begin
     nothing
 end
 
+# The fitted preprocessing records a frozen re-emission builds from, or
+# `nothing` for an ordinary construction.
+_sb_frozen_preproc(data) = let ctx = get(data, _SB_PREPROC_KEY, nothing)
+    ctx isa _SBPreprocContext ? ctx.frozen : nothing
+end
+
 function _sb_frozen_preproc_entry(data, key::Symbol, kind::Symbol, raw_ref)
     ctx = get(data, _SB_PREPROC_KEY, nothing)
     ctx isa _SBPreprocContext || return nothing
     entry = get(ctx.frozen, key, nothing)
     isnothing(entry) && return nothing
-    (entry.kind === kind && isequal(entry.raw_ref, raw_ref)) || error(
+    (entry.kind === kind && _sb_same_raw_ref(entry.raw_ref, raw_ref)) || error(
         "sbimpl: resample replay: fitted preprocessing record `$key` no longer " *
         "matches the re-emitted `$kind` term")
     entry
@@ -3671,10 +3677,13 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     # `(brmi_key, (id_sym, group_key)) => (bucket_name, col_range, idx_name, suffix)`
     # for per-sub-formula emission below.
     id_buckets = _sb_collect_id_buckets(context)
-    ranef_effect_overrides = _sb_ranef_effect_overrides(brmi, id_buckets)
+    ranef_effect_overrides = _sb_ranef_effect_overrides(brmi, id_buckets;
+                                                        frozen_preproc=_frozen_preproc)
     ranef_r2d2_overrides = _sb_ranef_r2d2_overrides(brmi, id_buckets,
-                                                    effect_overrides)
-    r2d2_overrides = _sb_r2d2_overrides(brmi, id_buckets, effect_overrides)
+                                                    effect_overrides;
+                                                    frozen_preproc=_frozen_preproc)
+    r2d2_overrides = _sb_r2d2_overrides(brmi, id_buckets, effect_overrides;
+                                        frozen_preproc=_frozen_preproc)
     hs_overrides = _sb_horseshoe_overrides(brmi, effect_overrides, r2d2_overrides)
     data[_SB_HS_PLANS_KEY] = hs_overrides
     total_plans = _sb_plan_totals(brmi,prepared,effect_overrides,id_buckets,
@@ -7746,6 +7755,17 @@ end
 _sb_classify_term!(t, pop_terms, ran_terms, direct_terms) =
     isnothing(_sb_cat_levels(t)) ? push!(pop_terms, t) : push!(direct_terms, t)
 
+# The shared design's column hook. A frozen re-emission (`resample_groups`)
+# reuses each recorded transform fit and level set -- the
+# `_sb_hsgp_fit_for_emission` rule -- so a replay frame with one subject, or
+# with only some levels, rebuilds the fitted columns instead of refitting them.
+# `factor(...)` terms never reach it: `_sb_terms` lowers them first.
+_sb_population_columns(data) = (term; cellmeans::Bool=false) ->
+    _brm_population_columns(term; cellmeans, fitted=(label, kind, raw_ref) -> begin
+        entry = _sb_frozen_preproc_entry(data, label, kind, raw_ref)
+        isnothing(entry) ? nothing : entry.const_
+    end)
+
 function _sb_shared_population_column!(data, column)
     isnothing(column.source) && return nothing
     p = column.preprocess
@@ -7863,7 +7883,8 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
             extent isa Symbol ? extent : extent.args[2]
         end
         shared_design = _brm_population_design(
-            target, Tuple(pop_terms), data, obs_n; row_source)
+            target, Tuple(pop_terms), data, obs_n; row_source,
+            population_columns=_sb_population_columns(data))
         if isnothing(shared_design)
             description_columns=NamedTuple[]
             for t in pop_terms
@@ -7876,9 +7897,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
                               obs_n, ran_terms, direct_terms, target,
                               group_block_lookup, term_overrides)
                 for col in col_exprs[first_column:end]
-                    label=t isa ExprColumn && getf(t)===interval_censored ?
-                        name(_sb_named_inner(:interval_censored,only(getargs(t)))) :
-                        col isa Symbol ? col : :Intercept
+                    label=_sb_pop_column_label(t,col)
                     push!(description_columns,(;label,source=t===1 ? nothing : _brm_raw_column(t),
                         effect_addresses=(label,),effect_block=label,preprocess=nothing,term=t))
                 end
@@ -8238,19 +8257,27 @@ function popcoefnames(brmi::BRMI, lhs::Symbol)
                   "fixed-effect terms; for group-structured terms (e.g. `hsgp(x, by=g)`) ",
                   "read the parameter names off the transpiled `SBBRMI` instead.")
         end
-        for c in cols
-            # Non-intercept pop columns are Symbol references; a stray Expr
-            # (only the intercept probe emits one) maps back to :Intercept.
-            label = if t isa ExprColumn && getf(t) === interval_censored
-                name(_sb_named_inner(:interval_censored, only(getargs(t))))
-            else
-                c isa Symbol ? c : :Intercept
-            end
-            push!(labels, label)
-        end
+        append!(labels, (_sb_pop_column_label(t, c) for c in cols))
     end
     labels
 end
+
+# The public label of one `beta_pop` column `col` that population term `t`
+# emitted. `popcoefnames` and the emitter's design record (the `design_columns`
+# of the `pop_<lp>` binding, which the descriptor exposes as `labels`) both
+# take it from here, so the two cannot disagree. Non-intercept columns are
+# Symbol references and label themselves; a stray Expr (only the intercept
+# probe emits one) maps back to `:Intercept`. The formula term, not the column
+# reference, names two families: an `interval_censored` column by its inner
+# data column, and a `mo(c)` column by its term label `mo_<c>` — a repeated
+# `mo(c)` emits a predictor-scoped `mo_<lp>_<c>` carrier, but its public label
+# stays `mo_<c>` on every predictor (snag mo-term-in-sever-fe459870).
+_sb_pop_column_label(t, col) = col isa Symbol ? col : :Intercept
+_sb_pop_column_label(t::ExprColumn, col) = _sb_pop_column_label(getf(t), t, col)
+_sb_pop_column_label(::Any, t, col) = col isa Symbol ? col : :Intercept
+_sb_pop_column_label(::typeof(interval_censored), t, col) =
+    name(_sb_named_inner(:interval_censored, only(getargs(t))))
+_sb_pop_column_label(::typeof(mo), t, col) = _brm_term_label(mo, t)
 
 # ---- consumer helper: name the `cat_<lp>_<c>_beta` contrast blocks ----------
 #
@@ -10057,9 +10084,13 @@ function _sb_bucket_target_terms(bucket)
     out
 end
 
-function _sb_id_bucket_margins(bucket)
+function _sb_id_bucket_margins(bucket; frozen_preproc=nothing)
     out = NamedTuple[]
     scratch_data = Dict{Symbol,Any}()
+    # A frozen re-emission names its columns from the same fitted records the
+    # emitter reads, so a one-subject replay never refits `zscale(x)` here.
+    isnothing(frozen_preproc) || (scratch_data[_SB_PREPROC_KEY] =
+        _SBPreprocContext(Dict{Symbol,PreprocEntry}(), frozen_preproc))
     scratch_stmts = Any[]
     for (predictor, terms) in _sb_bucket_target_terms(bucket)
         for t in terms
@@ -10196,7 +10227,8 @@ end
 # buckets. The result is keyed exactly like `id_buckets`; entries are present
 # only for explicitly configured buckets, preserving default emission byte for
 # byte when the formula contains no ranef effect statements.
-Base.@nospecializeinfer function _sb_ranef_effect_overrides(@nospecialize(brmi::BRMI), id_buckets)
+Base.@nospecializeinfer function _sb_ranef_effect_overrides(@nospecialize(brmi::BRMI), id_buckets;
+                                                            frozen_preproc=nothing)
     # `sd(...) ~ r2d2(...)` is a derived-scale prior, not a distribution on a
     # sampled `tau`.  Resolve it in `_sb_ranef_r2d2_overrides`; the ordinary
     # resolver still sees `cor(...)` and every direct-scale SD statement.
@@ -10208,7 +10240,7 @@ Base.@nospecializeinfer function _sb_ranef_effect_overrides(@nospecialize(brmi::
         bucket.group_desc isa Tuple && any(spec -> spec.id === first(key), specs) &&
             error("sbimpl: covariance-prior effects for stratified " *
                   "`|$(first(key))| gr(..., by=...)` buckets are not yet supported")
-        margins[key] = _sb_id_bucket_margins(bucket)
+        margins[key] = _sb_id_bucket_margins(bucket; frozen_preproc)
     end
     resolved = _brm_resolve_ranef_effect_overrides(
         specs, margins; prefix="sbimpl")
@@ -10457,7 +10489,8 @@ function _sb_ranef_r2d2_spelling(spec)
 end
 
 Base.@nospecializeinfer function _sb_ranef_r2d2_overrides(@nospecialize(brmi::BRMI), id_buckets,
-                                  effect_overrides=Dict{Symbol,Any}())
+                                  effect_overrides=Dict{Symbol,Any}();
+                                  frozen_preproc=nothing)
     all_specs = ranef_effect_priors(brmi)
     specs = [spec for spec in all_specs
              if spec.class === :sd && spec.family === r2d2]
@@ -10477,7 +10510,7 @@ Base.@nospecializeinfer function _sb_ranef_r2d2_overrides(@nospecialize(brmi::BR
         bucket.group_desc isa Tuple && error(
             "sbimpl: `sd(...) ~ r2d2(...)` for stratified `|$id| " *
             "gr(..., by=...)` buckets is not yet supported")
-        margins = _sb_id_bucket_margins(bucket)
+        margins = _sb_id_bucket_margins(bucket; frozen_preproc)
         id_specs = [spec for spec in specs if spec.id === id]
         direct_sd = [spec for spec in all_specs
                      if spec.id === id && spec.class === :sd &&
@@ -10688,7 +10721,8 @@ end
 # the shared-bucket all-or-nothing rule. Returns a Dict keyed by predictor; an
 # empty Dict when the formula contains no r2d2 statement, which keeps every
 # other model's emission byte for byte unchanged.
-Base.@nospecializeinfer function _sb_r2d2_overrides(@nospecialize(brmi::BRMI), id_buckets, effect_overrides)
+Base.@nospecializeinfer function _sb_r2d2_overrides(@nospecialize(brmi::BRMI), id_buckets, effect_overrides;
+                                                    frozen_preproc=nothing)
     specs = r2d2_priors(brmi)
     isempty(specs) && return Dict{Symbol,NamedTuple}()
 
@@ -10786,7 +10820,7 @@ Base.@nospecializeinfer function _sb_r2d2_overrides(@nospecialize(brmi::BRMI), i
         out[target] = (; labels, share_idx, n_shares, alpha, r2_prior, tau_bsv)
     end
 
-    _sb_r2d2_check_buckets(id_buckets, out)
+    _sb_r2d2_check_buckets(id_buckets, out; frozen_preproc)
     out
 end
 
@@ -10795,10 +10829,10 @@ end
 # margin. A part-derived vector would mean one submodel whose scale is half
 # transformed parameter and half free parameter, which is not built -- and a
 # partly-decomposed correlated block is statistically odd anyway.
-function _sb_r2d2_check_buckets(id_buckets, r2d2_overrides)
+function _sb_r2d2_check_buckets(id_buckets, r2d2_overrides; frozen_preproc=nothing)
     isempty(r2d2_overrides) && return
     for (key, bucket) in id_buckets
-        margins = _sb_id_bucket_margins(bucket)
+        margins = _sb_id_bucket_margins(bucket; frozen_preproc)
         scoped = unique(Symbol[m.predictor for m in margins
                                if haskey(r2d2_overrides, m.predictor)])
         isempty(scoped) && continue
@@ -11304,7 +11338,7 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
         # Derived-`tau` vector for an R2D2-scoped bucket. `_sb_r2d2_check_buckets`
         # has already guaranteed all-or-nothing, so either every margin resolves
         # here or none does.
-        margins = _sb_id_bucket_margins(bucket)
+        margins = _sb_id_bucket_margins(bucket; frozen_preproc=_sb_frozen_preproc(data))
         r2d2_tau = nothing
         bucket_r2d2 = get(ranef_r2d2_overrides, k, nothing)
         if !isnothing(bucket_r2d2)
@@ -13041,17 +13075,19 @@ for (fn, kind, fitf, applyf) in (
     # one-pass while exposing the fitted constant `c` for the preproc record
     # (so `reprocess` can re-apply it, frozen, to a new df). `raw_ref` is the
     # inner column-node tree, re-materialised on the new df at reprocess time.
+    # A frozen re-emission reuses the recorded constant instead of refitting.
     @eval function _sb_predictor_term!(stmts, data, ::typeof($fn), t; kwargs...)
         inner = only(getargs(t))
         if _sb_term_refs_mi(inner)
-            cn = _sb_mi_wrapper_col_name($(QuoteNode(fn)), inner)
+            cn = _sb_wrapper_col_name($(QuoteNode(fn)), inner)
             return _sb_emit_mi_transform!(stmts, data,
                 $(QuoteNode(Symbol(:missing_, kind))), inner, cn)
         end
-        v = collect(Float64, _sb_materialize_vec(inner))
-        c = $fitf(v)
-        v_t = $applyf(c, v)
         cn = _sb_wrapper_col_name(Symbol($(QuoteNode(fn))), inner)
+        frozen = _sb_frozen_preproc_entry(data, cn, $(QuoteNode(kind)), inner)
+        v = collect(Float64, _sb_materialize_vec(inner))
+        c = isnothing(frozen) ? $fitf(v) : frozen.const_
+        v_t = $applyf(c, v)
         data[cn] = v_t
         _sb_record_preproc!(data, cn, PreprocEntry($(QuoteNode(kind)), c, inner, false))
         cn
@@ -13065,7 +13101,7 @@ end
 # directly), preserving the old "unsupported" diagnostic.
 function _sb_materialize_protect_term!(stmts, data, f, t)
     if _sb_term_refs_mi(t)
-        cn = _sb_mi_wrapper_col_name(Symbol(f), t)
+        cn = _sb_wrapper_col_name(Symbol(f), t)
         _sb_mi_predictor_assignment!(stmts, cn, _sb_scalar_expr(t, data))
         return cn
     end
@@ -13138,17 +13174,6 @@ end
 _sb_term_refs_mi(x::ExprColumn) = any(_sb_term_refs_mi, getargs(x))
 _sb_term_refs_mi(_) = false
 
-# Runtime transform names describe the formula, not its current data values.
-# Hashing a bound column's full parent tree changes the name when observed
-# values are refreshed, so frozen replay cannot find its fitted anchors.
-_sb_mi_term_key(x::NamedColumn) = (:column, name(x))
-_sb_mi_term_key(x::ExprColumn) =
-    (:call, getf(x), map(_sb_mi_term_key, getargs(x)), map(_sb_mi_term_key, getkwargs(x)))
-_sb_mi_term_key(x) = x
-_sb_mi_wrapper_col_name(prefix::Symbol, inner::NamedColumn) =
-    _sb_wrapper_col_name(prefix, inner)
-_sb_mi_wrapper_col_name(prefix::Symbol, inner) =
-    Symbol(_brm_wrapper_prefix(Val(prefix)), :_expr_, string(hash(_sb_mi_term_key(inner)); base=16)[1:8])
 
 _sb_mi_training_values(x::Number, _df=nothing) = x
 function _sb_mi_training_values(x::NamedColumn, df=nothing)
