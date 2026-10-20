@@ -200,24 +200,9 @@ function hsgp_boundary_check(d::BRMDescriptor, draws::AbstractMatrix, names;
             "HSGP boundary check: term `$term` has a model-derived axis; " *
             "v1 covers raw-data axes only")
     end
-    # Owner join, mirroring `brm_term_coordinates`: formula term to logical
+    # Owner join shared with `brm_term_coordinates`: formula term to logical
     # term output to owning declaration.
-    link = entry.link
-    emitted_lp = _sb_lp_emitted_name(predictor, link)
-    owner_labels = _brm_term_owner_labels(getf(t), t, emitted_lp)
-    owners = BRMOutput[]
-    for label in owner_labels
-        append!(owners, BRMOutput[
-            o for o in d.outputs
-            if o.logical === label && !isnothing(o.declaration) &&
-               _brm_term_owner_matches(d.plan, getf(t), t, o)
-        ])
-        isempty(owners) || break
-    end
-    length(owners) == 1 || error(
-        "HSGP boundary check: term `$term` has $(length(owners)) logical " *
-        "output owners; expected exactly one.")
-    owner = only(owners).declaration
+    owner = _brm_term_owner_output(d, predictor, entry).declaration
     # The latent/model-derived shape carries an `x` keyword instead of a `PHI`
     # binding (see `_brm_term_owner_matches`); without frozen fits there is no
     # margin to check against.
