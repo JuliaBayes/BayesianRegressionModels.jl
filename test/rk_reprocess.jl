@@ -300,6 +300,8 @@ end
     value = Base.invokelatest(query, u, b[s2:s2, :])
     value = value isa Tuple ? only(value) : value
     @test value ≈ pk_reads(conc, [2]) atol=1e-12 rtol=1e-12
+    # The new subjects' effects are not the fit's coordinates: no density.
+    @test_throws "different program" density(replay, u)
 end
 
 @stestset "a grouping whose levels are not frozen is refused" begin
