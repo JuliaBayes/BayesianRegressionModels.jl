@@ -140,7 +140,8 @@ end
                  mod=@__MODULE__, total_groups=())
     # Capability gap, not a refusal: `factor(...; ref)` validates its
     # reference against the replay frame during term lowering, before the
-    # frozen level set applies (follow-up of snag `resample-reproce-b5f9c8dd`).
+    # frozen level set applies, and its replay record names the recoded
+    # column (todo `197s4y8`).
     @test_broken stanc_ok(reprocess(fit, merge(one_subject, (; sex=[1]));
                                     resample_groups=[:subject]))
 end
