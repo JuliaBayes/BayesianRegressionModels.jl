@@ -354,6 +354,27 @@ family gap, and the retained sum-to-zero gap. It runs under the root project:
 julia --startup-file=no --project=. test/description_totals.jl
 ```
 
+## Group-level predictors in exact totals
+
+`total_effects.jl` checks the exact-total Stan density, its gradient and
+recovery against a Julia reference, with and without per-group design values
+`W`. The reference subtracts beta's exact conditional density at two different
+betas, which agree only for the true conditional moments.
+`total_effects_group_predictors.jl` checks that a population column constant
+within the block's groups, or equal to a random slope times a per-group value,
+is integrated with the matched coefficients. Each totals program's log density
+equals the conventional (`total_groups=()`) program's with those coefficients
+integrated out. It also covers generated deviations, recovery,
+`brm_population_effect_coordinates`, `population_draws`, `brm_start`,
+centering locations, `population_model`, descriptions, frozen replay and rebuild
+refusals for changed group-level values, transport for a new group, and the
+legacy rebuild of a fit recorded without per-group values.
+
+```sh
+julia --project=test test/total_effects.jl
+julia --project=test test/total_effects_group_predictors.jl
+```
+
 ## In-cell distribution combinators
 
 `description_cell_combinators.jl` describes `@plate for` cells whose

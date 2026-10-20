@@ -237,8 +237,11 @@ is `(:total_effect, predictor, :totals)`; Student-t population priors add their
 exact Gaussian scale mixture as `(:total_effect, predictor, :scale_mixture)`.
 The `(:total_effect, predictor)` component gives the design map A, the prior
 locations m and precisions q, the integrated density and the exact conditional
-recovery of β. Coordinates that only the conventional program samples, such
-as standardized deviations, are not inventoried.
+recovery of β. When the block integrates group-level predictors (columns
+constant within each group), it names them (`group_columns`) and each group's
+mean is A(wᵢ∘β), with wᵢ that group's column values. Coordinates that only the
+conventional program samples, such as standardized deviations, are not
+inventoried.
 
 A vector prior whose coordinates carry different priors, such as tensor
 smoothing SDs configured per block, is a product of per-coordinate priors.
