@@ -168,3 +168,75 @@ end
     end
     @test isequal(data, saved)
 end
+
+# A hook may write its @rkppl submodel definition with the macro, bare or
+# module-qualified; every spelling emits the same bare definition.
+module ExplicitSubmodelSource
+using BayesianRegressionModels, Distributions
+import BayesianRegressionModels: _rk_submodel_rhs!
+
+function shifted end
+const SPELLING = Ref(:bare)
+
+function spelled(definition)
+    SPELLING[] === :bare && return definition
+    SPELLING[] === :qualified && return :(ReactiveKernelsPPL.@rkppl $definition)
+    :(@rkppl $definition)
+end
+
+function _rk_submodel_rhs!(definitions, statements, data, bindings,
+        target::Symbol, ::typeof(shifted), rhs)
+    x = only(getargs(rhs))
+    key = Symbol(target, :_source_x)
+    data[key] = copy(parent(parent(x)))
+    location = name(getkwargs(rhs).location)
+    submodel = Symbol(target, :_shifted)
+    push!(definitions, spelled(:($submodel(x, location) = begin
+        shift ~ Normal(0, 0.4)
+        return location .+ x .* shift
+    end)))
+    push!(statements, :($target ~ $submodel($key, $location)))
+    :done
+end
+
+function build(data)
+    @brm data begin
+        a ~ 0 + x
+        effect(a, :) ~ Normal(0, 0.7)
+        loc ~ shifted(x; location=a)
+        y ~ Normal(loc, 0.8)
+    end
+end
+end
+
+@stestset "submodel hooks write @rkppl definitions bare or with the macro" begin
+    data = (; x=[-0.4, 0.2, 0.7], y=[0.1, -0.2, 0.3])
+    saved = deepcopy(data)
+    emitted = Dict{Symbol,Any}()
+    for spelling in (:bare, :qualified, :macro)
+        ExplicitSubmodelSource.SPELLING[] = spelling
+        try
+            backend, problem = consumer_problem(ExplicitSubmodelSource.build(data))
+            names = coordinate_names(backend.model.layout)
+            ishift = only(findall(n -> occursin("shift", string(n)), names))
+            ia = only(setdiff(eachindex(names), ishift))
+            oracle(u) = logpdf(Normal(0, 0.7), u[ia]) +
+                logpdf(Normal(0, 0.4), u[ishift]) +
+                sum(logpdf.(Normal.(data.x .* (u[ia] + u[ishift]), 0.8), data.y))
+            for u in (zeros(2), [0.2, -0.3], [-0.4, 0.1])
+                check_consumer_point(problem, u, oracle)
+            end
+            emitted[spelling] = BRM._rk_emit_ast(backend.plan)
+        finally
+            ExplicitSubmodelSource.SPELLING[] = :bare
+        end
+    end
+    bare = emitted[:bare]
+    @test !any(d -> Meta.isexpr(d, :macrocall), bare.defs)
+    for spelling in (:qualified, :macro)
+        @test length(emitted[spelling].defs) == length(bare.defs)
+        @test all(splat(BRM._rk_source_equal), zip(emitted[spelling].defs, bare.defs))
+        @test BRM._rk_source_equal(emitted[spelling].main, bare.main)
+    end
+    @test isequal(data, saved)
+end
