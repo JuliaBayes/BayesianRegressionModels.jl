@@ -760,6 +760,14 @@ struct BRMOrderedCenteringReparametrization{N} <: WarmupHMC.AbstractReparametriz
     direction::Int
 end
 
+# `Base.setindex(t, v, i)` with a runtime `i`, as a branch-free select over every
+# entry. Base's recursive version falls off a cliff past 32 entries (measured:
+# 1.9 us and an 80 KB heap allocation per write at 49 entries, against 6 ns and
+# none here), and a heap allocation inside an Enzyme-differentiated map is the
+# Julia 1.10 GC hazard `_block_location` describes. The square Givens buffer
+# reaches 49 entries at `K = 7`, the packed factor 36 at `K = 8`.
+@inline _tset(t::NTuple{M,T}, v, i) where {M,T} = ntuple(k -> ifelse(k == i, T(v), t[k]), Val(M))
+
 # Packed lower-triangular storage: entry `(i, j)`, `j <= i`.
 @inline _tri(i, j) = (i * (i - 1)) ÷ 2 + j
 # Row-major `n x n` storage.
@@ -780,10 +788,10 @@ function _packed_block_cholesky(x, block, order, ::Val{KMAX}) where {KMAX}
         offset = (i - 1) * (i - 2) ÷ 2
         for l in 1:i-1
             z = tanh(x[block.cholesky_free[offset + l]])
-            C = Base.setindex(C, tau * (stick * z), _tri(i, l))
+            C = _tset(C, tau * (stick * z), _tri(i, l))
             stick *= sqrt(one(T) - z * z)
         end
-        C = Base.setindex(C, tau * stick, _tri(i, i))
+        C = _tset(C, tau * stick, _tri(i, i))
     end
     C
 end
@@ -798,7 +806,7 @@ function _permuted_cholesky(C::NTuple{M,T}, order, K, ::Val{KMAX}) where {M,T,KM
     A = ntuple(_ -> zero(T), Val(KMAX * KMAX))
     for j in 1:K
         for l in 1:order[j]
-            A = Base.setindex(A, C[_tri(order[j], l)], _sq(j, l, KMAX))
+            A = _tset(A, C[_tri(order[j], l)], _sq(j, l, KMAX))
         end
     end
     for j in 1:K
@@ -809,19 +817,19 @@ function _permuted_cholesky(C::NTuple{M,T}, order, K, ::Val{KMAX}) where {M,T,KM
             c, s = a / r, b / r
             for i in j:K
                 u, v = A[_sq(i, j, KMAX)], A[_sq(i, l, KMAX)]
-                A = Base.setindex(A, c * u + s * v, _sq(i, j, KMAX))
-                A = Base.setindex(A, c * v - s * u, _sq(i, l, KMAX))
+                A = _tset(A, c * u + s * v, _sq(i, j, KMAX))
+                A = _tset(A, c * v - s * u, _sq(i, l, KMAX))
             end
         end
         if A[_sq(j, j, KMAX)] < zero(T)
             for i in j:K
-                A = Base.setindex(A, -A[_sq(i, j, KMAX)], _sq(i, j, KMAX))
+                A = _tset(A, -A[_sq(i, j, KMAX)], _sq(i, j, KMAX))
             end
         end
     end
     Cp = ntuple(_ -> zero(T), Val(M))
     for j in 1:K, i in 1:j
-        Cp = Base.setindex(Cp, A[_sq(j, i, KMAX)], _tri(j, i))
+        Cp = _tset(Cp, A[_sq(j, i, KMAX)], _tri(j, i))
     end
     Cp
 end
@@ -940,7 +948,7 @@ function _ordered_group_forward!(y, x, state, block, lookup, g, C, Cp, perms, q,
     t = block.target_c
     u = ntuple(_ -> zero(T), Val(KMAX))
     for k in 1:K
-        u = Base.setindex(u, x[block.effects[k, g]], k)
+        u = _tset(u, x[block.effects[k, g]], k)
     end
     w = ntuple(_ -> zero(T), Val(KMAX))
     b = ntuple(_ -> zero(T), Val(KMAX))
@@ -953,7 +961,7 @@ function _ordered_group_forward!(y, x, state, block, lookup, g, C, Cp, perms, q,
             m += Cp[_tri(j, i)] * w[i]
         end
         s = Cp[_tri(j, j)]
-        w = Base.setindex(w, (u[a] - c * m) / s^c, j)
+        w = _tset(w, (u[a] - c * m) / s^c, j)
         if declared
             # WarmupHMC's per-pair spelling (`warmuphmc-use` §5c), so the
             # declared order reproduces the per-pair wrapper.
@@ -961,7 +969,7 @@ function _ordered_group_forward!(y, x, state, block, lookup, g, C, Cp, perms, q,
             y[block.effects[a, g]] = t * m + (u[a] - c * m) * exp(log_scale * (t - c))
             ljac += log_scale * (t - c)
         else
-            b = Base.setindex(b, m + s * w[j], a)
+            b = _tset(b, m + s * w[j], a)
             ljac += (1 - c) * log(s)
         end
     end
@@ -974,7 +982,7 @@ function _ordered_group_forward!(y, x, state, block, lookup, g, C, Cp, perms, q,
             m += C[_tri(k, l)] * z[l]
         end
         s = C[_tri(k, k)]
-        z = Base.setindex(z, (b[k] - m) / s, k)
+        z = _tset(z, (b[k] - m) / s, k)
         y[block.effects[k, g]] = t * m + s^t * z[k]
         ljac += (t - 1) * log(s)
     end
@@ -990,7 +998,7 @@ function _ordered_group_inverse!(y, x, state, block, lookup, g, C, Cp, perms, q,
     t = block.target_c
     v = ntuple(_ -> zero(T), Val(KMAX))
     for k in 1:K
-        v = Base.setindex(v, x[block.effects[k, g]], k)
+        v = _tset(v, x[block.effects[k, g]], k)
     end
     # The compiled frame -> innovations `z` and effects `b`, declared order.
     z = ntuple(_ -> zero(T), Val(KMAX))
@@ -1002,14 +1010,14 @@ function _ordered_group_inverse!(y, x, state, block, lookup, g, C, Cp, perms, q,
             m += C[_tri(k, l)] * z[l]
         end
         s = C[_tri(k, k)]
-        z = Base.setindex(z, (v[k] - t * m) / s^t, k)
+        z = _tset(z, (v[k] - t * m) / s^t, k)
         if declared
             c = state.sources[lookup[k, g]]
             log_scale = log(s)
             y[block.effects[k, g]] = c * m + (v[k] - t * m) * exp(log_scale * (c - t))
             ljac += log_scale * (c - t)
         else
-            b = Base.setindex(b, m + s * z[k], k)
+            b = _tset(b, m + s * z[k], k)
             ljac += (1 - t) * log(s)
         end
     end
@@ -1023,7 +1031,7 @@ function _ordered_group_inverse!(y, x, state, block, lookup, g, C, Cp, perms, q,
             m += Cp[_tri(j, i)] * w[i]
         end
         s = Cp[_tri(j, j)]
-        w = Base.setindex(w, (b[a] - m) / s, j)
+        w = _tset(w, (b[a] - m) / s, j)
         y[block.effects[a, g]] = c * m + s^c * w[j]
         ljac += (c - 1) * log(s)
     end
