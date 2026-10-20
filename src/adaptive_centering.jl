@@ -953,7 +953,8 @@ function _adaptive_term_generated(::typeof(hsgp), descriptor, logical, entry)
     haskey(kw, :by) || return _brm_term_parameter_output(
         descriptor, logical, entry, :basis_weights).kind === :generated_quantity
     # A grouped term's flat weight carrier has no parameter role.
-    flat = last(_adaptive_grouped_hsgp_weights(entry, kw))
+    flat = last(_adaptive_grouped_hsgp_weights(
+        descriptor.plan.parent, logical, entry))
     idx = _brm_carrier_indices(descriptor.outputs, o -> o.name === flat)
     !isempty(idx) && descriptor.outputs[first(idx)].kind === :generated_quantity
 end
@@ -1223,12 +1224,23 @@ function _adaptive_periodic_hsgp_block!(
     out
 end
 
-# The grouped term's weight field and its flat standardized weight carrier,
-# in the emitter's naming (`_sb_hsgp_by`).
-function _adaptive_grouped_hsgp_weights(entry, kw)
-    axnames = Tuple(name(_sb_named_inner(:hsgp, a)) for a in getargs(entry.value))
-    field = Symbol(:hsgpw_, join(string.(axnames), "_"))
-    field, Symbol(:zflat_, field, :_, name(kw[:by]))
+# The grouped term's per-group weight block and its flat standardized weight
+# carrier: the block `logical`'s own occurrence draws, read from the emitter's
+# block plan (`_sb_group_block_plan`), so a repeat on another predictor
+# resolves to that predictor's block.
+function _adaptive_grouped_hsgp_weights(brmi, logical, entry)
+    base = _sb_group_block_base(
+        only(_sb_structured_fields(_sb_term_group_block(hsgp, entry.value), hsgp)),
+        entry.value)
+    suffixes = unique(gb.suffix for gb in
+                      _sb_group_block_plan(_sb_collect_group_block_terms(brmi))
+                      if gb.key === logical && gb.base === base)
+    length(suffixes) == 1 || error(
+        "BRM adaptive centering: grouped HSGP `$(entry.term)` on predictor " *
+        "`$logical` matches $(length(suffixes)) per-group weight blocks; " *
+        "refusing an ambiguous weight layout.",
+    )
+    Symbol(:b_, only(suffixes)), Symbol(:zflat_, only(suffixes))
 end
 
 # Grouped squared-exponential HSGP weights for online adaptation. Spectral
@@ -1251,7 +1263,7 @@ function _adaptive_grouped_hsgp_blocks!(
         "`$logical` has no integer group count under `$n_key`; refusing " *
         "an ambiguous weight layout.",
     )
-    field, flat_name = _adaptive_grouped_hsgp_weights(entry, kw)
+    block, flat_name = _adaptive_grouped_hsgp_weights(plan.parent, logical, entry)
     flat_names = ["$(flat_name).$i" for i in 1:(G*B)]
     flat = _adaptive_named_indices(pos, flat_names, entry.term,
         "grouped HSGP basis weights")
@@ -1276,7 +1288,7 @@ function _adaptive_grouped_hsgp_blocks!(
         )
     end
     sigma = _adaptive_same_hsgp_owner(sigma, owner, "marginal SD")
-    get(owner.keywords, :beta, nothing) === Symbol(:b_, field, :_, gname) || error(
+    get(owner.keywords, :beta, nothing) === block || error(
         "BRM adaptive centering: grouped HSGP `$(entry.term)` declaration " *
         "does not carry the expected per-group weight block; refusing " *
         "crossed term metadata.",

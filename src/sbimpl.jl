@@ -3755,10 +3755,10 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
         marginal_candidates, mod)
     # Prepass 2.5: group-block terms. For each `mu ~ f(...)` where f has a
     # _sb_term_group_block declaration, allocate one ranef_correlated_draws
-    # block per (f, group-column) pair. The lookup is threaded into _sb_emit!
-    # so _sb_sampling_backed! can route declaring terms to their emit hook
-    # with the pre-allocated block name and group-index name in hand.
-    group_block_lookup = _sb_emit_group_blocks!(stmts, data, gb_terms)
+    # block per (f, group-column) pair. Each predictor's own lookup is threaded
+    # into _sb_emit! so _sb_sampling_backed! can route declaring terms to their
+    # emit hook with that predictor's block name and group-index name in hand.
+    group_blocks = _sb_emit_group_blocks!(stmts, data, gb_terms)
     # Prepass 3: target -> observation-source map. Lets purely-intercept
     # linear predictors (`loc ~ 1`, `log(y_scale) ~ 1`) borrow N from the
     # observed `~` target that consumes them, instead of the hash-order
@@ -3785,6 +3785,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
                 PreprocEntry(:axis_extent, nothing, declared_axis, false))
             extent_name
         end
+        group_block_lookup = get(group_blocks, key, Dict{Symbol, NamedTuple}())
         _sb_emit_prepared!(stmts, data, get(nodes, key, nothing), key, parent(nc); id_lookup, obs_n, cv_groups,
                   centered_groups, group_block_lookup, effect_overrides, mod,
                   r2d2=(; overrides=r2d2_overrides, names=r2d2_names,
@@ -11062,9 +11063,9 @@ end
 # which covers both: the biomarker family is a single summand of its RHS, hsgp is one of several.
 # Every declaring summand is its own term INSTANCE — there is no `(key, f)`
 # dedup, so N instances of the same term (e.g. `hsgp(t, by=g) + hsgp(s, by=g)`)
-# each get collected and allocated their own block. Identical instances (same
-# block name) are coalesced later, at emit time. A subsequent emit step
-# allocates one block per declared field and builds the lookup.
+# each get collected and allocated their own block. Identical instances on one
+# predictor are coalesced later, by `_sb_group_block_plan`. A subsequent emit
+# step allocates one block per declared field and builds the lookup.
 Base.@nospecializeinfer function _sb_collect_group_block_terms(@nospecialize(brmi::BRMI))
     result = Any[]
     for (key, op_nc) in pairs(brmi.operations)
@@ -11133,37 +11134,68 @@ function _sb_emit_block_draw!(stmts, prior::ExprColumn, block_name, idx_name,
                          n_name, n_terms_name, suffix)
 end
 
-# Allocate one block per declared field and return a lookup
-# Dict{block_name::Symbol => (; block_name, idx_name, n_per_group)}.
-# Keyed by the fully-disambiguated block NAME (`b_<field>_<gname>`), so N
-# distinct instances (different x and/or group) each get their own block and
-# only genuinely identical instances (same block name) are coalesced.
+# The block each declaring term instance draws from: one entry per (instance,
+# field) of `gb_terms`, in order. A field's base suffix is `<field>_<gname>`;
+# for legacy single-field terms field == nameof(f), and for hsgp the field name
+# embeds the axes, so two HSGPs on the same group never collide. Identical
+# instances on ONE predictor share the base block; the same field and grouping
+# on a later predictor gets its own, `<field>_<predictor>_<gname>` (+ serial
+# when that spelling is taken), so every predictor owns independent weights.
+# The emitter, the descriptor's ownership pass and adaptive centering all read
+# the block names from this one plan.
+_sb_group_block_base(fld, rhs_e) = Symbol(fld.name, :_, _sb_group_name(fld.group, rhs_e))
+function _sb_group_block_plan(gb_terms)
+    first_owner = Dict{Symbol,Symbol}()
+    for gb in gb_terms, fld in gb.fields
+        get!(first_owner, _sb_group_block_base(fld, gb.rhs_e), gb.key)
+    end
+    taken = Set{Symbol}(keys(first_owner))
+    scoped = Dict{Tuple{Symbol,Symbol},Symbol}()
+    plan = NamedTuple[]
+    for gb in gb_terms, fld in gb.fields
+        base = _sb_group_block_base(fld, gb.rhs_e)
+        suffix = first_owner[base] === gb.key ? base : get!(scoped, (gb.key, base)) do
+            stem = Symbol(fld.name, :_, gb.key, :_, _sb_group_name(fld.group, gb.rhs_e))
+            candidate, serial = stem, 2
+            while candidate in taken
+                candidate = Symbol(stem, :_, serial)
+                serial += 1
+            end
+            push!(taken, candidate)
+            candidate
+        end
+        push!(plan, (; gb.key, gb.f, gb.rhs_e, field=fld, base, suffix))
+    end
+    plan
+end
+
+# Allocate one block per planned suffix and return a per-predictor lookup
+# Dict{predictor => Dict{base block name => (; block_name, idx_name, n_per_group)}}.
+# The inner key is the base `b_<field>_<gname>` that `_sb_find_group_block`
+# rebuilds from the term call; `block_name` is the block this predictor owns.
 function _sb_emit_group_blocks!(stmts, data, gb_terms)
-    lookup = Dict{Symbol, NamedTuple}()
-    for (; f, rhs_e, fields) in gb_terms
-        for fld in fields
-            group_col = _sb_resolve_group_col(fld.group, rhs_e, data)
-            gname = name(group_col)
-            # Block name `b_<field>_<gname>`; for legacy single-field terms
-            # field == nameof(f), so this is byte-for-byte the old name. For hsgp
-            # the field name embeds x, so two HSGPs on the same group never collide.
-            suffix = Symbol(fld.name, :_, gname)
+    lookup = Dict{Symbol, Dict{Symbol, NamedTuple}}()
+    allocated = Dict{Symbol, NamedTuple}()
+    for (; key, rhs_e, field, base, suffix) in _sb_group_block_plan(gb_terms)
+        info = get(allocated, suffix, nothing)
+        if isnothing(info)
+            group_col = _sb_resolve_group_col(field.group, rhs_e, data)
             block_name = Symbol(:b_, suffix)
-            haskey(lookup, block_name) && continue   # identical instance already allocated
             n_terms_name = Symbol(:n_terms_, suffix)
-            data[n_terms_name] = fld.n_per_group
+            data[n_terms_name] = field.n_per_group
             _sb_record_static!(data, n_terms_name)
             idx_name, n_name = _sb_ensure_group_data!(data, group_col)
-            _sb_emit_block_draw!(stmts, fld.prior, block_name, idx_name, n_name, n_terms_name, suffix)
-            lookup[block_name] = (; block_name, idx_name, n_per_group=fld.n_per_group)
+            _sb_emit_block_draw!(stmts, field.prior, block_name, idx_name, n_name, n_terms_name, suffix)
+            info = allocated[suffix] = (; block_name, idx_name, n_per_group=field.n_per_group)
         end
+        get!(Dict{Symbol, NamedTuple}, lookup, key)[Symbol(:b_, base)] = info
     end
     lookup
 end
 
 # Look up block_info for a declaring term call at emit time, or nothing. Rebuilds
-# each field's block name (via `_sb_group_name`, matching the emit pass) and
-# resolves it against the block-name-keyed lookup. Returns a NamedTuple carrying
+# each field's base block name (via `_sb_group_name`, matching the emit pass) and
+# resolves it against the predictor's block-name-keyed lookup. Returns a NamedTuple carrying
 # a `fields` map (field-name => per-field info); for single-field terms the lone
 # field's keys are also spliced at top level so legacy consumers that destructure
 # `(; block_name, idx_name)` keep working.
@@ -11172,7 +11204,7 @@ function _sb_find_group_block(f, rhs_e, group_block_lookup)
     isnothing(fields) && return nothing
     fmap = Dict{Symbol,NamedTuple}()
     for fld in fields
-        block_name = Symbol(:b_, fld.name, :_, _sb_group_name(fld.group, rhs_e))
+        block_name = Symbol(:b_, _sb_group_block_base(fld, rhs_e))
         info = get(group_block_lookup, block_name, nothing)
         isnothing(info) && return nothing
         fmap[fld.name] = info
@@ -12442,22 +12474,26 @@ end
 # Return a stable axis-derived name for the first structured term, then scope
 # only collisions by predictor. This preserves every historical single-term
 # spelling while allowing two distributional predictors to use the same axis.
+# `tail` is the fixed ending of the carrier (`_by_<g>` for a grouped `hsgp`):
+# the collision check is on the carrier actually bound, `<family>_<suffix><tail>`,
+# and the returned suffix excludes it.
 function _sb_unique_structured_term_names(stmts, family::Symbol,
-                                          suffix::AbstractString, target)
+                                          suffix::AbstractString, target;
+                                          tail::AbstractString="")
     bound(name) = any(stmts) do stmt
         Meta.isexpr(stmt, :call) && length(stmt.args) >= 2 && stmt.args[1] === :~ &&
             _sb_plan_lhs_name(stmt.args[2]) === name
     end
-    col = Symbol(family, :_, suffix)
+    col = Symbol(family, :_, suffix, tail)
     bound(col) || return String(suffix), col
     stem = string(something(target, :term), "_", suffix)
-    candidate = Symbol(family, :_, stem)
+    candidate = stem
     serial = 2
-    while bound(candidate)
-        candidate = Symbol(family, :_, stem, :_, serial)
+    while bound(Symbol(family, :_, candidate, tail))
+        candidate = string(stem, "_", serial)
         serial += 1
     end
-    replace(String(candidate), string(family, "_") => ""; count=1), candidate
+    candidate, Symbol(family, :_, candidate, tail)
 end
 
 # `gp(x...)` is the exact GP term. It records an N x d predictor matrix and
@@ -12618,8 +12654,9 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     cov === :periodic && return _sb_hsgp_periodic_term!(
         stmts, data, t, names, raw, is_raw, K, kw, period, term_overrides,
         target, options)
+    axes_suffix = join(string.(names), "_")
     suffix, col_name = _sb_unique_structured_term_names(
-        stmts, :hsgp, join(string.(names), "_"), target)
+        stmts, :hsgp, axes_suffix, target)
     centeredness = _brm_hsgp_centeredness(kw, prod(K))
     partial = any(!iszero, centeredness)
     domain_fits = _sb_hsgp_domain_fits(kw, n_axes; required=!is_raw)
@@ -12691,10 +12728,14 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
             "and cannot be combined with `by=`")
         block_info = _sb_find_group_block(hsgp, t, group_block_lookup)
         isnothing(block_info) && error(
-            "sbimpl: `hsgp($suffix, by=...)` found no allocated per-group weight ",
+            "sbimpl: `hsgp($axes_suffix, by=...)` found no allocated per-group weight ",
             "block — prepass 2.5 should have allocated it")
         info = block_info
         gname = name(_sb_resolve_group_col((; kwarg=:by), t, data))
+        # A repeat over the same axes and group on another predictor takes
+        # `hsgp_<target>_<axes>_by_<g>`, like the ungrouped carrier.
+        suffix, col_name = _sb_unique_structured_term_names(
+            stmts, :hsgp, axes_suffix, target; tail="_by_$gname")
         PHI_name = Symbol(:PHI_hsgp_, suffix, :_by_, gname)
         omega2_name = Symbol(:omega2_hsgp_, suffix, :_by_, gname)
         rho_lower_name = Symbol(:rho_lower_hsgp_, suffix, :_by_, gname)
@@ -12717,7 +12758,6 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
              omega2_key=omega2_name, rho_lower_key=rho_lower_name,
              _sb_hsgp_option_const(options, fitted.support)..., floor_const...),
             names, false))
-        col_name = Symbol(:hsgp_, suffix, :_by_, gname)
         rho_plan = _sb_hyper_plan_for(hyper_plans, :length_scale)
         sigma_plan = _sb_hyper_plan_for(hyper_plans, :sd)
         if isnothing(rho_plan) && isnothing(sigma_plan)
