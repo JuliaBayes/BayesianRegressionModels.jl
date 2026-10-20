@@ -96,6 +96,12 @@ every address back to its own output through
 grouping by predictor reaches every sampled coordinate. Set
 `BRM_OUTPUT_PREDICTORS_RUNTIME=0` to skip the compiled half.
 
+`descriptor_trace_reuse.jl` checks that `ranef_blocks(d)`,
+`brm_ranef_sd_coordinates` and `brm_ranef_draws` read the descriptor's own
+traced program: a copy of the descriptor whose plan holds no traceable program
+answers each query identically, in a fitted and in a prior program, while
+`ranef_blocks` on that plan fails.
+
 `plate_index_into.jl` checks `ragged(idx, group; into=target)`, an index column
 of row numbers on another flat axis: the gathered per-subject positions equal
 hand-rebased pre-grouped columns on BridgeStan and RK, `0` stays "no row",

@@ -1534,7 +1534,7 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     end
     outputs = _brm_ranef_components(outputs, plan, stan)
     outputs = _brm_output_dims(outputs, plan, stan)
-    outputs = _brm_output_addresses(outputs, plan)
+    outputs = _brm_output_addresses(outputs, plan, stan)
 
     # --- schema -------------------------------------------------------------
     columns = Tuple(sort!(collect(df_columns)))
@@ -1671,7 +1671,7 @@ _brm_empty_carrier(output::BRMOutput) =
 # block shared by several predictors lists every one of them. Ownership is
 # keyed by declaration target, or by output name for outputs a block names
 # without declaring.
-function _brm_output_addresses(outputs, plan)
+function _brm_output_addresses(outputs, plan, stan)
     brmi = plan.parent
     view = (; plan, outputs)
     owners = Dict{Symbol,Vector{Symbol}}()
@@ -1773,7 +1773,7 @@ function _brm_output_addresses(outputs, plan)
     # bucket is matched on its grouping too, since one `|ID|` may name blocks
     # of several grouping factors).
     buckets = _sb_collect_id_buckets(brmi)
-    for block in ranef_blocks(plan)
+    for block in _ranef_blocks(plan, stan)
         binding = get(plan.bindings, block.binding, (;))
         if !isnothing(block.id)
             found = [b for (k, b) in pairs(buckets) if first(k) === block.id]
@@ -3332,7 +3332,7 @@ function brm_ranef_sd_coordinates(d::BRMDescriptor, logical::Symbol,
     brmi = d.plan.parent
 
     # 1. The shared block for this `|ID|` bucket.
-    all_blocks = ranef_blocks(d.plan)
+    all_blocks = ranef_blocks(d)
     blocks = [b for b in all_blocks if b.id === id]
     if isempty(blocks)
         scales = _brm_total_id_scales(d, id)

@@ -472,7 +472,7 @@ _brm_transport_known_scales(d, block) =
 function _brm_sb_ranef_block(d, record; caller="brm_coordinate_transport")
     plan = d.plan
     brmi = plan.parent
-    all_blocks = ranef_blocks(plan)
+    all_blocks = ranef_blocks(d)
     blocks = [b for b in all_blocks
         if b.group === record.group && b.id === record.id]
     if isnothing(record.id)

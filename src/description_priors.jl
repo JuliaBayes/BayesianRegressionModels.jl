@@ -123,7 +123,7 @@ function _brmd_ranef_metadata(d)
     buckets = _sb_collect_id_buckets(d.plan.parent)
     overrides = _sb_ranef_effect_overrides(d.plan.parent,buckets)
     result = NamedTuple[]
-    for (index,block) in enumerate(ranef_blocks(d.plan))
+    for (index,block) in enumerate(ranef_blocks(d))
         # A marginalized `|ID|` block (src/sb_marginal_ranef.jl) samples its
         # active margins in a carrier and completes the rest in the bucket's
         # own block; that block states the complete generative prior.
