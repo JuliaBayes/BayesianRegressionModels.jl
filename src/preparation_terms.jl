@@ -128,7 +128,8 @@ function _brm_prepare_monotonic(term, target, context)
     isempty(getkwargs(term)) || error(
         "BRM term preparation: monotonic term does not accept keywords")
     source, raw = _brm_term_data(nameof(getf(term)), only(args), context)
-    levels = _brm_fit_levels(raw)
+    # A frozen replay codes the training levels (`_brm_fit_source`).
+    levels = _brm_fit_levels(_brm_fit_source(source, raw))
     idx = _brm_apply_levels(levels, raw)
     simplex_prior = _brm_normalize_simplex_prior(_brm_term_prior_expression(
         term, target, context, :term_simplex; default=ExprColumn(Dirichlet, 1.0)),
