@@ -148,6 +148,12 @@ function LogDensityProblems.logdensity_and_gradient(
     value, gradient
 end
 
+function BRM.rk_bound_data(backend::BRM.RKBRMI)
+    columns = _rk_translated_plan(backend.plan).columns
+    names = Tuple(keys(columns))
+    NamedTuple{names}(Tuple(columns[name] for name in names))
+end
+
 function BRM.rk_restore_draws(backend::BRM.RKBRMI, U::AbstractMatrix)
     restore_draws(backend.model.layout, U)
 end
@@ -167,6 +173,8 @@ function BRM._rk_layout_coordinate_transforms(backend::BRM.RKBRMI)
         "without an entry")
     transforms
 end
+BRM._rk_plan_coordinate_names(plan::_RK_PLAN_TYPES) =
+    coordinate_names(assign_layout(_rk_translated_plan(plan)))
 # Each packed coordinate's constrained lower bound under a `:floored`
 # transform (`lo + exp(u)`); `NaN` for other transforms or an unresolved bound.
 function BRM._rk_layout_coordinate_floors(backend::BRM.RKBRMI)

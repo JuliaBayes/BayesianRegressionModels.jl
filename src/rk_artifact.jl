@@ -172,8 +172,8 @@ function show_rk_plan(plan::_RKStructuralPlan)
           "$(_rk_show_args(p.args)))" for p in plan.population_priors]
     smps = ["($(p.name), $(p.family), $(_rk_show_args(p.args)))"
         for p in plan.parameters]
-    as = ["($(a.name) = $(_rk_show_expr(a.expr)))" for a in plan.assignments]
-    ds = ["($(d.name) = $(_rk_show_expr(d.expr)))" for d in plan.derived]
+    as = ["($(a.name) = $(_rk_show_expr(a.expression)))" for a in plan.assignments]
+    ds = [_rk_show_derived(d) for d in plan.derived]
     cols = sort!(string.(collect(keys(plan.columns))))
     lines = [
         "n_obs = $(plan.n_obs)",
@@ -195,7 +195,7 @@ end
 function show_rk_plan(plan::_RKKernelPlan)
     smps = ["($(p.name), $(p.family), $(_rk_show_args(p.args)))"
         for p in plan.parameters]
-    as = ["($(a.name) = $(_rk_show_expr(a.expr)))" for a in plan.assignments]
+    as = ["($(a.name) = $(_rk_show_expr(a.expression)))" for a in plan.assignments]
     cols = sort!(string.(collect(keys(plan.columns))))
     return join([
         "kernel      = $(plan.kernel.n_subjects)-subject plate",
@@ -232,6 +232,10 @@ _rk_show_scale(s::Symbol) = string(s)
 _rk_show_scale(s) = repr(s)
 _rk_show_args(args::Tuple) = "(" * join(repr.(args), ", ") * ")"
 _rk_show_args(args) = repr(args)
+# A fit-role input is bound data; name what it copies, not its values.
+_rk_show_derived(d) = d.expression.head === :_rk_fit_input ?
+    "($(d.name) = fit-role input of $(_rk_fit_twinned(d.label)))" :
+    "($(d.name) = $(_rk_show_expr(d.expression)))"
 _rk_show_expr(e::Expr) = sprint(Base.show_unquoted, e)
 _rk_show_expr(e) = repr(e)
 

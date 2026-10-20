@@ -60,11 +60,13 @@ _rk_plan_summary(plan::_RKHeldOutPlan) =
 # Compilation of preparation must not scale with the entire BRMI source type.
 # This barrier applies only to planning; emitted numerical kernels retain their
 # ordinary specialization and contain exactly the same source and data.
-Base.@nospecializeinfer function _brm_rk_plan(@nospecialize(brmi::BRMI); held_out=())
+Base.@nospecializeinfer function _brm_rk_plan(@nospecialize(brmi::BRMI); held_out=(),
+        fitted_constants=(_name, _source) -> nothing)
     brmi = _brm_resolve_optional_priors(brmi)
     # A `constant(...)` becomes a named scalar data constant, which the graph
-    # holds as a number. RK has no replay, so it is always evaluated here.
-    brmi, _ = _brm_resolve_constants(brmi; prefix="RK backend")
+    # holds as a number: evaluated here, or the fitted value on a frozen
+    # `reprocess` replay.
+    brmi, _ = _brm_resolve_constants(brmi; fitted=fitted_constants, prefix="RK backend")
     selected = _rk_held_out_selection(brmi, held_out)
     original = _brm_rk_unselected_plan(brmi)
     isempty(selected) ? original : _RKHeldOutPlan(original, selected)

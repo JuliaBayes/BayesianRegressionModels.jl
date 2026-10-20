@@ -184,7 +184,8 @@ _rk_ast_student_t_nu(dist::_BRMRanefStudentT, bindings, taken) =
         _rk_value_expr!(bindings, _brm_prepare_expr(dist.nu), taken)
 
 function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindings;
-        level_indices, predictors=(), population_priors=Dict(), coordinates=nothing)
+        level_indices, level_sources=Dict{Symbol,Symbol}(), predictors=(),
+        population_priors=Dict(), coordinates=nothing)
     grouping = bucket.grouping
     K = length(bucket.margins)
     group = first(grouping.columns)
@@ -193,6 +194,10 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
         group = _rk_ast_fresh_name(string(draws, "_groups"), taken)
         push!(stmts, Expr(:(=), group, Expr(:call, :vcat, grouping.columns...)))
     end
+    # A plain block reads its levels from the grouping column's fit-role copy
+    # (`_rk_fit_twin!`), and positions each row's group among them. An mm
+    # block's levels are its members' joint levels.
+    levels_of = grouping.form === :plain ? get(level_sources, group, group) : group
     if grouping.form === :gr
         _rk_ast_stratified_group_component!(definitions, stmts, taken, draws,
             group, grouping.by, K, bucket.lkj_eta)
@@ -202,7 +207,7 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
         tau = _rk_ast_fresh_name(string(draws, "_tau"), taken)
         _rk_ast_ranef_r2d2!(definitions, stmts, bucket, tau, bindings, taken,
             predictors, population_priors; stem_base=draws)
-        _rk_ast_group_component!(definitions, stmts, taken, draws, group, K,
+        _rk_ast_group_component!(definitions, stmts, taken, draws, levels_of, K,
             bucket.lkj_eta, (); scale_value=tau)
     else
         # Stan's ordinary unnamed intercept and multi-membership intercept
@@ -227,7 +232,7 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
             push!(stmts, Expr(:(=), L_value, Expr(:call, :hcat,
                 (Expr(:vect, factor[:, j]...) for j in axes(factor, 2))...)))
         end
-        _rk_ast_group_component!(definitions, stmts, taken, draws, group, K,
+        _rk_ast_group_component!(definitions, stmts, taken, draws, levels_of, K,
             bucket.lkj_eta, priors;
             nu=_rk_ast_student_t_nu(bucket.dist, bindings, taken), L_value)
         # Plain groups retain semantic transport metadata at their actual
@@ -264,7 +269,7 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
             indices[col] = get!(level_indices, (col, group)) do
                 idx = _rk_ast_fresh_name(grouping.form === :mm ?
                     string(group, "_", col, "_level") : string(col, "_level"), taken)
-                push!(stmts, Expr(:(=), idx, Expr(:call, :brm_level_indices, col, group)))
+                push!(stmts, Expr(:(=), idx, Expr(:call, :brm_level_indices, col, levels_of)))
                 idx
             end
         end
@@ -323,7 +328,7 @@ function _rk_ast_value_spline(definitions, term, taken)
     kval = k isa Tuple ? Expr(:tuple, k...) : k
     basis = term.options.kind === :t2 ? :brm_t2_basis : :brm_tps_basis
     stmts = Expr[Expr(:(=), Expr(:tuple, X, Z...),
-        Expr(:call, basis, term.columns..., kval))]
+        Expr(:call, basis, term.columns..., get(term.options, :fit_columns, ())..., kval))]
     block = _rk_block_body()
     fixed_basis = _rk_block_argument!(block, :X, X)
     penalized = [_rk_block_argument!(block, "Z$j", Zj) for (j, Zj) in enumerate(Z)]
@@ -389,9 +394,12 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         floor_read && (floors = _rk_ast_hsgp_floor!(definitions, stmts, term, taken))
         inputs = Pair{Symbol,Any}[a => c for (a, c) in
             zip(_rk_hsgp_axis_inputs(term), term.columns)]
-        # A `rows=` mask follows the axes into the basis graph.
+        # A `rows=` mask follows the axes into the basis graph, then the
+        # fit-role axes and mask an in-graph interval reads.
         append!(inputs, (formal => actual for (formal, actual) in
             zip(_rk_hsgp_mask_formals(term), _rk_hsgp_mask_actuals(term))))
+        append!(inputs, (formal => actual for (formal, actual) in
+            zip(_rk_hsgp_fit_formals(term), _rk_hsgp_fit_actuals(term))))
         extent = :(1:$(prod(_rk_hsgp_modes(options))))
     end
     if grouped
