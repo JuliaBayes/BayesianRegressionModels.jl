@@ -47,6 +47,13 @@ known values, `sd(lp, ID) = value` and `cor(:, ID) = R`. It covers:
 
 Set `BRM_FIXED_RANEF_RUNTIME=0` to skip the compiled-model sets.
 
+`sd_prior_input_names.jl` checks that a scale prior's caller scalar may share a
+name with a binding of the submodel the prior is merged into, such as `tau` in
+`sd(:, ID) ~ Exponential(tau)`. It covers Gaussian, general-family,
+per-margin, centered, `cv_groups` and Student-t blocks, smoothing scales, and
+the completion submodel of a split block. Each spelling must emit exactly the
+Stan program of a twin whose scalar is called `lam`; the twin must pass stanc.
+
 `model_family_composition.jl` checks composing a family of related models
 without string templating:
 
