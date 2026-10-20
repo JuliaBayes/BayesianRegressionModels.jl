@@ -77,6 +77,31 @@ pk(d) = @brm d begin
         y[i] ~ normal(conc[i], sigma)
     end
 end
+smooth(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + hsgp(x; k=5)
+    y ~ Normal(mu, sigma)
+end
+smooth_rows(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + hsgp(x; k=5, rows=keep)
+    y ~ Normal(mu, sigma)
+end
+smooth_2d(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + hsgp(x, z; k=(3, 3))
+    y ~ Normal(mu, sigma)
+end
+smooth_orthogonal(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + hsgp(x; k=5, orthogonal_to=:linear)
+    y ~ Normal(mu, sigma)
+end
+smooth_clamped(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + hsgp(x; k=5, extrapolate=:clamp)
+    y ~ Normal(mu, sigma)
+end
 zscaled_interaction(d) = @brm d begin
     sigma ~ Exponential(1)
     mu ~ 1 + zscale(x) & z
@@ -92,6 +117,7 @@ const TRAIN = (; x=collect(range(0.3, 4.1; length=N)) .^ 1.3,
     r=[1, 2, 3, 4][mod1.(1:N, 4)],
     z=cos.(1:N),
     other=["b", "c", "a"][mod1.(1:N, 3)],
+    keep=[isodd(i) || i > 8 for i in 1:N],
     y=sin.(1:N) .+ 0.1 .* (1:N))
 rows_of(data, rows) = map(v -> v isa AbstractVector ? v[rows] : v, data)
 
@@ -160,6 +186,25 @@ end
     @test occursin("brm_covariate_sd(x_fit)", source)
 end
 
+@stestset "hsgp keeps the training basis interval" begin
+    for build in (RM.smooth, RM.smooth_rows, RM.smooth_2d, RM.smooth_orthogonal,
+            RM.smooth_clamped)
+        check_frozen(build, 2:5)
+        # One row is a degenerate axis of its own; the training interval applies.
+        check_frozen(build, [7])
+    end
+    # Past the training data range, `extrapolate=:clamp` holds the curve at
+    # the fitted edge; otherwise a value past the basis interval is refused.
+    top = argmax(TRAIN.x)
+    rk = RKBRMI(RM.smooth_clamped(TRAIN))
+    u = point(rk)
+    edge = graph_value(rk, :mu, u)[top]
+    beyond = merge(rows_of(TRAIN, [top]), (; x=[2 * TRAIN.x[top]]))
+    @test only(graph_value(reprocess(rk, beyond), :mu, u)) ≈ edge atol=1e-12 rtol=1e-12
+    @test_throws "lies outside the fitted basis interval" reprocess(
+        RKBRMI(RM.smooth(TRAIN)), merge(rows_of(TRAIN, [top]), (; x=[100 * TRAIN.x[top]])))
+end
+
 @stestset "a same-group replay keeps the fitted group effects" begin
     # Rows 3 and 6 hold only group `c`, a single subject or two in another order.
     check_frozen(RM.grouped, [3, 6])
@@ -199,7 +244,7 @@ end
 
 @stestset "replaying the training data is the fit" begin
     for build in (RM.string_factor, RM.monotonic, RM.fitted_constant, RM.zscaled,
-            RM.zscaled_log, RM.grouped)
+            RM.zscaled_log, RM.grouped, RM.smooth, RM.smooth_rows, RM.smooth_orthogonal)
         rk = RKBRMI(build(TRAIN))
         u = point(rk)
         @test density(reprocess(rk, TRAIN), u) == density(rk, u)

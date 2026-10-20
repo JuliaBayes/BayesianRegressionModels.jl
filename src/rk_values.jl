@@ -395,9 +395,12 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         floor_read && (floors = _rk_ast_hsgp_floor!(definitions, stmts, term, taken))
         inputs = Pair{Symbol,Any}[a => c for (a, c) in
             zip(_rk_hsgp_axis_inputs(term), term.columns)]
-        # A `rows=` mask follows the axes into the basis graph.
+        # A `rows=` mask follows the axes into the basis graph, then the
+        # fit-role axes and mask an in-graph interval reads.
         append!(inputs, (formal => actual for (formal, actual) in
             zip(_rk_hsgp_mask_formals(term), _rk_hsgp_mask_actuals(term))))
+        append!(inputs, (formal => actual for (formal, actual) in
+            zip(_rk_hsgp_fit_formals(term), _rk_hsgp_fit_actuals(term))))
         extent = :(1:$(prod(_rk_hsgp_modes(options))))
     end
     if grouped

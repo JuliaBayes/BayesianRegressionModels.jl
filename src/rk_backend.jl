@@ -2843,13 +2843,8 @@ function _rk_fit_twin!(derived::Vector{_RKDerivedSpec},
     for spec in derived
         spec.label === label && return spec.name
     end
-    if haskey(data, vname)
-        name = _rk_fit_name!(derived, columns, taken, vname)
-        columns[name] = _brm_fit_source(vname, data[vname])
-        push!(derived, _RKDerivedSpec(name,
-            Expr(:_rk_fit_input, columns[name]), label))
-        return name
-    end
+    haskey(data, vname) && return _rk_fit_input!(derived, columns, taken, vname,
+        _brm_fit_source(vname, data[vname]))
     index = findfirst(spec -> spec.name === vname, derived)
     index === nothing && error(
         "RK backend: internal: fitted value `$vname` reads no data column")
@@ -2860,6 +2855,21 @@ function _rk_fit_twin!(derived::Vector{_RKDerivedSpec},
     expression = twin(derived[index].expression)
     name = _rk_fit_name!(derived, columns, taken, vname)
     push!(derived, _RKDerivedSpec(name, expression, label))
+    name
+end
+
+# The fit-role input of `vname`, bound to `values` (already the training
+# values on a frozen replay).
+function _rk_fit_input!(derived::Vector{_RKDerivedSpec},
+        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol},
+        vname::Symbol, values::AbstractVector)
+    label = _rk_fit_label(vname)
+    for spec in derived
+        spec.label === label && return spec.name
+    end
+    name = _rk_fit_name!(derived, columns, taken, vname)
+    columns[name] = values
+    push!(derived, _RKDerivedSpec(name, Expr(:_rk_fit_input, values), label))
     name
 end
 
@@ -4650,7 +4660,7 @@ end
 function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         target::Symbol, data::AbstractDict,
         columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol}; hyper_plans=(),
-        rho_stated=false, sigma_stated=false)
+        rho_stated=false, sigma_stated=false, derived::Vector{_RKDerivedSpec})
     prefix = "RK backend"
     state = prepared.state
     # A model-derived axis (an assignment or predictor value) is read by
@@ -4703,11 +4713,26 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         columns[name] = Float64.(rows.mask)
         name
     end
+    # An automatic exp-quad basis interval is fitted in-graph to fit-role
+    # copies of the axes and of the `rows=` mask, so a frozen `reprocess`
+    # keeps the training interval while the basis reads the new rows.
+    fit_axes, fit_mask = nothing, nothing
+    if !state.latent && !state.explicit_domain && state.cov === :exp_quad
+        fit_axes = Tuple(_rk_fit_twin!(derived, columns, taken, data, axis)
+            for axis in axes)
+        if mask !== nothing
+            fit_rows = _brm_hsgp_row_mask(
+                _brm_fit_source(rows.source, data[rows.source]),
+                length(columns[first(fit_axes)]), rows.source)
+            fit_mask = _rk_fit_input!(derived, columns, taken, mask, Float64.(fit_rows))
+        end
+    end
     common = (; rho_prior=state.rho_prior, sigma_prior=state.sigma_prior,
         rho_truncated=!rho_floor_named &&
             any(>(0), state.rho_lower isa Real ? (state.rho_lower,) : state.rho_lower),
         rho_floor_named, anchor=get(state, :anchor, nothing), mask,
-        hyper_plans, rho_stated, sigma_stated)
+        hyper_plans, rho_stated, sigma_stated, fit_axes, fit_mask,
+        extrapolate=get(state, :extrapolate, :error))
     if state.cov === :periodic
         return _RKTermSpec(:hsgp, collect(axes),
             (; id, k=only(state.K), cov=:periodic, period=state.period, common...), id, id)
@@ -5612,7 +5637,7 @@ Base.@nospecializeinfer function _rk_plan_predictor(@nospecialize(brmi::BRMI), c
                 prepared, target, context.data, columns, taken))
         elseif prepared.callable === hsgp
             push!(terms, _rk_plan_hsgp_term!(
-                prepared, target, context.data, columns, taken;
+                prepared, target, context.data, columns, taken; derived,
                 hyper_plans=Tuple(p for p in _sb_collect_hyper_plans(brmi; prefix)
                     if p.lp === target && p.term_key === _brm_prepared_term_key(raw)),
                 rho_stated=_brm_term_prior_spec(raw, target, context, :term_length_scale) !== nothing,
