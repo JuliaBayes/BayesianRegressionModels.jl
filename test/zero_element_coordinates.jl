@@ -9,7 +9,9 @@
 # does own elements and is absent from the names still fails closed.
 #
 # Oracle: BridgeStan's own `param_unc_names` / `param_names` of the compiled
-# model. Every unconstrained coordinate is owned by exactly one sampled output.
+# model. Every unconstrained coordinate is owned by exactly one sampled output,
+# and every output's `dims` — StanBlocks' resolved `ModelOutput.dims` — counts
+# the names BridgeStan lists for it.
 #
 # Run: julia --project=test test/zero_element_coordinates.jl
 
@@ -35,6 +37,17 @@ function owners(d, names)
         end
     end
     owner
+end
+
+# Every output carries StanBlocks' value shape, composite and transformed-data
+# sizes included, and `prod(dims)` is its BridgeStan name count.
+function check_dims(d, model)
+    con = StanBlocks.BridgeStan.param_names(model; include_tp=true, include_gq=true)
+    published = Dict(o.name => o.dims for o in d.stan.outputs)
+    for o in d.outputs
+        @test o.dims == published[o.name]
+        @test prod(o.dims) == length(brm_output_coordinates(o, con))
+    end
 end
 
 x = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
@@ -63,6 +76,7 @@ end
     @test brm_output_coordinates(beta, unc) == Int[]
     @test brm_output_coordinates(beta, con) == Int[]
     @test all(!isnothing, owners(d, unc))
+    check_dims(d, model)
 
     # The categorical query already answered this block as empty; the carrier
     # it names now agrees with it.
@@ -80,6 +94,24 @@ end
     unc = StanBlocks.BridgeStan.param_unc_names(model)
     @test unc[brm_output_coordinates(beta, unc)] == ["cat_mu_src_beta.1"]
     @test all(!isnothing, owners(d, unc))
+    check_dims(d, model)
+    # The population coefficients' size names transformed data
+    # (`pop_mu_n_covariates`), which only StanBlocks resolves.
+    @test !isnothing(output(d, :pop_mu_beta_pop).dims)
+end
+
+@stestset "the frozen levels cross-check StanBlocks' dims" begin
+    d = brm_descriptor(factor_model, (; src=[1, 2, 1, 2, 1, 2], x, y);
+                       mod=@__MODULE__, name=:zero_element_control)
+    beta = only(o for o in d.stan.outputs if o.name === :cat_mu_src_beta)
+    wrong = StanBlocks.ModelOutput(beta.name, beta.kind, beta.type, beta.size,
+                                   beta.constraints, beta.generative, beta.source,
+                                   beta.segments, (2,))
+    stan = (; outputs=[o === beta ? wrong : o for o in d.stan.outputs])
+    # refused: two sources disagreeing on an element count is a defect to
+    # surface, never one to settle by picking a side (one source of truth, dev §3).
+    @test_throws "must agree on the element count" BRM._brm_output_dims(
+        d.outputs, d.plan, stan)
 end
 
 @stestset "drift still fails closed" begin
@@ -134,4 +166,22 @@ end
     unc = StanBlocks.BridgeStan.param_unc_names(model)
     @test brm_output_coordinates(cutpoints, unc) == Int[]
     @test all(!isnothing, owners(d, unc))
+    check_dims(d, model)
+end
+
+@stestset "group-level carriers resolve their transformed-data sizes" begin
+    grouped = @brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 + x | g)
+        y ~ Normal(mu, sigma)
+    end
+    d = brm_descriptor(grouped, (; g=[1, 1, 2, 2, 3, 3], x, y);
+                       mod=@__MODULE__, name=:zero_element_grouped)
+    @test all(o -> !isnothing(o.dims), d.outputs)
+    # The value shape, not one length per size entry: the correlation
+    # Cholesky factor is declared `cholesky_factor_corr[2]` and is 2×2.
+    L = only(o for o in d.outputs if o.type === :cholesky_factor_corr)
+    @test length(L.size) == 1
+    @test L.dims == (2, 2)
+    check_dims(d, compiled(d))
 end

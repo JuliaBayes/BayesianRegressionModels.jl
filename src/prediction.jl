@@ -1607,7 +1607,7 @@ function parameter_draws(d::BRMDescriptor, draws::AbstractMatrix, unc_names;
         "BRM prediction: declared parameter `$parameter` (`$(output.name)`) is ",
         "absent from the supplied unconstrained names. Re-reflect the model ",
         "that produced the posterior draws.")
-    expected = _brm_output_coordinate_count(d.plan, output)
+    expected = _brm_output_coordinate_count(output)
     isnothing(expected) || length(coordinates) == expected || error(
         "BRM prediction: declared parameter `$parameter` owns $expected ",
         "coordinates but resolves to $(length(coordinates)) of the supplied ",

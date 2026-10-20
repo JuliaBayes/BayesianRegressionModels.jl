@@ -47,6 +47,13 @@ known values, `sd(lp, ID) = value` and `cor(:, ID) = R`. It covers:
 
 Set `BRM_FIXED_RANEF_RUNTIME=0` to skip the compiled-model sets.
 
+`sd_prior_input_names.jl` checks that a scale prior's caller scalar may share a
+name with a binding of the submodel the prior is merged into, such as `tau` in
+`sd(:, ID) ~ Exponential(tau)`. It covers Gaussian, general-family,
+per-margin, centered, `cv_groups` and Student-t blocks, smoothing scales, and
+the completion submodel of a split block. Each spelling must emit exactly the
+Stan program of a twin whose scalar is called `lam`; the twin must pass stanc.
+
 `model_family_composition.jl` checks composing a family of related models
 without string templating:
 
@@ -135,6 +142,13 @@ StanBlocks revision pinned by `setup_env.jl` and checks the public flat
 predictive segments, bound pointwise likelihood, and refusal of a missing
 non-response ragged input.
 
+`s2z_omitted_response.jl` checks `s2z_groups` when a response is omitted. A
+predictor that no observed likelihood reaches keeps its block conventional, in
+generated quantities. It covers an intercept-only predictor, a grouping that a
+reached predictor shares, and an omitted `@plate` response. Each program
+matches its conventional or renamed-grouping twin, and the sampled BridgeStan
+density equals that of `prune_responses` of the same model.
+
 `omitted_plate_observations.jl` checks the grouped `pk_conc[i]` spelling with
 an omitted censored response and a joint QT likelihood. It checks the
 predictive descriptor and a finite generated draw above the censoring floor.
@@ -145,7 +159,19 @@ per subject when it is observed outside the cell. The observation never reads
 the helper over the whole flattened result. It checks BridgeStan density and
 gradient parity with the in-cell spelling. For a `ragged(y, group)` join it
 also checks the omitted response: the same observation statement, the bound
-`y_rows` partition and its replay, and the predictive segments.
+`y_rows` partition and its replay, and the predictive segments. For the
+model-scope form over pre-grouped data (`y ~ censored(Normal(loc, addprop(loc,
+…)); lower=lloq)` with `y` omitted, and its uncensored twin) it checks the same
+observation statement, an argument plate over the plate result's own cells,
+predictive segments before and after `reprocess`, a finite BridgeStan draw
+above the censoring floor, and that a bound `qt` beside the omitted `y` has
+exactly the `qt`-only model's coordinates and density.
+
+`omitted_censored_response.jl` checks a flat `y ~ censored(Normal(mu, sigma);
+lower=lloq)` with `y` omitted: the warning, the observation role, the
+`y_gen`-only output, the bound twin's predictive law, BridgeStan draws clamped
+at `lloq`, and a fitted response beside it whose density equals the
+uncensored twin's.
 
 `adaptive_multiaxis_hsgp_centering.jl` checks online adaptive centering of
 two-axis squared-exponential HSGPs: isotropic (one length scale every axis
@@ -374,9 +400,10 @@ julia --project=test test/rk_gp_covariance.jl
 `rk_retained_transport.jl` attaches `RKBRMI(brmi, artifact.plan, built)` to
 the artifact route's existing build. It checks normalized compiled Stan
 densities, every ordinary Reverse coordinate and the physical-check return
-schema, with all responses and a held-out response. Centered parameterizations
-raise a typed mismatch; invalid input and a corrupted permutation remain
-errors. Public block metadata identifies known parameterization mismatches
+schema, with all responses and a held-out response. A centered SBBRMI maps
+exactly onto the same build (densities and gradients included) while the
+permutation-only helpers refuse it; invalid input and a corrupted permutation
+remain errors. Public block metadata identifies known parameterization mismatches
 before compiling Stan. `rk_coordinate_transport.jl` covers the broader semantic inventory,
 including the typed unsupported-coverage diagnostic for HSGP internals.
 Run either file with `julia --project=test test/<file>.jl`.
@@ -506,7 +533,9 @@ their separate active sampled reference scales.
 coordinate map: scalar and population coefficients, categorical reference and
 cell-mean coding, grouping levels, random-effect scales and standardized draws,
 and whole correlation factors, including independent predictor blocks on the
-same grouping column. Distinct nonzero points compare constrained
+same grouping column, and centered SBBRMI blocks (intercept, correlated, single
+slope, shared `|ID|` and configured-scale families) through their exact
+per-point map. Distinct nonzero points compare constrained
 values, normalized densities and every ordinary Reverse gradient with compiled
 same-BRMI Stan. Point/gradient round trips, input preservation and incomplete
 coverage diagnostics are included. HSGP internals remain an expected capability

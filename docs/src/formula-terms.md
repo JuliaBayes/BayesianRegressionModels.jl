@@ -531,6 +531,14 @@ only the selected block is reparameterised. Two S2Z groupings on one predictor
 are refused, because both block means would be integrated into the same
 population coefficients.
 
+S2Z reparameterises sampled blocks only. When no observed likelihood reaches a
+predictor, for example because its response column is omitted from the data,
+StanBlocks re-draws that predictor's block in generated quantities. The block
+then keeps its conventional emission, and the grouping stays S2Z on every
+predictor that an observed likelihood reaches. The same `SBBRMI` call therefore
+builds on the full data and on data with a response omitted. If no sampled
+block carries the grouping, the model has no S2Z block.
+
 ```julia
 # brmi carries: mu ~ 1 + x + hsgp(xc, yc; k=10) + (1 | region) + (1 | district)
 sb = SBBRMI(brmi; s2z_groups=[:region], s2z_rho=1.0)
