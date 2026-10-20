@@ -2981,7 +2981,8 @@ function _rk_term_specs(term, target::Symbol, data::AbstractDict,
         :intercept, Symbol[], (;), :Intercept, :Intercept)]
     model_column = _rk_model_population_column(term, context)
     if model_column !== nothing
-        value = model_column.runtime_expression
+        value = _rk_fit_observed_anchors!(model_column.runtime_expression,
+            derived, columns, taken)
         column_name = value isa Symbol ? value : _rk_push_derived!(
             derived, model_column.label, value, model_column.label, target)
         return _RKTermSpec[_RKTermSpec(:continuous, [column_name], (;),
@@ -3842,7 +3843,8 @@ function _rk_ranef_recipes!(margins::Vector{_RKRanefMargin}, lowered::Vector{Any
             model_column = _rk_model_population_column(t, context)
             if model_column !== nothing
                 push!(margins, _RKRanefMargin(target, model_column.label,
-                    _RKRanefZRecipe(:column, model_column.runtime_expression, nothing)))
+                    _RKRanefZRecipe(:column, _rk_fit_observed_anchors!(
+                        model_column.runtime_expression, derived, columns, taken), nothing)))
                 continue
             end
             backing = parent(t)

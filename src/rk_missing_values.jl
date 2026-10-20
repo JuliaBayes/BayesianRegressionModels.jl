@@ -94,12 +94,13 @@ function _rk_model_population_column(term, context=nothing)
     label = kind === :model_value ? name(inner) : _brm_wrapper_col_name(kind, inner)
     raw = plan.values
     make_error = message -> ArgumentError("RK backend: missing covariate transform: $message")
-    observed = Float64.(plan.observed_values)
+    # A frozen replay fits the anchors to the training observations.
+    observed = _rk_fit_observed_values(plan)
     fit = kind === :model_value ? nothing : kind === :center ?
         (; mean=_brm_fit_mean_numeric(observed, :predictor, :center, make_error), scale=1.0) :
         _brm_fit_zscale_numeric(observed, :predictor, make_error)
     values = fit === nothing ? raw : (raw .- fit.mean) ./ fit.scale
-    anchors = Expr(:call, :_brm_observed_values, plan.source)
+    anchors = Expr(:call, :_brm_observed_values, plan.source, observed)
     expression = fit === nothing ? name(inner) :
         Expr(:call, :./,
             Expr(:call, :.-, name(inner),
@@ -111,6 +112,24 @@ function _rk_model_population_column(term, context=nothing)
     (; label, effect_addresses=(label,), effect_block=label,
         source=plan.source, values, preprocess, runtime_expression=expression)
 end
+
+# The observed values a completed covariate's anchors are fitted to: the bound
+# column's, or the training column's on a frozen replay (`_brm_fit_source`).
+_rk_fit_observed_values(plan) =
+    Float64.(collect(skipmissing(_brm_fit_source(plan.source, plan.values))))
+
+# A completed covariate's anchors read a fit-role input holding those observed
+# values (`_rk_fit_input!`), so a frozen `reprocess` keeps the training
+# anchors. Replaces the planning marker `_brm_observed_values(source, values)`.
+function _rk_fit_observed_anchors!(value::Expr, derived, columns, taken)
+    if Meta.isexpr(value, :call, 3) && first(value.args) === :_brm_observed_values
+        _, source, observed = value.args
+        return _rk_fit_input!(derived, columns, taken, Symbol(source, :_observed), observed)
+    end
+    Expr(value.head, map(arg -> _rk_fit_observed_anchors!(arg, derived, columns, taken),
+        value.args)...)
+end
+_rk_fit_observed_anchors!(value, _derived, _columns, _taken) = value
 
 # The marker is planning metadata, resolved to the actual packed observation
 # port before source is lowered. Its mean/std remain executable graph math.

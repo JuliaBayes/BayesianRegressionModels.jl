@@ -112,6 +112,12 @@ tensor(d) = @brm d begin
     mu ~ 1 + t2(x, z)
     y ~ Normal(mu, sigma)
 end
+completed(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mi(xm) ~ LogNormal(0.5, 0.6)
+    mu ~ 1 + standardize(xm)
+    y ~ Normal(mu, sigma)
+end
 zscaled_interaction(d) = @brm d begin
     sigma ~ Exponential(1)
     mu ~ 1 + zscale(x) & z
@@ -128,6 +134,7 @@ const TRAIN = (; x=collect(range(0.3, 4.1; length=N)) .^ 1.3,
     z=cos.(1:N),
     other=["b", "c", "a"][mod1.(1:N, 3)],
     keep=[isodd(i) || i > 8 for i in 1:N],
+    xm=Union{Missing,Float64}[i % 4 == 0 ? missing : 0.4 + 0.3i for i in 1:N],
     y=sin.(1:N) .+ 0.1 .* (1:N))
 rows_of(data, rows) = map(v -> v isa AbstractVector ? v[rows] : v, data)
 
@@ -221,6 +228,15 @@ end
         check_frozen(build, 2:5)
         check_frozen(build, [7])
     end
+end
+
+@stestset "a completed covariate keeps its training anchors" begin
+    # The design holds every missing row, so the completions are the fit's;
+    # its observed rows differ, so its own anchors would differ.
+    check_frozen(RM.completed, [2, 4, 7, 8, 12])
+    # Dropping a missing row drops a completion coordinate: refused.
+    @test_throws "changes the fitted coordinates" reprocess(
+        RKBRMI(RM.completed(TRAIN)), rows_of(TRAIN, 1:6))
 end
 
 @stestset "a same-group replay keeps the fitted group effects" begin
