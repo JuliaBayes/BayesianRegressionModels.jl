@@ -1,7 +1,8 @@
 # Concurrent reverse-mode gradients through the adaptive-centering
-# reparametrizers. On Julia 1.10, Enzyme's reverse pass corrupts Julia's GC once
-# another thread collects while a differentiated accessor allocates a heap work
-# vector, reads a struct holding vectors inside its row loop, or reaches two
+# reparametrizers, the learned-order wrapper included. On Julia 1.10, Enzyme's
+# reverse pass corrupts Julia's GC once another thread collects while a
+# differentiated accessor allocates a heap work vector, reads a struct holding
+# vectors inside its row loop, or reaches two
 # `_block_location` instantiations (see `_block_location` in
 # BayesianRegressionModelsWarmupHMCExt). Completion and multi-chain workers do
 # exactly that; `threaded_gradient_stress.jl` runs the stress in a child Julia.
@@ -54,6 +55,14 @@ function _with_controls(state, ir, d)
     WarmupHMC.ReparametrizedProblem(ir, _StdNormal(d), AutoEnzyme()), d
 end
 
+# The learned-order wrapper's controls also fix every group's triangular order;
+# random controls permute most groups.
+function _with_controls(_, ir::AC_EXT.BRMOrderedCenteringReparametrization, d)
+    controls = rand(Xoshiro(1), length(WarmupHMC.reparam_controls(ir)))
+    WarmupHMC.restore_reparam_controls!(ir, controls)
+    WarmupHMC.ReparametrizedProblem(ir, _StdNormal(d), AutoEnzyme()), d
+end
+
 function _ordinary_problem()
     blocks, d = _ordinary_blocks()
     _with_controls(AC_EXT._adaptive_centering_reparametrizer(blocks)..., d)
@@ -61,8 +70,9 @@ end
 
 # Ordinary + R2D2 + squared-exponential HSGP cells in one joint wrapper. Every
 # R2D2 term's log-scale carries a linear, a unit-interval and a simplex atom.
-# `scalar=true` appends twelve total/S2Z cells sharing three log-scales.
-function _joint_problem(; scalar=false)
+# `scalar=true` appends twelve total/S2Z cells sharing three log-scales;
+# `learned=true` builds the `ranef_order=:learned` wrapper over the same cells.
+function _joint_problem(; scalar=false, learned=false)
     blocks, o = _ordinary_blocks()
     K, G = 3, 10
     reference, r2, simplex = o + 1, o + 2, collect(o + 3:o + 5)
@@ -82,8 +92,9 @@ function _joint_problem(; scalar=false)
     n = scalar ? 12 : 0
     cells = (; indices=collect(d .+ (1:n)), scales=d + n .+ mod1.(1:n, 3),
                locations=collect(range(-1, 1; length=12))[1:n], targets=zeros(n))
-    _with_controls(AC_EXT._adaptive_joint_centering_reparametrizer(
-        blocks, [hsgp], [r2d2], cells)..., d + (scalar ? n + 3 : 0))
+    build = learned ? AC_EXT._adaptive_ordered_centering_reparametrizer :
+        AC_EXT._adaptive_joint_centering_reparametrizer
+    _with_controls(build(blocks, [hsgp], [r2d2], cells)..., d + (scalar ? n + 3 : 0))
 end
 
 function _s2z_problem()
@@ -127,6 +138,7 @@ end
 
 const _CASES = ("ordinary" => _ordinary_problem, "joint" => _joint_problem,
                 "joint_scalar" => () -> _joint_problem(; scalar=true),
+                "learned_order" => () -> _joint_problem(; scalar=true, learned=true),
                 "s2z" => _s2z_problem, "hsgp" => _hsgp_problem,
                 "cdar" => _cdar_problem, "scalar" => _scalar_problem)
 
