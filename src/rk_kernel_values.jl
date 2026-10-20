@@ -212,6 +212,10 @@ function _rk_kernel_observation_modifier(observation, distribution, bound_names)
         bound(:lower), bound(:upper))
 end
 
+# Each data input's subject count; an absent replay response has none.
+_rk_push_outer_length!(lengths, values) = push!(lengths, length(values))
+_rk_push_outer_length!(lengths, ::_BRMAbsentResponse) = lengths
+
 Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BRMI), program, name, rhs)
     parts = _sb_kernel_lambda_parts(first(getargs(rhs)))
     parts === nothing && error("RK backend: kernel `$name` requires an inline cell body")
@@ -282,7 +286,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             values = parent(parent(argument))
             values isa AbstractVector || error("RK backend: kernel input `$source` must be an array")
             columns[source] = values
-            push!(outer_lengths, length(values))
+            _rk_push_outer_length!(outer_lengths, values)
             push!(inputs, (; source, kind=:element, rows=nothing, column))
         elseif argument isa NamedColumn && parent(argument) isa ExprColumn
             push!(inputs, (; source=_rk_kernel_column_name(argument), kind=:element,
@@ -541,13 +545,15 @@ function _rk_kernel_observed_layout(observation, kernels)
         values = raw[brm_flatten_cells(partition.rows)]
         return (; values, rows=partition.rows, lengths=length.(partition.rows))
     end
-    response = observation.response
-    if response isa AbstractVector{<:AbstractVector}
-        return (; values=brm_flatten_cells(response),
-            rows=nothing, lengths=length.(response))
-    end
-    (; values=response, rows=nothing, lengths=nothing)
+    _rk_observed_layout(observation.response)
 end
+_rk_observed_layout(response) = (; values=response, rows=nothing, lengths=nothing)
+_rk_observed_layout(response::AbstractVector{<:AbstractVector}) =
+    (; values=brm_flatten_cells(response), rows=nothing, lengths=length.(response))
+# An absent array-per-index response keeps the fitted nested route; each cell
+# takes its shape from the data it reads, so it has no lengths to check.
+_rk_observed_layout(response::_BRMAbsentResponse{<:AbstractVector}) =
+    (; values=response, rows=nothing, lengths=response)
 
 # The partition fixes likelihood geometry; its values are produced from the
 # original response port by the emitted numerical graph. A ragged join's row
@@ -596,6 +602,7 @@ _rk_observation_argument_rows!(defs, statements, taken, observation, layout,
 
 # Grouped argument data broadcasts against its response subject by subject: one
 # array per subject, each as long as the response's or a single value.
+_rk_check_argument_groups(response, argument, raw, ::_BRMAbsentResponse) = nothing
 function _rk_check_argument_groups(response, argument, raw, expected)
     lengths = length.(raw)
     length(lengths) == length(expected) &&

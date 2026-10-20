@@ -5,7 +5,9 @@
 # `reprocess(rk, new_data)` binds new rows to the fitted executable graph with
 # the TRAINING fit's preprocessing. Oracle: a design made of some of the
 # training rows predicts, at those rows, exactly what the training binding
-# computes there, a one-row design included. Public synthetic models only.
+# computes there, a one-row design included. A design may omit its responses
+# (todo `16bb838`, on RK snag `rkppl-bind-a-des-e6cfca75`): it predicts the
+# same values and has no density. Public synthetic models only.
 #
 # Run: julia --startup-file=no --project=test test/rk_reprocess.jl
 
@@ -148,6 +150,7 @@ const TRAIN = (; x=collect(range(0.3, 4.1; length=N)) .^ 1.3,
     xm=Union{Missing,Float64}[i % 4 == 0 ? missing : 0.4 + 0.3i for i in 1:N],
     y=sin.(1:N) .+ 0.1 .* (1:N))
 rows_of(data, rows) = map(v -> v isa AbstractVector ? v[rows] : v, data)
+without(data, name) = NamedTuple{filter(!=(name), keys(data))}(data)
 
 const PK = (; subject=["s1", "s2", "s3", "s4", "s5"],
     weight=[60.0, 72.0, 81.0, 55.0, 90.0], dose=[100.0, 120.0, 80.0, 100.0, 150.0],
@@ -170,6 +173,19 @@ end
 point(rk) = collect(range(-0.6, 0.8; length=rk.model.layout.total))
 density(rk, u) = LogDensityProblems.logdensity(
     rk_logdensity_problem(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse)), u)
+
+# A backend whose `y` was omitted has no density: RK refuses every query that
+# reads `y`, naming it.
+function check_no_density(replay, u)
+    err = try
+        density(replay, u)
+        nothing
+    catch e
+        e
+    end
+    @test err isa ReactiveKernelsPPL.ContractValidationError
+    @test occursin("`y`", sprint(showerror, err))
+end
 
 # The replay predicts the training values at the training rows it holds, and
 # its density prepares on the fitted graph (one program).
@@ -274,12 +290,11 @@ end
     end
     @test_throws "not a training level" reprocess(rk,
         merge(rows_of(PK, [2]), (; subject=["zzz"])))
-    # A new read grid and dose for in-sample subjects: the cell runs on the
-    # new times with each subject's fitted clearance.
+    # A new read grid and dose for in-sample subjects, without responses: the
+    # cell runs on the new times with each subject's fitted clearance.
     log_CL = graph_value(rk, :log_CL, u)
     grid = [[0.1, 0.2, 3.0, 6.0, 9.0], [0.5]]
-    design = merge(rows_of(PK, [3, 1]), (; t=grid, dose=[50.0, 75.0],
-        y=[zeros(length(g)) for g in grid]))
+    design = merge(without(rows_of(PK, [3, 1]), :y), (; t=grid, dose=[50.0, 75.0]))
     expected = reduce(vcat, [dose .* exp.(-exp(log_CL[j]) .* t)
         for (j, dose, t) in zip([3, 1], design.dose, grid)])
     @test graph_value(reprocess(rk, design), :conc, u) ≈ expected atol=1e-12 rtol=1e-12
@@ -332,6 +347,49 @@ end
     rk = RKBRMI(RM.string_factor(TRAIN))
     @test_throws "not a training level" reprocess(rk,
         merge(rows_of(TRAIN, [1, 2]), (; gs=["a", "zzz"])))
+end
+
+@stestset "a design without responses predicts the same values" begin
+    # The replay binds `y` without values, so each authored value equals the
+    # with-`y` replay's; one program, so the location query prepares too.
+    for (build, rows) in ((RM.string_factor, [3, 6]), (RM.monotonic, [7]),
+            (RM.fitted_constant, 2:5), (RM.zscaled, 2:5), (RM.zscaled, [7]),
+            (RM.grouped, [3, 6]), (RM.smooth, [7]), (RM.thin_plate, 2:5),
+            (RM.shrunk, 2:5))
+        rk = RKBRMI(build(TRAIN))
+        u = point(rk)
+        design = rows_of(TRAIN, rows)
+        replay = reprocess(rk, without(design, :y))
+        @test replay.model === rk.model
+        mu = graph_value(reprocess(rk, design), :mu, u)
+        @test graph_value(replay, :mu, u) == mu
+        observations = BRM._rk_observation_values(BRM._rk_observation_query(replay), u)
+        @test observations.y.location == mu
+        check_no_density(replay, u)
+    end
+    # One array of reads per subject: `conc` follows each subject's `t`.
+    rk = RKBRMI(RM.pk(PK))
+    u = point(rk)
+    for subjects in ([2], [4, 1])
+        design = rows_of(PK, subjects)
+        replay = reprocess(rk, without(design, :y))
+        @test graph_value(replay, :conc, u) == graph_value(reprocess(rk, design), :conc, u)
+        check_no_density(replay, u)
+    end
+    # New subjects without responses take caller-supplied effects.
+    b = graph_value(rk, :b_p_subject, u)
+    replay = reprocess(rk, without(merge(rows_of(PK, [2]), (; subject=["new"])), :y);
+        resample_groups=[:subject])
+    bound = rk_bound_data(replay)
+    query = ReactiveKernels.prepare(replay.model.spec;
+        have=(:unconstrained, :b_p_subject, keys(bound)...), want=(:conc,), bound)
+    s2 = findfirst(==("s2"), sort(PK.subject))
+    value = Base.invokelatest(query, u, b[s2:s2, :])
+    value = value isa Tuple ? only(value) : value
+    @test value ≈ pk_reads(graph_value(rk, :conc, u), [2]) atol=1e-12 rtol=1e-12
+    # Other data stay required.
+    @test_throws "has no column `x`" reprocess(RKBRMI(RM.zscaled(TRAIN)),
+        without(without(rows_of(TRAIN, 2:5), :y), :x))
 end
 
 @stestset "freeze_constants=false rebuilds on the new data" begin
