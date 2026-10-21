@@ -156,3 +156,69 @@ _sb_cell_statements(statements, scope) =
     Any[_sb_cell_statement(statement, scope) for statement in statements]
 _sb_cell_block(x, scope) = Meta.isexpr(x, :block) ?
     Expr(:block, _sb_cell_statements(x.args, scope)...) : _sb_cell_statement(x, scope)
+
+# ---- `AR1Normal` in a cell: the BRM-owned AR(1) submodel ---------------------
+#
+# The `@slic` submodels `y[p] ~ AR1Normal(...)` calls (`ar1_normal.jl`): the
+# exact AR(1) density over one series, given one mean, scale and persistence
+# per step, at the recorded integer times or one step apart. `obs` is the
+# caller's observed series; without it the submodel draws the series.
+const _sb_ar1_normal = StanBlocks.@slic begin
+    @scan begin
+        obs[1] ~ normal(mu[1], sigma[1] / sqrt(1 - phi[1] ^ 2))
+        for t in 2:n
+            k = time[t] - time[t - 1]
+            obs[t] ~ normal(mu[t] + phi[t] ^ k * (obs[t - 1] - mu[t - 1]),
+                sigma[t] * sqrt((1 - phi[t] ^ (2 * k)) / (1 - phi[t] ^ 2)))
+        end
+    end
+end
+
+const _sb_ar1_normal_steps = StanBlocks.@slic begin
+    @scan begin
+        obs[1] ~ normal(mu[1], sigma[1] / sqrt(1 - phi[1] ^ 2))
+        for t in 2:n
+            obs[t] ~ normal(mu[t] + phi[t] * (obs[t - 1] - mu[t - 1]), sigma[t])
+        end
+    end
+end
+
+# A cell's statements with each `y ~ AR1Normal(...)` calling the AR(1)
+# submodel: on the observed series (`obs = y`), or drawing it when the
+# response is omitted and `y` is no cell parameter.
+function _sb_cell_ar1_normal_calls(statements, params)
+    any(_is_brm_ar1_normal, statements) || return statements
+    used = _brm_cell_value_refs!(Set{Symbol}(params), Expr(:block, statements...))
+    map(statements) do statement
+        _is_brm_ar1_normal(statement) || return statement
+        spec = _brm_kernel_ar1_normal(statement, params, statements)
+        observed = spec.response in params
+        observed || spec.length != :(length($(spec.response))) || error(
+            "sbimpl: `$(spec.response) ~ AR1Normal(...)` with `$(spec.response)` omitted " *
+            "draws a series whose length nothing in the cell gives; pass " *
+            "`time = t[p]`, or an argument read along the series")
+        mu, sigma, phi = _brm_ar1_normal_series(spec, :fill)
+        keywords = Any[Expr(:kw, :mu, mu), Expr(:kw, :sigma, sigma),
+            Expr(:kw, :phi, phi), Expr(:kw, :n, spec.length)]
+        spec.time === nothing || push!(keywords, Expr(:kw, :time, spec.time))
+        node = spec.response
+        if observed
+            pushfirst!(keywords, Expr(:kw, :obs, spec.response))
+            node = Symbol(spec.response, :_ar1)
+            while node in used
+                node = Symbol(node, :_)
+            end
+            push!(used, node)
+        end
+        submodel = spec.time === nothing ? _sb_ar1_normal_steps : _sb_ar1_normal
+        Expr(:call, :~, node, Expr(:call, submodel, Expr(:parameters, keywords...)))
+    end
+end
+
+# Whether an emitted statement is a cell's AR(1) submodel call.
+# The plan reads a copy of the emitted body, so the submodel is matched by
+# its model, not by identity.
+_sb_plan_ar1_normal_call(x) = Meta.isexpr(x, :call, 3) && x.args[1] === :~ &&
+    Meta.isexpr(x.args[3], :call) && (head = first(x.args[3].args);
+        head isa StanBlocks.SlicModel && any(submodel -> isequal(head.model, submodel.model),
+            (_sb_ar1_normal, _sb_ar1_normal_steps)))
