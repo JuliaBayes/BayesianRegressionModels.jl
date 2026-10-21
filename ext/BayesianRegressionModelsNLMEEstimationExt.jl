@@ -43,7 +43,8 @@ NE.provides_eta_hessian(::BRM.BRMNLMEModel) = true
 # active and constant overlay reads.
 NE.ad_backend(::BRM.BRMNLMEModel) =
     AutoEnzyme(; mode=Enzyme.set_runtime_activity(Enzyme.Reverse))
-BRM._brm_nlme_forward_backend(::AutoEnzyme) = AutoEnzyme(; mode=Enzyme.Forward)
+BRM._brm_nlme_forward_backend(ad_backend::AutoEnzyme) =
+    AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad_backend))
 
 # An NLME covariance block is packed as the log diagonal and raw lower
 # triangle of its Cholesky factor C. BRM instead samples marginal scales τ and

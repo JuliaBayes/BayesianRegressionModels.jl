@@ -585,3 +585,37 @@ end
         end
     end
 end
+
+# A derived per-row value that no likelihood reads, computed with `map` over a
+# closure inside the subject cell, needs Enzyme runtime activity. The η
+# Hessian's reverse-over-forward differentiates the same cell, so it takes the
+# runtime activity of the caller's `ad_backend`; with static activity there the
+# Newton posthoc estimator raised `EnzymeRuntimeActivityError`.
+nlme_upper_share(y, μ, s) = map((yi, μi) -> 1 / (1 + exp(-(yi - μi) / s)), y, μ)
+
+@stestset "η Hessian blocks take the caller's runtime activity" begin
+    brmi = @brm NLME_PLATE_DATA begin
+        sigma ~ Exponential(1)
+        log_CL ~ 1 + weight + (1 | pk | subject)
+        log_V ~ 1 + (1 | pk | subject)
+        @plate for i in eachindex(log_CL)
+            CL = exp(log_CL[i])
+            Vc = exp(log_V[i])
+            pred[i] = dose[i] / Vc .* exp.(-(CL / Vc) .* t[i])
+            share[i] = nlme_upper_share(dv[i], pred[i], sigma)
+            dv[i] ~ normal(pred[i], sigma)
+        end
+    end
+    ad = AutoEnzyme(; mode=Enzyme.set_runtime_activity(Enzyme.Reverse))
+    m = brm_nlme_model(RKBRMI(brmi); ad_backend=ad)
+    θ, σ = plate_pk_point(m)
+    H = 0.1 .* reshape(collect(1.0:6.0), 2, :) .- 0.2
+    blocks = conditional_loglikelihood_hessian_blocks(m, [1, 2, 3], θ, σ, H)
+    @test all(isapprox.(blocks, plate_pk_oracle_hessians(m, θ, σ, H); rtol=1e-9, atol=1e-9))
+    ω = omega_parameters(nlme_layout(m), [0.09 0.02; 0.02 0.04])
+    result = empirical_bayes(m, θ, σ, ω)
+    @test result.method isa NewtonEBE
+    @test all(result.converged)
+    plain = brm_nlme_model(RKBRMI(nlme_plate_pk(NLME_PLATE_DATA)); ad_backend=NLME_AD)
+    @test result.modes ≈ empirical_bayes(plain, θ, σ, ω).modes rtol=1e-10 atol=1e-12
+end

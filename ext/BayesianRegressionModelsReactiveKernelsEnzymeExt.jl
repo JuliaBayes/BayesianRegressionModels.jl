@@ -8,11 +8,18 @@ import Enzyme
 
 const BRM = BayesianRegressionModels
 
-function BRM._rk_eta_hvp_query(backend::BRM.RKBRMI, unit::Vector{Float64})
+# A program whose reverse gradient needs runtime activity needs it in BRM's
+# other Enzyme modes of the same program too (the η Hessian's
+# reverse-over-forward, Gaussian moment pushforwards), so those modes take the
+# runtime-activity setting of the caller's `ad_backend`.
+BRM._brm_enzyme_mode(mode, ad_backend::AutoEnzyme) = ad_backend.mode === nothing ?
+    mode : Enzyme.set_runtime_activity(mode, ad_backend.mode)
+
+function BRM._rk_eta_hvp_query(backend::BRM.RKBRMI, unit::Vector{Float64}, ad_backend)
     rkext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
     second_order = SecondOrder(
-        AutoEnzyme(; mode=Enzyme.Reverse),
-        AutoEnzyme(; mode=Enzyme.Forward))
+        AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse, ad_backend)),
+        AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad_backend)))
     prepare_query_ad(prepare_ad_hvp, backend.model,
         rkext._rk_translated_plan(backend.plan), :sampler,
         second_order, (zeros(Float64, length(unit)),), unit)
