@@ -275,7 +275,7 @@ export outcomes, linear_predictor_op, linear_predictors, predictors,
        hierarchical_outcomes,
        linear_predictor_args, data_args, primary_lp, popcoefnames, effect_priors,
        ranef_effect_priors, r2d2_priors, term_priors, ranefcoefnames,
-       priors_of, structure_of
+       priors_of, structure_of, brm_source
 
 # Extension API. Downstream packages add their own formula terms
 # by defining methods on `vmeta_sampling_rhs` + `_sb_submodel_rhs!` and

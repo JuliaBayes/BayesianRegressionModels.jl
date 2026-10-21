@@ -595,6 +595,27 @@ model.
 """
 structure_of(brmi::BRMI) = _select_ops(brmi, op_nc -> !_is_effect_prior_op(op_nc))
 
+"""
+    brm_source(backend::Union{SBBRMI,RKBRMI}) -> BRMI
+
+Return the [`BRMI`](@ref) `backend` was built from, exactly as passed to
+`SBBRMI(brmi; ...)`, `RKBRMI(brmi)` or `RKBRMI(brmi, plan, built)`:
+`brm_source(SBBRMI(brmi)) === brmi` for every model.
+
+`parent(backend)` is the model the backend lowered: the source after BRM
+resolved its relative prior addresses (`optional(...)` priors and
+grouping-column `sd`/`cor`/`ranef` addresses). It is `===` to the source only
+when the model has none, so establish that a backend came from a given BRMI
+with `brm_source`, not `parent`. Two backends built from one BRMI have
+`===` parents.
+
+A backend BRM derives from another keeps that backend's source whenever it
+keeps its `parent` (hold-out marks, population models, `reprocess` replays
+that reuse the fitted model). A replay BRM rebuilds from the model rebound to
+new data reports that rebound model, as its `parent` does.
+"""
+function brm_source end
+
 # ---- predictors of a single LP --------------------------------------------
 
 """

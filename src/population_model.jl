@@ -205,7 +205,8 @@ function population_model(sb::SBBRMI; groups)
         bindings[b.binding] = merge(bindings[b.binding], (; population=true))
     end
     model = StanBlocks.SlicModel(body, sb.data, sb.model.mod, sb.model.observations)
-    pop = SBBRMI(sb.parent, model, sb.data, sb.preproc, copy(sb.held_out), bindings)
+    pop = SBBRMI(sb.parent, model, sb.data, sb.preproc, copy(sb.held_out), bindings,
+                 sb.source)
     isempty(rewritten_totals) && return pop
     _sb_mark_held_out(pop, _sb_held_out_inventory(pop).sources)
 end
