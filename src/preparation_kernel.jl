@@ -3,35 +3,44 @@
 _brm_group_values(raw::CA.CategoricalVector) = CA.unwrap.(raw)
 _brm_group_values(raw::AbstractVector) = raw
 
-_brm_collect_data_lengths!(_acc, _x) = nothing
-_brm_collect_data_lengths!(acc, x::NamedColumn) = begin
+_brm_collect_data_columns!(_acc, _x) = nothing
+_brm_collect_data_columns!(acc, x::NamedColumn) = begin
     p = parent(x)
-    p isa DataColumn ? _brm_push_data_length!(acc, name(x), parent(p)) :
-        _brm_collect_data_lengths!(acc, p)
+    p isa DataColumn ? _brm_push_data_column!(acc, name(x), parent(p)) :
+        _brm_collect_data_columns!(acc, p)
     nothing
 end
 # A scalar data column — a scalar field of the container or a `constant(...)`
 # declaration — broadcasts over whatever frame reads it, so it names no row axis.
-_brm_push_data_length!(acc, column::Symbol, values) = push!(acc, (column, length(values)))
-_brm_push_data_length!(_acc, ::Symbol, ::Number) = nothing
-_brm_collect_data_lengths!(acc, x::ExprColumn) = begin
+_brm_push_data_column!(acc, column::Symbol, values) = push!(acc, (column, values))
+_brm_push_data_column!(_acc, ::Symbol, ::Number) = nothing
+_brm_collect_data_columns!(acc, x::ExprColumn) = begin
     getf(x) === (~) && return nothing
-    for a in getargs(x); _brm_collect_data_lengths!(acc, a); end
-    for v in values(getkwargs(x)); _brm_collect_data_lengths!(acc, v); end
+    for a in getargs(x); _brm_collect_data_columns!(acc, a); end
+    for v in values(getkwargs(x)); _brm_collect_data_columns!(acc, v); end
     nothing
 end
-_brm_collect_data_lengths!(acc, x::Union{Tuple,AbstractVector}) = begin
-    for a in x; _brm_collect_data_lengths!(acc, a); end
+_brm_collect_data_columns!(acc, x::Union{Tuple,AbstractVector}) = begin
+    for a in x; _brm_collect_data_columns!(acc, a); end
+    nothing
+end
+# `(name, length)` of each row-wise data column `x` reads.
+function _brm_collect_data_lengths!(acc, x)
+    columns = Tuple{Symbol,Any}[]
+    _brm_collect_data_columns!(columns, x)
+    append!(acc, ((column, length(values)) for (column, values) in columns))
     nothing
 end
 
-# `(name, length)` of every row-wise raw data column a linear predictor's terms
+# `(name, values)` of every row-wise raw data column a linear predictor's terms
 # read; scalar columns are skipped.
-function _brm_kernel_lp_data_lengths(lp_col)
-    lens = Tuple{Symbol,Int}[]
-    _brm_collect_data_lengths!(lens, getargs(parent(lp_col))[2])
-    lens
+function _brm_kernel_lp_data_columns(lp_col)
+    columns = Tuple{Symbol,Any}[]
+    _brm_collect_data_columns!(columns, getargs(parent(lp_col))[2])
+    columns
 end
+_brm_kernel_lp_data_lengths(lp_col) =
+    Tuple{Symbol,Int}[(column, length(values)) for (column, values) in _brm_kernel_lp_data_columns(lp_col)]
 
 # A per-subject linear predictor without a random effect defines no grouping;
 # it rides on the subject frame a ranef LP — or, in a no-random-effects panel,
@@ -222,12 +231,7 @@ function _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals;
             "directly, `$a_name[i]`.")
         _brm_ragged_column_length!(lens, a_name, v)
     end
-    for (nm, L) in lens
-        L == n_ev || error(
-            "$prefix: `$a_name` read through `$grp_name`: `$a_name` has $L entries ",
-            "(data vector `$nm`) but `$grp_name` has $n_ev. The grouping column must ",
-            "name the subject of EVERY entry of `$a_name`.")
-    end
+    _brm_kernel_check_ragged_axis(a_name, grp_name, lens, n_ev; prefix)
 
     rows = _brm_kernel_ragged_partition(a_name, grp_name, ev_vals, g_vals; prefix)
     if !isnothing(order)
@@ -239,6 +243,43 @@ function _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals;
     end
 
     (; rows, is_lp, is_unbound, group_name=grp_name, group_values=ev_vals)
+end
+
+function _brm_kernel_check_ragged_axis(a_name, grp_name, lens, n_ev;
+                                       prefix="BRM kernel preparation")
+    for (nm, L) in lens
+        L == n_ev || error(
+            "$prefix: `$a_name` read through `$grp_name`: `$a_name` has $L entries ",
+            "(data vector `$nm`) but `$grp_name` has $n_ev. The grouping column must ",
+            "name the subject of EVERY entry of `$a_name`.")
+    end
+    nothing
+end
+
+# The same partition computed in the RK graph from the bound columns (emitted
+# by `_rk_emit_kernel_plate!`), so a design's row geometry is a graph value of
+# its raw columns rather than a planned input. `names` is
+# `[x, group, cell, axis...]` (plus the `order` column before the axes in the
+# ordered form); `axes` are the row-wise data columns of `x`'s own frame, each
+# checked against `groups` as `_brm_kernel_ragged_rows` checks them.
+function brm_ragged_rows(names, groups, cells, axes...)
+    x, group, cell = names[1], names[2], names[3]
+    _brm_ragged_rows_graph(x, group, groups, cell, cells, names[4:end], axes)
+end
+function brm_ragged_rows_ordered(names, groups, cells, order, axes...)
+    x, group, cell, order_name = names[1], names[2], names[3], names[4]
+    rows = _brm_ragged_rows_graph(x, group, groups, cell, cells, names[5:end], axes)
+    _brm_kernel_order_rows!(rows, order, order_name, group, length(groups);
+        prefix="RK backend")
+end
+function _brm_ragged_rows_graph(x, group, groups, cell, cells, axis_names, axes)
+    prefix = "RK backend"
+    labels = _brm_kernel_subject_values(cells, cell; prefix)
+    ev_vals = collect(_brm_group_values(groups))
+    _brm_kernel_check_ragged_axis(x, group,
+        Tuple{Symbol,Int}[(nm, length(a)) for (nm, a) in zip(axis_names, axes)],
+        length(ev_vals); prefix)
+    _brm_kernel_ragged_partition(x, group, ev_vals, labels; prefix)
 end
 
 # `ragged(x, group; order=time)`: each cell's rows in ascending `time`, ties in

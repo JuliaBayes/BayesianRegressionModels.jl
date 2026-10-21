@@ -87,7 +87,8 @@ const _RK_SOURCE_IMPORTS = (
     BayesianRegressionModels=(:brm_tps_basis, :brm_t2_basis, :brm_hsgp_basis,
         :brm_hsgp_periodic_basis, :brm_hsgp_sqrt_spd, :brm_hsgp_periodic_sqrt_spd,
         :brm_gp_covariance, :brm_gp_latent, :brm_level_indices, :brm_dummy,
-        :brm_panel_slice, :brm_flatten_cells, :brm_invprobit, :brm_invcloglog))
+        :brm_panel_slice, :brm_flatten_cells, :brm_invprobit, :brm_invcloglog,
+        :brm_ragged_rows, :brm_ragged_rows_ordered))
 
 # RKPPL vocabulary that Base, Core, Distributions and LogExpFunctions do not
 # define. RKPPL reads these heads by name whatever the model module binds

@@ -18,6 +18,9 @@ struct _RKPreparedKernelAssignment
     # Responses the cell's `@scan` blocks observe entry by entry, as
     # `(; param, source)`: the plate observes them in place (`y[i][t] ~ …`).
     scan_observed::Tuple
+    # The raw column whose rows label the cells (a random-effect grouping or a
+    # `ragged(x, group => cells)` label column), or `nothing`.
+    cell_column::Union{Nothing,Symbol}
 end
 
 # The authored cell's lexical namespace is a stable callable authority, not
@@ -35,7 +38,8 @@ function Base.deepcopy_internal(x::_RKPreparedKernelAssignment, stack::IdDict)
         Base.deepcopy_internal(x.group_values, stack),
         Base.deepcopy_internal(x.observations, stack),
         x.cells,
-        Base.deepcopy_internal(x.scan_observed, stack))
+        Base.deepcopy_internal(x.scan_observed, stack),
+        x.cell_column)
 end
 _rk_kernel_column_name(column::NamedColumn) = name(column)
 
@@ -282,6 +286,27 @@ function _rk_validate_cell_bounds(kernel, observation, response, data)
     nothing
 end
 
+# How the graph computes a ragged join's row partition from its bound raw
+# columns (`brm_ragged_rows`), or `nothing` when no column labels the cells
+# (a `groups(g)` plate): the partition is then a planned input. The axis
+# columns checked against `group` are an LP's data columns, or the joined
+# column itself unless it is a response, which a design may omit.
+function _rk_kernel_partition_source!(columns, value, group, cell_column, order,
+        is_lp::Bool, observed::Bool)
+    cell_column === nothing && return nothing
+    raw(column) = parent(parent(column))
+    axes = is_lp ? _brm_kernel_lp_data_columns(value) :
+        observed || !(parent(value) isa DataColumn) ? Tuple{Symbol,Any}[] :
+        Tuple{Symbol,Any}[(name(value), raw(value))]
+    order_name = order === nothing ? nothing : name(order)
+    for (column, values) in ((name(group), raw(group)), (name(cell_column), raw(cell_column)),
+            (order === nothing ? () : ((order_name, raw(order)),))..., axes...)
+        get!(columns, column, values)
+    end
+    (; x=name(value), group=name(group), cell=name(cell_column), order=order_name,
+        axes=Symbol[first(axis) for axis in axes])
+end
+
 # Each data input's subject count; an absent replay response has none.
 _rk_push_outer_length!(lengths, values) = push!(lengths, length(values))
 _rk_push_outer_length!(lengths, ::_BRMAbsentResponse) = lengths
@@ -304,6 +329,9 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
         if argument isa ExprColumn && getf(argument) === ragged]
     buckets = _sb_kernel_lp_buckets(direct_lps; ragged_cols)
     groups = [bucket for bucket in buckets if bucket !== nothing]
+    # The column whose rows label the plate's cells, when one does: ragged
+    # joins then compute their row partitions in the graph from it.
+    cell_column = nothing
     group_values = if isempty(groups)
         # Without a subject predictor, `ragged(x, group => cells)` inputs label
         # the cells by their explicit cell label column (district totals over
@@ -312,12 +340,15 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
         if isempty(ragged_cols)
             nothing
         else
-            _brm_kernel_plate_cells(ragged_cols; prefix="RK backend").values
+            cells = _brm_kernel_plate_cells(ragged_cols; prefix="RK backend")
+            cells.distinct || (cell_column = cells.column)
+            cells.values
         end
     else
         length(unique(group.key for group in groups)) == 1 || error(
             "RK backend: kernel `$name` predictor inputs disagree on subject grouping")
         column = first(groups).column
+        cell_column = column
         _brm_kernel_check_cell_labels(ragged_cols, _rk_kernel_column_name(column); prefix="RK backend")
         _brm_kernel_subject_values(parent(parent(column)), _rk_kernel_column_name(column); prefix="RK backend")
     end
@@ -356,8 +387,9 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             elseif parent(value) isa DataColumn
                 columns[source] = parent(parent(value))
             end
-            push!(inputs, (; source, kind=:gather, rows,
-                column=nothing))
+            push!(inputs, (; source, kind=:gather, rows, column=nothing,
+                partition=_rk_kernel_partition_source!(columns, value, group,
+                    cell_column, order, partition.is_lp, column in observed)))
         elseif argument isa NamedColumn && parent(argument) isa DataColumn
             # A data input is read through its own column. Only a response,
             # whose column is flattened for the likelihood under its own name,
@@ -472,7 +504,8 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
     globals = sort!(collect(intersect(setdiff(referenced, locals), available)))
     cells = _rk_ast_fresh_name(string(name, "_cells"), union(available, keys(columns)))
     _RKPreparedKernelAssignment(name, params, body, collected, scope, Tuple(inputs),
-        globals, columns, group_values, Tuple(observations), cells, Tuple(scan_observed))
+        globals, columns, group_values, Tuple(observations), cells, Tuple(scan_observed),
+        cell_column === nothing ? nothing : _rk_kernel_column_name(cell_column))
 end
 
 # A formula observation of kernel output whose response holds one array per
@@ -1162,8 +1195,20 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
     authored = first(input for input in kernel.inputs if input.kind !== :omitted)
     data = filter(bound, Any[slice.inputs..., kernel.inputs...])
     axis = bound(authored) || isempty(data) ? authored : first(data)
-    range = axis.kind === :gather ? axis.rows : axis.source
     inputs = Dict(zip(slice.params, slice.inputs))
+    # A ragged join computes its row partition from bound raw columns, and the
+    # plate then iterates the bound cell label column, when the cell reads a
+    # bound data input holding one array per cell: that input makes RK run the
+    # cell as a loop over cells (rkppl-use §1). A computed partition alone does
+    # not, so the partition otherwise stays a bound input.
+    looped = _rk_kernel_cell_loop(kernel, values(inputs))
+    graph_partition(input) = looped && input.kind === :gather &&
+        get(input, :partition, nothing) !== nothing
+    for input in values(inputs)
+        graph_partition(input) && _rk_emit_kernel_partition!(statements, input)
+    end
+    range = axis.kind !== :gather ? axis.source :
+        graph_partition(axis) ? axis.partition.cell : axis.rows
     # Plate-scoped cell locals keep their names unless a model name, which the
     # plate also reads or writes, already spells them.
     locals = Set{Symbol}()
@@ -1193,6 +1238,35 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
     push!(statements, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
         Expr(:for, Expr(:(=), index, Expr(:call, :eachindex, range)),
             Expr(:block, body...))))
+end
+
+# Whether the cell reads a bound data input holding one array per cell. A
+# response does not count: a prediction design may omit it.
+function _rk_kernel_cell_loop(kernel, inputs)
+    observed = Set{Symbol}(observation.source for observation in kernel.observations)
+    any(inputs) do input
+        input.kind === :element && input.column !== nothing && !(input.column in observed) ||
+            return false
+        value = get(kernel.columns, input.source, nothing)
+        value isa AbstractVector && !(value isa _BRMAbsentResponse) &&
+            eltype(value) <: AbstractArray
+    end
+end
+
+# `<rows> = brm_ragged_rows([x, group, cell, axes...], group, cell, axes...)`
+# (`brm_ragged_rows_ordered` with `order=`), once per program. A partition
+# without a graph source stays a planned input.
+function _rk_emit_kernel_partition!(statements, input)
+    source = get(input, :partition, nothing)
+    source === nothing && return
+    any(s -> Meta.isexpr(s, :(=)) && first(s.args) === input.rows, statements) && return
+    ordered = source.order !== nothing
+    names = Symbol[source.x, source.group, source.cell,
+        (ordered ? (source.order,) : ())..., source.axes...]
+    push!(statements, Expr(:(=), input.rows, Expr(:call,
+        ordered ? :brm_ragged_rows_ordered : :brm_ragged_rows,
+        Expr(:vect, QuoteNode.(names)...), source.group, source.cell,
+        (ordered ? (source.order,) : ())..., source.axes...)))
 end
 
 # A cell statement as the plate reads it: each name in `reads` (a per-subject
@@ -1381,7 +1455,7 @@ function _rk_kernel_with_arguments(kernel::_RKPreparedKernelAssignment, argument
     _RKPreparedKernelAssignment(kernel.name, [kernel.params; arguments.params], body,
         arguments.value, kernel.scope, (kernel.inputs..., arguments.inputs...),
         kernel.globals, kernel.columns, kernel.group_values, kernel.observations,
-        kernel.cells, kernel.scan_observed)
+        kernel.cells, kernel.scan_observed, kernel.cell_column)
 end
 
 # The cell restricted to what `value` reads: the body statements producing
@@ -1402,7 +1476,7 @@ function _rk_kernel_value_slice(kernel::_RKPreparedKernelAssignment, value)
     kept = [i for (i, param) in enumerate(kernel.params) if param in needed]
     _RKPreparedKernelAssignment(kernel.name, kernel.params[kept], body, value,
         kernel.scope, kernel.inputs[kept], filter(in(needed), kernel.globals),
-        kernel.columns, kernel.group_values, (), kernel.cells, ())
+        kernel.columns, kernel.group_values, (), kernel.cells, (), kernel.cell_column)
 end
 
 # The arrays and step locals a `@scan` block writes, and the responses it
