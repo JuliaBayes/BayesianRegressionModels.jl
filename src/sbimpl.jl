@@ -3136,9 +3136,15 @@ summands. Original population
 coefficients and deviations are recovered in generated quantities. Inspect
 [`total_effect_blocks`](@ref), or use `total_groups=()` for the conventional
 representation. Naming a group explicitly requires every block of that group to
-be eligible and errors otherwise, naming the predictors whose blocks would stay
-conventional. Correlated, crossed, stratified, multi-membership and R2D2 blocks
-retain conventional emission under `:auto`.
+be eligible and errors otherwise, naming each predictor whose block would stay
+conventional and why. `total_groups=[:g => [:b]]` (or `:g => :b`) requests only
+`b`'s block on `g`, leaving the group's other blocks conventional; entries mix,
+as in `[:subject, :g => [:b, :c]]`. `:auto` keeps the whole model conventional
+when any block must stay conventional. Scale priors may be any supported family
+on the positive half-line, or one of them truncated at zero with no upper bound
+(`truncated(...; lower=0)` or `truncated(..., 0, Inf)`).
+Correlated, crossed, stratified, multi-membership and R2D2 blocks retain
+conventional emission under `:auto`.
 
 `s2z_groups` is an opt-in collection of grouping-factor names (default `()`,
 disabled) emitted in the posterior-preserving sum-to-zero parameterization:
@@ -4973,9 +4979,11 @@ function generative_plan(plan::GenerativePlan, new_df;
     # reports the missing builder rather than a declaration walk).
     centered_groups = isnothing(centered_groups) ? _generative_plan_centered(plan) :
         (centered_groups isa Set ? centered_groups : Set{Symbol}(centered_groups))
-    # Preserve the fitted representation and population/random basis relation.
-    # An empty selected set also preserves an explicit conventional opt-out.
-    selected = unique(b.group for b in total_effect_blocks(plan))
+    # Preserve the fitted representation and population/random basis relation:
+    # exactly the fitted blocks, so a fit that mixed exact totals with
+    # conventional blocks of one group rebuilds mixed. An empty selection also
+    # preserves an explicit conventional opt-out.
+    selected = [b.group => b.predictor for b in total_effect_blocks(plan)]
     # A rebuild for new groups keeps every `constant(...)` at its fitted value;
     # the new data need not carry what it was computed from.
     constants = filter(((_, entry),) -> entry.kind === :constant, plan.preproc)
