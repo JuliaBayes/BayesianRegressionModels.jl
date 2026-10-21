@@ -21,7 +21,7 @@ function BRM._rk_eta_hvp_query(backend::BRM.RKBRMI, unit::Vector{Float64}, ad_ba
         AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse, ad_backend)),
         AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad_backend)))
     prepare_query_ad(prepare_ad_hvp, backend.model,
-        rkext._rk_translated_plan(backend.plan), :sampler,
+        rkext._rk_translated(backend), :sampler,
         second_order, (zeros(Float64, length(unit)),), unit)
 end
 
@@ -32,7 +32,7 @@ function BRM._rk_nlme_compact_cell_sampler(backend::BRM.RKBRMI,
         observations::Tuple, base::Vector{Float64}, selected::Vector{Int})
     rkext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
     prepare_compact_cell_sampler(backend.model,
-        rkext._rk_translated_plan(backend.plan), observations, base, selected;
+        rkext._rk_translated(backend), observations, base, selected;
         backend=AutoEnzyme(; mode=Enzyme.set_runtime_activity(Enzyme.Reverse)))
 end
 
