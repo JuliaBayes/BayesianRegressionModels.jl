@@ -1,0 +1,306 @@
+# test/rk_design_binder.jl — the graph inputs of new designs, built once per
+# fit (snag `a-blessed-rk-sho-02370c78`; design decision `1x2h909`).
+#
+# `rk_design_binder(rk; resample_groups)` replays the first design of each kind
+# in full and binds every later one into that replay's lowered program. Oracle:
+# its inputs are those of `rk_bound_data(reprocess(rk, design; …))`, its graph
+# values equal theirs, a later design emits no program, and a design
+# `reprocess` refuses is refused with the same error. Public synthetic models
+# only.
+#
+# Run: julia --startup-file=no --project=test test/rk_design_binder.jl
+
+include(joinpath(@__DIR__, "rk_consumer_support.jl"))
+using Random
+
+module BinderModels
+using BayesianRegressionModels, Distributions
+function curve(t, dose_time, dose_amount, log_k, log_V, log_F, baseline)
+    k, V = exp(log_k), exp(log_V)
+    shift = isempty(baseline) ? 0.0 : sum(baseline) / length(baseline)
+    map(t) do ti
+        c = 0.0
+        for (j, td) in enumerate(dose_time)
+            ti > td && (c += exp(log_F[j]) * dose_amount[j] / V * exp(-k * (ti - td)))
+        end
+        c + shift
+    end
+end
+# Subject predictors with a correlated block, dose-row and baseline-row
+# predictors joined to their subject, and a per-subject cell.
+pk(d) = @brm d begin
+    sigma ~ Exponential(1)
+    log_k ~ 1 + zscale(weight) + (1 | p | subject)
+    log_V ~ 1 + diseased + (1 | p | subject)
+    log_F ~ 0 + vessel + mo(diet)
+    baseline ~ 0 + hsgp(base_time; k=5, domain=(-1.5, 1.5))
+    effect(log_k, Intercept) ~ Normal(0, 1)
+    effect(log_V, Intercept) ~ Normal(0, 1)
+    effect(log_F, :) ~ Normal(0, 0.5)
+    sd(:, p) ~ Exponential(1)
+    doses = groups(dose_subject => subject)
+    bases = groups(base_subject => subject)
+    @plate for i in eachindex(log_k)
+        mu = curve(t[i], dose_time[i], dose_amount[i], log_k[i], log_V[i],
+            log_F[doses[i]], baseline[bases[i]])
+        y[i] ~ censored(Normal(mu, sigma); lower=lloq[i])
+        conc[i] = mu
+    end
+end
+# A flat model: a string factor, an automatic HSGP interval and a zscale.
+flat(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + g + hsgp(x; k=5) + zscale(z)
+    y ~ Normal(mu, sigma)
+end
+fitted_constant(d) = @brm d begin
+    sigma ~ Exponential(1)
+    xbar = constant(mean(x))
+    b ~ Normal(0, 1)
+    mu = b * (x - xbar)
+    y ~ Normal(mu, sigma)
+end
+# An HSGP over masked rows: its mask is planned from the design in Julia.
+masked(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + hsgp(x; k=5, rows=keep)
+    y ~ Normal(mu, sigma)
+end
+# A cell whose curve a callable-source provider claims as an RK graph,
+# counting its emissions: one per planned program.
+import BayesianRegressionModels: _rk_callable_source!
+using ReactiveKernels
+dosed_curve(t, dose, log_k) = [dose * exp(-exp(log_k) * ti) for ti in t]
+const EMISSIONS = Ref(0)
+function _rk_callable_source!(definitions, bindings, entry, ::typeof(dosed_curve))
+    EMISSIONS[] += 1
+    push!(definitions, :(ReactiveKernels.@kernel $entry(t, dose, log_k) = begin
+        k = exp(log_k)
+        reads = ReactiveKernels.plate(eachindex(t)) do j
+            dose * exp(-k * t[j])
+        end
+        return reads
+    end))
+    :done
+end
+provided(d) = @brm d begin
+    sigma ~ Exponential(1)
+    log_k ~ 1 + zscale(weight) + (1 | p | subject)
+    effect(log_k, Intercept) ~ Normal(0, 1)
+    sd(:, p) ~ Exponential(1)
+    @plate for i in eachindex(log_k)
+        conc[i] = dosed_curve(t[i], dose[i], log_k[i])
+        y[i] ~ normal(conc[i], sigma)
+    end
+end
+# A submodel hook scaling its column by two keyword constants, written into
+# `data` (which the binder cannot tell from design data) or emitted as a
+# statement of the program.
+import BayesianRegressionModels: _rk_submodel_rhs!
+function data_scaled end
+function statement_scaled end
+function _rk_scaled!(statements, data, target, rhs; as_data)
+    x = name(only(getargs(rhs)))
+    key = Symbol(target, :_scales)
+    scales = Float64[getkwargs(rhs).lo, getkwargs(rhs).hi]
+    as_data ? (data[key] = scales) :
+        push!(statements, :($key = $(Expr(:vect, scales...))))
+    push!(statements, :($target = $x .* $key[1] .+ $key[2]))
+    :done
+end
+_rk_submodel_rhs!(definitions, statements, data, bindings, target::Symbol,
+    ::typeof(data_scaled), rhs) = _rk_scaled!(statements, data, target, rhs; as_data=true)
+_rk_submodel_rhs!(definitions, statements, data, bindings, target::Symbol,
+    ::typeof(statement_scaled), rhs) = _rk_scaled!(statements, data, target, rhs; as_data=false)
+hooked_data(d) = @brm d begin
+    b ~ Normal(0, 1)
+    loc ~ data_scaled(x; lo=0.5, hi=2.0)
+    mu = loc + b
+    y ~ Normal(mu, 0.8)
+end
+hooked_statement(d) = @brm d begin
+    b ~ Normal(0, 1)
+    loc ~ statement_scaled(x; lo=0.5, hi=2.0)
+    mu = loc + b
+    y ~ Normal(mu, 0.8)
+end
+end
+const BM = BinderModels
+
+# A PK design: `n` subjects with `reads` read times each, three doses and two
+# baseline rows per subject.
+function pk_data(rng, n, reads; labels=["s$(j)" for j in 1:n], responses=true)
+    doses, bases = 3, 2
+    data = (; subject=labels, weight=50 .+ 40 .* rand(rng, n),
+        diseased=Float64.(rand(rng, 0:1, n)),
+        t=[sort!(48 .* rand(rng, reads)) for _ in 1:n],
+        lloq=[fill(0.01, reads) for _ in 1:n],
+        dose_time=[[0.0, 12.0, 24.0] for _ in 1:n],
+        dose_amount=[fill(100.0, doses) for _ in 1:n],
+        dose_subject=repeat(labels; inner=doses),
+        vessel=Float64.(rand(rng, 0:1, n * doses)),
+        diet=categorical(rand(rng, 1:3, n * doses); levels=1:3, ordered=true),
+        base_subject=repeat(labels; inner=bases),
+        base_time=repeat([-1.0, 1.0], n))
+    responses || return data
+    merge(data, (; y=[0.02 .+ abs.(randn(rng, reads)) for _ in 1:n]))
+end
+flat_data(rng, n) = (; x=collect(range(0.3, 4.1; length=n)) .+ 0.01 .* rand(rng, n),
+    g=["a", "b", "c"][mod1.(1:n, 3)], z=cos.(1:n) .+ rand(rng, n),
+    keep=[isodd(i) || i > 8 for i in 1:n], y=randn(rng, n))
+without(data, name) = NamedTuple{filter(!=(name), keys(data))}(data)
+
+absent(v) = occursin("Absent", string(nameof(typeof(v))))
+same(a, b) = typeof(a) == typeof(b) && (absent(a) ?
+    all(f -> isequal(getfield(a, f), getfield(b, f)), fieldnames(typeof(a))) : isequal(a, b))
+same_inputs(x, y) = Set(keys(x)) == Set(keys(y)) && all(n -> same(x[n], y[n]), keys(y))
+
+point(rk) = collect(range(-0.6, 0.8; length=rk.model.layout.total))
+function graph_value(rk, inputs, want, runtime...)
+    names = first.(runtime)
+    query = ReactiveKernels.prepare(rk.model.spec;
+        have=(:unconstrained, names..., keys(inputs)...), want=(want,), bound=inputs)
+    value = Base.invokelatest(query, point(rk), last.(runtime)...)
+    value isa Tuple ? only(value) : value
+end
+
+# Every design binds to what the planned replay binds, and its graph value is
+# the planned replay's.
+function check_binder(rk, designs; resample_groups=(), want, runtime=d -> ())
+    binder = rk_design_binder(rk; resample_groups)
+    for design in designs
+        inputs = binder(design)
+        planned = rk_bound_data(reprocess(rk, design; resample_groups))
+        @test same_inputs(inputs, planned)
+        @test graph_value(rk, inputs, want, runtime(design)...) ==
+            graph_value(rk, planned, want, runtime(design)...)
+    end
+    binder
+end
+
+subject_effects(design) = (:b_p_subject => 0.1 .* reshape(
+    collect(1.0:(2 * length(design.subject))), length(design.subject), 2),)
+
+@stestset "binder inputs are the planned replay's" begin
+    rng = Xoshiro(7)
+    rk = RKBRMI(BM.pk(pk_data(rng, 6, 4)))
+    # New subjects, with and without responses; one design per kind is planned.
+    new = [pk_data(rng, n, r; labels=["n$(j)" for j in 1:n], responses=false)
+        for (n, r) in ((2, 5), (3, 2), (1, 40))]
+    binder = check_binder(rk, new; resample_groups=[:subject], want=:conc,
+        runtime=subject_effects)
+    @test length(binder.classes) == 1
+    @test keys(binder.fitted) == (:weight_fit,)
+    check_binder(rk, [pk_data(rng, 2, 3; labels=["n1", "n2"]),
+        pk_data(rng, 3, 2; labels=["n1", "n2", "n3"])];
+        resample_groups=[:subject], want=:conc, runtime=subject_effects)
+    # The fitted subjects, their fitted effects (frozen grouping).
+    check_binder(rk, [without(pk_data(rng, 2, 3; labels=["s2", "s5"]), :y),
+        without(pk_data(rng, 3, 6; labels=["s1", "s3", "s6"]), :y)]; want=:conc)
+    flat_rk = RKBRMI(BM.flat(flat_data(rng, 12)))
+    designs = [map(v -> v[rows], without(flat_data(rng, 12), :y)) for rows in (2:5, [7], 1:9)]
+    check_binder(flat_rk, designs; want=:mu)
+    constant_rk = RKBRMI(BM.fitted_constant(flat_data(rng, 12)))
+    binder = check_binder(constant_rk, designs; want=:mu)
+    @test :xbar in keys(binder.fitted) || !(:xbar in keys(rk_bound_data(constant_rk)))
+end
+
+@stestset "fitted inputs bind once" begin
+    rng = Xoshiro(11)
+    rk = RKBRMI(BM.pk(pk_data(rng, 5, 4)))
+    binder = rk_design_binder(rk; resample_groups=[:subject])
+    design = pk_data(rng, 2, 6; labels=["n1", "n2"], responses=false)
+    inputs = binder(design)
+    rest = NamedTuple{Tuple(n for n in keys(inputs) if !haskey(binder.fitted, n))}(inputs)
+    effects = subject_effects(design)
+    once = ReactiveKernels.prepare(rk.model.spec;
+        have=(:unconstrained, first.(effects)..., keys(rest)..., keys(binder.fitted)...),
+        want=(:conc,), bound=binder.fitted)
+    value = Base.invokelatest(once, point(rk), last.(effects)..., values(rest)...)
+    @test (value isa Tuple ? only(value) : value) == graph_value(rk, inputs, :conc, effects...)
+end
+
+@stestset "a later design emits no program" begin
+    rng = Xoshiro(3)
+    train = (; subject=["s1", "s2", "s3", "s4"], weight=[60.0, 72.0, 81.0, 55.0],
+        dose=[100.0, 120.0, 80.0, 100.0],
+        t=[[0.5, 1.0], [0.25, 1.5, 2.0], [1.0], [0.5, 2.0]],
+        y=[[1.0, 0.8], [1.2, 0.7, 0.6], [0.9], [0.6, 0.5]])
+    rk = RKBRMI(BM.provided(train))
+    binder = rk_design_binder(rk; resample_groups=[:subject])
+    design(n) = (; subject=["n$(j)" for j in 1:n], weight=fill(70.0, n), dose=fill(100.0, n),
+        t=[collect(range(0.1, 3.0; length=j + 2)) for j in 1:n])
+    binder(design(2))
+    before = BM.EMISSIONS[]
+    for n in (1, 3, 5)
+        @test same_inputs(binder(design(n)), rk_bound_data(reprocess(rk, design(n);
+            resample_groups=[:subject])))
+    end
+    # Each planned replay emits once; the binder's three designs emitted nothing.
+    @test BM.EMISSIONS[] == before + 3
+end
+
+@stestset "a design reprocess refuses is refused alike" begin
+    rng = Xoshiro(5)
+    rk = RKBRMI(BM.pk(pk_data(rng, 6, 4)))
+    binder = rk_design_binder(rk; resample_groups=[:subject])
+    base = pk_data(rng, 2, 3; labels=["n1", "n2"], responses=false)
+    binder(base)
+    function refused_alike(design, message)
+        @test_throws message reprocess(rk, design; resample_groups=[:subject])
+        @test_throws message binder(design)
+    end
+    # A baseline time past the fixed HSGP domain.
+    refused_alike(merge(base, (; base_time=[2.0; base.base_time[2:end]])),
+        "lies outside its fixed domain")
+    # A dose row naming a subject the design does not have.
+    refused_alike(merge(base, (; dose_subject=[base.dose_subject[1:end-1]; "zz"])),
+        "name no subject")
+    # A dose column on another axis than its subject labels.
+    refused_alike(merge(base, (; vessel=base.vessel[1:end-1])), "but `dose_subject` has 6")
+    # Per-subject inputs that disagree on the subject count.
+    refused_alike(merge(base, (; t=base.t[1:1])), "disagree on subject count")
+    # A subject listed twice.
+    refused_alike(merge(base, (; subject=["n1", "n1"])), "unique subject per row")
+    # An unseen `mo` level.
+    refused_alike(merge(base, (; diet=categorical([1, 2, 4, 2, 1, 2]; levels=1:4, ordered=true))),
+        "not a training level")
+    flat_rk = RKBRMI(BM.flat(flat_data(rng, 12)))
+    flat_binder = rk_design_binder(flat_rk)
+    design = map(v -> v[2:5], without(flat_data(rng, 12), :y))
+    flat_binder(design)
+    @test_throws "not a training level" flat_binder(merge(design, (; g=["a", "zzz", "b", "c"])))
+    @test_throws "outside the fitted basis interval" flat_binder(
+        merge(design, (; x=[100.0, 1.0, 2.0, 3.0])))
+    # A frozen grouping's unseen label.
+    frozen = rk_design_binder(rk)
+    fitted = without(pk_data(rng, 2, 3; labels=["s1", "s2"]), :y)
+    frozen(fitted)
+    @test_throws "not one of the" frozen(merge(fitted,
+        (; subject=["s1", "zz"], dose_subject=repeat(["s1", "zz"]; inner=3),
+           base_subject=repeat(["s1", "zz"]; inner=2))))
+end
+
+@stestset "an input planned from the design replays every design" begin
+    rng = Xoshiro(9)
+    rk = RKBRMI(BM.masked(flat_data(rng, 12)))
+    binder = rk_design_binder(rk)
+    designs = [map(v -> v[rows], without(flat_data(rng, 12), :y)) for rows in (2:6, 3:9)]
+    for design in designs
+        @test same_inputs(binder(design), rk_bound_data(reprocess(rk, design)))
+    end
+    @test occursin("replayed in full for each design", sprint(show, binder))
+end
+
+@stestset "hook data replays every design; a hook statement does not" begin
+    rng = Xoshiro(13)
+    for (build, planned) in ((BM.hooked_data, true), (BM.hooked_statement, false))
+        rk = RKBRMI(build((; x=randn(rng, 8), y=randn(rng, 8))))
+        binder = rk_design_binder(rk)
+        for n in (3, 5, 2)
+            design = (; x=randn(rng, n))
+            @test same_inputs(binder(design), rk_bound_data(reprocess(rk, design)))
+        end
+        @test occursin("replayed in full", sprint(show, binder)) == planned
+    end
+end

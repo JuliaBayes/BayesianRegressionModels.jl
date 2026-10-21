@@ -77,11 +77,15 @@ _RKProgram(emitted::BRM._RKEmittedProgram) = _RKProgram(emitted, _rk_emit_module
 
 # Lowering reads the data values' shapes (rkppl-use §1), so each binding
 # lowers; the definitions are evaluated once per program.
-function _rk_bind_program(program::_RKProgram, plan::_RK_PLAN_TYPES)
+function _rk_lower_program(program::_RKProgram, plan::_RK_PLAN_TYPES)
     columns = BRM._rk_source_data_columns(plan, program.emitted)
     unbound = lower_rkppl(program.emitted.main,
         columns; mod=program.mod,
         conditioned=BRM._rk_observed_names(plan))
+    unbound, columns
+end
+function _rk_bind_program(program::_RKProgram, plan::_RK_PLAN_TYPES)
+    unbound, columns = _rk_lower_program(program, plan)
     bind_data(unbound, columns)
 end
 
@@ -199,11 +203,18 @@ end
 
 BRM.rk_bound_plan(backend::BRM.RKBRMI) = _rk_translated(backend)
 
-function BRM.rk_bound_data(backend::BRM.RKBRMI)
-    columns = BRM.rk_bound_plan(backend).columns
+BRM.rk_bound_data(backend::BRM.RKBRMI) = _rk_bound_columns(BRM.rk_bound_plan(backend).columns)
+function _rk_bound_columns(columns)
     names = Tuple(keys(columns))
     NamedTuple{names}(Tuple(columns[name] for name in names))
 end
+
+# A design binder's lowering for one kind of design: a replay's, which every
+# later design of that kind binds into (lowering reads only the data's names,
+# numbers and arrays per index, rkppl-use §1).
+BRM._rk_design_lowering(replay::BRM.RKBRMI) =
+    first(_rk_lower_program(_rk_program(replay), replay.plan))
+BRM._rk_bind_design(lowering, columns) = _rk_bound_columns(bind_data(lowering, columns).columns)
 
 function BRM.rk_restore_draws(backend::BRM.RKBRMI, U::AbstractMatrix)
     restore_draws(backend.model.layout, U)
