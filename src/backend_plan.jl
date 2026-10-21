@@ -988,13 +988,42 @@ function _brm_broadcast_data_call(f, args::Tuple, kwargs::NamedTuple)
         f(values[1:nargs]...; NamedTuple{names}(values[nargs+1:end])...)
     end
 end
+# A data formula call broadcasts over its inputs, except indexing: `x[i]` with
+# a vector of integer positions `i` reads `x` on its own axis, one value per
+# position, so a per-group field is read onto rows (`age[subject]`).
+_brm_data_call(f, args::Tuple, kwargs::NamedTuple) =
+    _brm_broadcast_data_call(f, args, kwargs)
+_brm_data_call(::typeof(getindex), args::Tuple{AbstractVector,AbstractVector},
+               ::NamedTuple{()}) = _brm_gather(args...)
+
+_brm_gather(values::AbstractVector, index::AbstractVector; prefix="BRM") =
+    values[_brm_gather_positions(index, length(values); prefix)]
+
+function _brm_gather_positions(index::AbstractVector, n::Integer; prefix="BRM")
+    all(i -> i isa Integer && !(i isa Bool), index) || error(
+        "$prefix: `x[i]` reads `x` at integer positions, but `i` holds " *
+        "$(eltype(index)) values; pass the position (1:$n) of each row's " *
+        "value in `x`")
+    bad = findfirst(i -> !(1 <= i <= n), index)
+    isnothing(bad) || error(
+        "$prefix: `x[i]` position $(index[bad]) (row $bad) is outside 1:$n; " *
+        "`x` holds $n values, one per position")
+    Vector{Int}(index)
+end
+
 function _brm_replay_expression(value::ExprColumn, data)
-    _brm_broadcast_data_call(
+    _brm_data_call(
         getf(value),
         map(argument -> _brm_replay_expression(argument, data),
             getargs(value)),
         map(argument -> _brm_replay_expression(argument, data),
             getkwargs(value)))
+end
+function _brm_replay_expression(source::_BRMIndexedSource, data)
+    field = collect(Float64, _brm_replay_expression(source.value, data))
+    _BRMIndexedValues(field, _brm_gather_positions(
+        _brm_replay_expression(source.index, data), length(field);
+        prefix="BRM replay"))
 end
 
 _brm_population_preproc_entry(preprocess::_BRMPopulationPreprocess) =
@@ -1005,7 +1034,7 @@ _brm_population_preproc_entry(preprocess::_BRMPopulationPreprocess) =
 _brm_population_replay_input(::Union{
         Val{:zscale},Val{:standardize},Val{:center}},
         column, preprocess, data, _cache) =
-    preprocess.raw_ref isa AbstractColumn ?
+    preprocess.raw_ref isa Union{AbstractColumn,_BRMIndexedSource} ?
         _brm_replay_expression(preprocess.raw_ref, data) : data[column.source]
 
 _brm_population_replay_input(::Val{:protect}, _column, preprocess, data, _cache) =
@@ -1729,7 +1758,7 @@ function _brm_materialize_data_expression(x::ExprColumn)
     kwargs = map(_brm_materialize_data_expression, getkwargs(x))
     any(isnothing, args) && return nothing
     any(isnothing, values(kwargs)) && return nothing
-    _brm_broadcast_data_call(getf(x), args, kwargs)
+    _brm_data_call(getf(x), args, kwargs)
 end
 _brm_materialize_data_expression(_x) = nothing
 
@@ -1783,11 +1812,43 @@ _brm_term_key(x) = x
 # returns the constant recorded for that column, or `nothing` to fit it here.
 _brm_unfitted(_label, _kind, _raw_ref) = nothing
 
+# The fitted transforms a formula term applies, by head; `nothing` otherwise.
+_brm_transform_kind(_f) = nothing
+_brm_transform_kind(::typeof(zscale)) = :zscale
+_brm_transform_kind(::typeof(standardize)) = :standardize
+_brm_transform_kind(::typeof(center)) = :center
+
+_brm_fit_transform(kind::Symbol, values) =
+    kind === :center ? _brm_fit_center(values) : _brm_fit_zscale(values)
+_brm_apply_transform(kind::Symbol, const_, values) =
+    kind === :center ? _brm_apply_center(const_, values) :
+                       _brm_apply_zscale(const_, values)
+
+# The fitted constant of transform `kind` over `values` (the axis `inner`
+# lives on), or the record a replay re-emission reuses under `raw_ref`.
+function _brm_transform_fit(kind::Symbol, label::Symbol, inner, values,
+                            raw_ref, fitted)
+    const_ = fitted(label, kind, raw_ref)
+    isnothing(const_) || return const_
+    _brm_fit_transform(kind, _brm_fit_values(inner, values))
+end
+
+# The one input of a transform term, or `nothing` for another arity. A keyword
+# is refused, never ignored: the term would silently keep its row-level fit.
+function _brm_transform_input(term::ExprColumn; prefix="BRM backend lowering")
+    kwargs = getkwargs(term)
+    head = nameof(getf(term))
+    isempty(kwargs) || error(
+        "$prefix: `$head(x)` takes no keywords (got " *
+        join(("`$k`" for k in keys(kwargs)), ", ") * "). To fit it over one " *
+        "value per group, pass `x` with one value per group and read it onto " *
+        "rows by position: `$head(x)[group]`")
+    args = getargs(term)
+    length(args) == 1 ? only(args) : nothing
+end
+
 function _brm_population_column(term::ExprColumn, fitted=_brm_unfitted)
-    f = getf(term)
-    kind = f === zscale ? :zscale :
-           f === standardize ? :standardize :
-           f === center ? :center : nothing
+    kind = _brm_transform_kind(getf(term))
     if isnothing(kind)
         values = _brm_materialize_data_expression(term)
         values isa AbstractVector{<:Real} || return nothing
@@ -1800,9 +1861,8 @@ function _brm_population_column(term::ExprColumn, fitted=_brm_unfitted)
                 source=first(sources), values=collect(Float64, values),
                 preprocess)
     end
-    args = getargs(term)
-    length(args) == 1 || return nothing
-    inner = only(args)
+    inner = _brm_transform_input(term)
+    isnothing(inner) && return nothing
     raw = _brm_materialize_data_expression(inner)
     raw isa AbstractVector{<:Real} || return nothing
     sources = _brm_data_expression_sources(inner)
@@ -1810,18 +1870,61 @@ function _brm_population_column(term::ExprColumn, fitted=_brm_unfitted)
 
     values = collect(Float64, raw)
     label = _brm_wrapper_col_name(kind, inner)
-    const_ = fitted(label, kind, inner)
-    if isnothing(const_)
-        fit_values = _brm_fit_values(inner, values)
-        const_ = kind === :center ? _brm_fit_center(fit_values) :
-                                   _brm_fit_zscale(fit_values)
-    end
-    transformed = kind === :center ? _brm_apply_center(const_, values) :
-                                     _brm_apply_zscale(const_, values)
+    const_ = _brm_transform_fit(kind, label, inner, values, inner, fitted)
     preprocess = _BRMPopulationPreprocess(kind, const_, inner)
     (; label, effect_addresses=(label,), effect_block=label,
-       source=first(sources), values=transformed, preprocess)
+       source=first(sources), values=_brm_apply_transform(kind, const_, values),
+       preprocess)
 end
+
+# `f(x)[i]` with `f` a fitted transform, and `x[i]`: `x` holds one value per
+# group on its own axis, and each row reads its group's value at the integer
+# position `i` (`standardize(age)[subject]`). The transform fits over `x`'s own
+# values, so every group weighs once however many rows read it; the transform
+# of an indexed vector, `standardize(age[subject])`, fits over the rows.
+function _brm_population_column(term::ExprColumn{typeof(getindex)},
+                                fitted=_brm_unfitted)
+    args = getargs(term)
+    length(args) == 2 && isempty(getkwargs(term)) || return invoke(
+        _brm_population_column, Tuple{ExprColumn,Any}, term, fitted)
+    source, index = args
+    kind = source isa ExprColumn ? _brm_transform_kind(getf(source)) : nothing
+    inner = isnothing(kind) ? source : _brm_transform_input(source)
+    isnothing(inner) && return nothing
+    raw = _brm_materialize_data_expression(inner)
+    raw isa AbstractVector{<:Real} || return nothing
+    sources = _brm_data_expression_sources(inner)
+    isempty(sources) && return nothing
+    index_values = _brm_materialize_data_expression(index)
+    index_values isa AbstractVector || return nothing
+
+    field = collect(Float64, raw)
+    positions = _brm_gather_positions(index_values, length(field);
+        prefix="BRM backend lowering")
+    label = _brm_indexed_col_name(kind, inner, index)
+    if isnothing(kind)
+        preprocess = _BRMPopulationPreprocess(:protect, nothing, term)
+        return (; label, effect_addresses=(label,), effect_block=label,
+                source=first(sources), values=field[positions], preprocess)
+    end
+    raw_ref = _BRMIndexedSource(inner, index)
+    const_ = _brm_transform_fit(kind, label, inner, field, raw_ref, fitted)
+    preprocess = _BRMPopulationPreprocess(kind, const_, raw_ref)
+    (; label, effect_addresses=(label,), effect_block=label,
+       source=first(sources),
+       values=_brm_apply_transform(kind, const_, field)[positions], preprocess)
+end
+
+# `standardize(age)[subject]` -> `standardize_age_subject`, `age[subject]` ->
+# `age_subject`: the index keeps the row-level column apart from a transform of
+# the same field on its own axis (`standardize_age`).
+_brm_indexed_col_name(kind, inner, index) = Symbol(
+    isnothing(kind) ? _brm_indexed_name(inner) : _brm_wrapper_col_name(kind, inner),
+    :_, _brm_indexed_name(index))
+_brm_indexed_name(x::NamedColumn) = name(x)
+_brm_indexed_name(x) =
+    Symbol(:expr_, string(hash(_brm_term_key(x)); base=16)[1:8])
+
 _brm_population_column(_term) = nothing
 _brm_population_column(term, _fitted) = _brm_population_column(term)
 

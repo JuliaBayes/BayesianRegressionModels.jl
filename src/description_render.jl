@@ -161,6 +161,8 @@ _brmd_call_math(::typeof(*), args, _kwargs, _c) = "\\left(" * join(args," \\cdot
 _brmd_call_math(::typeof(/), args, _kwargs, _c) = length(args)==2 ?
     "\\frac{" * args[1] * "}{" * args[2] * "}" : join(args,"/")
 _brmd_call_math(::typeof(^), args, _kwargs, _c) = "{" * args[1] * "}^{" * args[2] * "}"
+_brmd_call_math(::typeof(getindex), args, _kwargs, _c) =
+    "{" * args[1] * "}_{" * join(args[2:end], ",") * "}"
 _brmd_call_math(::typeof(exp), args, _kwargs, _c) = "\\exp\\left(" * only(args) * "\\right)"
 _brmd_call_math(::typeof(log), args, _kwargs, _c) = "\\log\\left(" * only(args) * "\\right)"
 _brmd_call_math(::typeof(sqrt), args, _kwargs, _c) = "\\sqrt{" * only(args) * "}"
