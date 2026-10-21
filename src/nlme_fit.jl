@@ -159,7 +159,7 @@ end
 """
     brm_nlme_fit(x, estimator; start=nothing, inits=nothing, ebes=true,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
-        nested_groups=NamedTuple(), kwargs...)
+        nested_groups=NamedTuple(), progress=nothing, kwargs...)
 
 Fit an NLME model through the RK backend with one of NLMEEstimation's own
 estimators and read the result in the model's names and natural units.
@@ -198,6 +198,18 @@ Requires NLMEEstimation and Enzyme to be loaded.
   require_convergence=false)`); `subjects` and `η0` come from the SAEM result
   and are refused there. `focei` always returns its EBEs and `empirical_bayes`
   is the pass itself, so for them `ebes` is ignored and keywords are refused.
+- `progress` — report the whole fit through Treebars: a Treebars node, under
+  which the call builds a `BRM NLME fit` node, or a backend symbol such as
+  `:state` that starts a new root. Its phases are `Lower to ReactiveKernels`,
+  `Prepare NLME model` (the steps of [`brm_nlme_model`](@ref)), `Starting
+  point`, `Estimate (<estimator>)` holding the estimator's own node, and after
+  `saem` `Posthoc EBEs` holding `empirical_bayes`'s node; a stage `x` has
+  already passed shows as reused. An interrupt requested on that node or an
+  ancestor (`Treebars.request_interrupt!`) raises `Treebars.ProgressInterrupted`
+  when the next preparation phase starts; once the estimator runs it honours
+  the interrupt as NLMEEstimation documents (an interrupted `saem` returns its
+  last completed iteration with `interrupted = true`), and the EBE pass is then
+  skipped, returning `ebes = nothing`. `nothing` (the default) reports nothing.
 
 Returns `(; estimates, result, ebes, start, model)`: `estimates` as
 [`brm_nlme_estimates`](@ref) returns them, NLMEEstimation's raw `result`, the
