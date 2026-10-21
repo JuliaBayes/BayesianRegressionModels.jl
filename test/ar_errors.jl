@@ -276,15 +276,32 @@ rk_density(backend, u) = LogDensityProblems.logdensity(
         end
     end
 
-    @testset "SBBRMI" begin
-        # The expansion's gap `k` is a step local of a per-group scan, which
-        # StanBlocks 4ee6e0e8 reads without declaring (snag StanBlocks
-        # `deterministic-st-a7afc47c`).
-        @test_broken try
-            StanBlocks.stanc_check(BRM.stan_code(SBBRMI(shared_ar(PANEL); mod=@__MODULE__,
-                total_groups=())); warn_pedantic=false).ok
-        catch
-            false
+    @testset "SBBRMI: the same density as RK, descriptor and prior program" begin
+        stanc_ok(code) = StanBlocks.stanc_check(code; warn_pedantic=false).ok
+        @test stanc_ok(BRM.stan_code(SBBRMI(shared_ar(PANEL); mod=@__MODULE__)))
+        # With `y` omitted the same block draws whole trajectories.
+        omitted = (; probe=PANEL.probe, day=PANEL.day, x=PANEL.x)
+        prior_code = BRM.stan_code(SBBRMI(shared_ar(omitted); mod=@__MODULE__))
+        @test occursin("normal_rng", prior_code)
+        @test stanc_ok(prior_code)
+        # One scientific description of the expansion.
+        d = brm_descriptor(SBBRMI(shared_ar(PANEL); mod=@__MODULE__))
+        @test d isa BRMDescriptor
+        @test brm_description(d) isa BayesianRegressionModels.BRMDescription
+        # Stan's unnamed intercept block samples its log scale and
+        # standardized effects directly: the RK coordinates, renamed.
+        backend, problem = consumer_problem(shared_ar(PANEL))
+        names = coordinate_names(backend.model.layout)
+        at(name) = names[coordinate(names, Symbol(name))]
+        stan = consumer_stan(shared_ar(PANEL), "ar-errors-shared")
+        mapping = [at(:phi) => "phi"; at(:sigma) => "sigma";
+            at("pop_mu.beta_pop.1") => "pop_mu_beta_pop.1";
+            at("pop_mu.beta_pop.2") => "pop_mu_beta_pop.2";
+            at("b_probe.tau.1") => "r_mu_probe_log_scale";
+            [at("b_probe.z.$j.1") => "r_mu_probe_xi.$j" for j in eachindex(PROBES)]]
+        n = length(names)
+        for u in (zeros(n), fill(0.1, n), collect(range(-0.4, 0.4; length=n)))
+            check_consumer_stan(problem, stan, mapping, backend, u)
         end
     end
 end

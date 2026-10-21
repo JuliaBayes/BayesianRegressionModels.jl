@@ -152,6 +152,23 @@ stanc_ok(code) = StanBlocks.stanc_check(code; warn_pedantic=false).ok
         @test stanc_ok(bound_code)
     end
 
+    # A scan writes each carried array through its seeds and steps; the plan and
+    # the descriptor know it as one declaration, the recurrence.
+    @testset "one declaration per carried array" begin
+        plan = generative_plan(sb)
+        hs = [d for d in plan.declarations if d.target === :h]
+        @test length(hs) == 1
+        @test only(hs).family === :scan && only(hs).role === :prior
+        @test BRM._is_brm_scan(only(hs).expression)
+        @test brm_descriptor(sb) isa BRMDescriptor
+        observed = SBBRMI(ar_errors_cell((; SCAN_PANEL..., subject=["b", "a", "c"]));
+            mod=@__MODULE__)
+        ys = [d for d in generative_plan(observed).declarations
+            if d.target === :y && !isempty(d.context)]
+        @test length(ys) == 1 && only(ys).role === :observation
+        @test brm_descriptor(observed) isa BRMDescriptor
+    end
+
     # Without `y` the random-effect level still counts the cells.
     @testset "omitted response simulates the trajectories" begin
         prior_code = BRM.stan_code(SBBRMI(

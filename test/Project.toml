@@ -45,8 +45,8 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # takes a censored/truncated/interval_censored family; an exchangeable ordered prior re-draws
 # as the sorted iid draw. 82a954da adds observed scans (a carried array that is bound data)
 # and per-cell scan lengths in plate cells; 4ee6e0e8 also through a do-cell parameter that
-# shadows its data name.
-rev = "4ee6e0e87b3015a9f89bb6f0ac7ce348964b68cd"
+# shadows its data name; 2f5b6203 stores integer step locals of nested scans.
+rev = "2f5b6203ac72296320eac97d0aff68dc9dec2e0e"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"

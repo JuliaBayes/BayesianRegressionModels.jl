@@ -4750,8 +4750,24 @@ function _sb_plan_collect!(declarations, x, data_scope, context, obs_keys, plate
                                           obs_keys, plate_params, unbound_cell), x.args)
         return nothing
     end
-    # A cell's `@scan` seeds and its step loop are statements of the same cell.
-    if _is_brm_scan(x) || x.head === :for
+    # A cell's `@scan` writes each array it carries through its seeds and its
+    # steps (`h[1] ~ …`, `h[t] ~ …`), and StanBlocks declares that array once:
+    # one declaration per array, family `:scan` (a structural site, like
+    # `:plate`), with the whole recurrence as its expression.
+    if _is_brm_scan(x)
+        sites = GenerativeDeclaration[]
+        _sb_plan_collect!(sites, x.args[end], data_scope, context, obs_keys,
+                          plate_params, unbound_cell)
+        for target in unique(site.target for site in sites)
+            site = first(s for s in sites if s.target === target)
+            push!(declarations, GenerativeDeclaration(site.role, target, :scan,
+                site.data_source, site.draw, site.context, _sb_plan_copy(x),
+                (), (;), site.annotation, (), (;)))
+        end
+        return nothing
+    end
+    # The step loop's statements are the scan's.
+    if x.head === :for
         return _sb_plan_collect!(declarations, x.args[end], data_scope, context,
                                  obs_keys, plate_params, unbound_cell)
     end

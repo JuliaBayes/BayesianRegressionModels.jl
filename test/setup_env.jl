@@ -41,7 +41,7 @@ const TESTENV = @__DIR__
 # name => (github url, pinned commit)   — comment records the branch the commit
 # is on, for humans; the pin itself is the full SHA and needs no branch.
 const PINS = [
-    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "4ee6e0e87b3015a9f89bb6f0ac7ce348964b68cd"),  # devibe: descriptor outputs carry their value shape as `dims`; non-finite literals render as Stan infinity builtins; `weighted` over censored/truncated/interval_censored; an exchangeable ordered prior re-draws as the sorted iid draw; observed scans and per-cell scan lengths (82a954da), also through a do-cell parameter that shadows its data name (4ee6e0e)
+    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "2f5b6203ac72296320eac97d0aff68dc9dec2e0e"),  # devibe: descriptor outputs carry their value shape as `dims`; non-finite literals render as Stan infinity builtins; `weighted` over censored/truncated/interval_censored; an exchangeable ordered prior re-draws as the sorted iid draw; observed scans and per-cell scan lengths (82a954da), also through a do-cell parameter that shadows its data name (4ee6e0e8); integer step locals in nested scans (2f5b6203)
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     # 0194dce (2026-09-27, dev): WindowSelectionPlan (WarmupHMC-held evidence)
     # and the controls interface for custom reparametrizers,
