@@ -216,7 +216,7 @@ function _sb_record_covariate_groups(sb,groups)
         preproc[key] = PreprocEntry(entry.kind,
             merge(entry.const_,(; groups=Tuple(sort!(collect(groups))))),entry.raw_ref,entry.dim_coupled)
     end
-    SBBRMI(sb.parent,sb.model,sb.data,preproc,copy(sb.held_out),sb.bindings)
+    SBBRMI(sb.parent,sb.model,sb.data,preproc,copy(sb.held_out),sb.bindings,sb.source)
 end
 
 function _sb_reprocess_covariates(sb,new_df,selected,groups,freeze,held_out)

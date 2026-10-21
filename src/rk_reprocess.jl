@@ -85,7 +85,7 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
     # The fit's program, translated once, binds the replay's data too, unless
     # a callable differs under the same name.
     program = _rk_same_callables(retained, replayed) ? rk.program : _RKOnce()
-    replay = RKBRMI(parent(rk), plan, rk.model; program)
+    replay = RKBRMI(parent(rk), plan, rk.model; program, source=brm_source(rk))
     # Same coordinates, so the fit's draws mean the same thing on the replay.
     # Resampled groups size their effects by the new data's levels.
     if isempty(groups)

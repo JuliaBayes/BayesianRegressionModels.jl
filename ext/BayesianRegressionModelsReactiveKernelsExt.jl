@@ -160,13 +160,13 @@ end
 
 # Planning and building read the model as syntax; only wrapping the retained
 # original `brmi` constructs a model-specific `RKBRMI` type.
-Base.@nospecializeinfer function BRM.RKBRMI(@nospecialize(brmi::BRM.BRMI); held_out=())
-    brmi = BRM._brm_resolve_optional_priors(brmi)
+Base.@nospecializeinfer function BRM.RKBRMI(@nospecialize(source::BRM.BRMI); held_out=())
+    brmi = BRM._brm_resolve_optional_priors(source)
     plan = BRM._brm_rk_plan(brmi; held_out)
     program = _RKProgram(BRM._rk_emit_ast(plan))
     bound = _rk_bind_program(program, plan)
     BRM.RKBRMI(brmi, plan, build_kernel(bound);
-        program=BRM._RKOnce(program), bound=BRM._RKOnce(bound))
+        program=BRM._RKOnce(program), bound=BRM._RKOnce(bound), source)
 end
 
 # LogDensityProblems shim over the thin-layer sampler query: the packed

@@ -469,12 +469,15 @@ provenance and `held_out` selection. Retain the bound program separately for
 queries. This constructor supports coordinate transport and its physical check
 on that existing build.
 
+[`brm_source`](@ref) returns the `brmi` passed to either constructor;
+`parent(backend)` is that model after prior-address resolution.
+
 A backend translates its emitted program (definition module and lowering) and
 binds its data once, on first use; every query reads that one binding.
 [`reprocess`](@ref) replays share the fit's translated program and bind only
 their own data.
 """
-struct RKBRMI{P<:BRMI,PL,M}
+struct RKBRMI{P<:BRMI,PL,M,S<:BRMI}
     parent::P
     plan::PL
     model::M
@@ -485,18 +488,22 @@ struct RKBRMI{P<:BRMI,PL,M}
     # extension on first use.
     program::_RKOnce
     bound::_RKOnce
+    # The BRMI the caller passed (`brm_source`). A replay around the same
+    # model forwards it.
+    source::S
     # The retained parent is the model the plan lowered: `optional(...)`
     # priors and grouping-column addresses are already resolved
     # (`_brm_resolve_prior_addresses`).
     function RKBRMI(parent::BRMI, plan, model; program::_RKOnce=_RKOnce(),
-            bound::_RKOnce=_RKOnce())
+            bound::_RKOnce=_RKOnce(), source::BRMI=parent)
         parent = _brm_resolve_prior_addresses(parent)
-        new{typeof(parent),typeof(plan),typeof(model)}(parent, plan, model,
-            program, bound)
+        new{typeof(parent),typeof(plan),typeof(model),typeof(source)}(parent,
+            plan, model, program, bound, source)
     end
 end
 
 Base.parent(x::RKBRMI) = x.parent
+brm_source(x::RKBRMI) = x.source
 structure_of(x::RKBRMI) = structure_of(parent(x))
 priors_of(x::RKBRMI) = priors_of(parent(x))
 
