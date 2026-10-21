@@ -340,6 +340,20 @@ This explicit PDF mode requires Quarto and a working LuaLaTeX installation;
 render failures propagate. Outputs use a temporary directory, or the directory
 specified by `BRM_DESCRIPTION_TEX_OUTPUT`.
 
+## Exact totals beside offsets
+
+`total_effects_offset.jl` checks that `offset(...)` terms, of data and of a
+model value, leave an otherwise eligible block on exact totals under `:auto`.
+Its BridgeStan density equals the conventional program's marginal over the
+integrated intercept at random points. It also checks that `reprocess` rebinds
+the offset column, that `population_model` keeps the offset, and that the
+description stays complete. An explicit `total_groups=[:g]` must raise an error
+naming every predictor whose block on `g` would stay conventional:
+
+```sh
+julia --project=test test/total_effects_offset.jl
+```
+
 ## Exact-total descriptions
 
 `description_totals.jl` describes each synthetic model under the default
@@ -352,6 +366,30 @@ family gap, and the retained sum-to-zero gap. It runs under the root project:
 
 ```sh
 julia --startup-file=no --project=. test/description_totals.jl
+```
+
+## Group-level predictors in exact totals
+
+`total_effects.jl` checks the exact-total Stan density, its gradient and
+recovery against a Julia reference, with and without per-group design values
+`W`. The reference subtracts beta's exact conditional density at two different
+betas, which agree only for the true conditional moments.
+`total_effects_group_predictors.jl` checks that a population column constant
+within the block's groups, or equal to a random slope times a per-group value,
+is integrated with the matched coefficients. Each totals program's log density
+equals the conventional (`total_groups=()`) program's with those coefficients
+integrated out. It also covers generated deviations, recovery,
+`brm_population_effect_coordinates`, `population_draws`, `brm_start`,
+centering locations, `population_model`, descriptions, frozen replay and rebuild
+refusals for changed group-level values, transport for a new group, and the
+legacy rebuild of a fit recorded without per-group values. Columns that vary
+within a group, or that would make the totals' mean design rank-deficient,
+stay sampled. `string_categorical_coordinates.jl` checks that a group-constant
+`String` column stays sampled, like a `CategoricalVector` column.
+
+```sh
+julia --project=test test/total_effects.jl
+julia --project=test test/total_effects_group_predictors.jl
 ```
 
 ## In-cell distribution combinators

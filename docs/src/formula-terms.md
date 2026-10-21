@@ -444,21 +444,47 @@ prior. Marginalization preserves the supported population prior specified in
 the formula.
 
 `total_effect_blocks(sb)` reports the selected blocks. `total_groups=()` opts out;
-`total_groups=[:subject]` requires that group to be eligible. Explicit
-`centered_groups=[:subject]` selects conventional centered deviations.
+`total_groups=[:subject]` requires every block of that group to be eligible;
+otherwise it raises an error naming the predictors whose blocks would stay
+conventional. Explicit `centered_groups=[:subject]` selects conventional
+centered deviations.
 
 Automatic selection currently requires one grouping structure per predictor,
 independent margins, supported population priors, and a known relation between
 the population and random-effect columns. Raw numeric columns, pure data
 expressions, and centered/scaled population columns with matching raw random
-columns are supported. Correlated, crossed, stratified, multi-membership and
-R2D2 blocks use the conventional representation. A request for totals on an
+columns are supported. `offset(...)` terms, of data or of model values, stay
+ordinary summands of the predictor beside the totals: they share no coefficient
+with them, so the marginalization stays exact. Correlated, crossed, stratified,
+multi-membership and R2D2 blocks use the conventional representation. A request for totals on an
 unsupported group raises an error.
 
 Automatic selection retains the conventional representation if some ordinary
 group blocks require it. One adaptive wrapper combines totals and S2Z contrasts
 with ordinary and R2D2 random effects and HSGP weights; only `cdar` cells need
 a wrapper of their own.
+
+**Group-level predictors.** A population column that is identical on every row
+of each group (a group-level predictor such as a per-subject covariate) shifts
+only that group's total, so its coefficient is integrated with the intercept.
+With such columns stacked per group in ``\mathbf w_j`` (1 for the intercept),
+
+```math
+\mathbf{total}_j\mid\tau,\beta \sim \mathcal N\!\left(A(\mathbf w_j\circ\beta),\;\operatorname{diag}(\tau)^2\right),
+```
+
+and integrating ``\beta`` out stays exact and linear in the number of groups.
+With an independent random slope, a column equal to that slope's column times a
+per-group value joins the slope's total the same way. Sampled beside the totals,
+such a coefficient would trade off one-for-one against every group's total.
+`TotalEffectBlock.group_columns` lists them; they are recovered like the
+intercept. Categorical columns stay sampled even when constant within each
+group, whether coded as a `CategoricalVector` or a plain `String` column; code a
+two-level group-level factor as a numeric 0/1 column to integrate it. The
+per-group values are frozen with the fit: `reprocess` refuses a
+replay row whose value differs from its group's fitted value, and
+`generative_plan(plan, new_df)` keeps fitted groups' values and reads new
+groups' values from their rows.
 
 #### WarmupHMC and recovery
 

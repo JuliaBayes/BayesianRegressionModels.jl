@@ -619,11 +619,13 @@ end
 _brm_raw_column(_) = nothing
 
 # Most records name their source column(s) in `raw_ref`. An exact-total basis
-# (`total_A_<lp>`, and the S2Z `s2z_B_<lp>`) instead records the linear
-# predictor it decomposes — a model value, not a dataframe column.
+# (`total_A_<lp>`, and the S2Z `s2z_B_<lp>`) and its per-group design
+# (`total_W_<lp>`) instead record the linear predictor they decompose — a model
+# value, not a dataframe column.
 _brm_preproc_column(e::PreprocEntry) = _brm_preproc_column(Val(e.kind), e.raw_ref)
 _brm_preproc_column(::Val, raw_ref) = _brm_raw_column(raw_ref)
 _brm_preproc_column(::Val{:total_basis}, _) = nothing
+_brm_preproc_column(::Val{:total_group_design}, _) = nothing
 
 # The dataframe columns an observation's `data_source` key holds. A plain
 # response IS its column. A joint response names its member columns. A ragged
@@ -2940,8 +2942,8 @@ end
 # its column name addresses them all, as `effect(lp, c)` does. Returns the
 # claimed columns in carrier order, or `nothing` when `coefficient` is no such
 # block address. Level indicators are never absorbed by an exact-total block
-# (`_sb_total_plan` absorbs only untransformed or `protect` random-effect
-# columns), so they always sit in the conventional carrier.
+# (`_sb_total_group_level_columns` skips them, as it skips a CategoricalVector
+# column's contrast block), so they always sit in the conventional carrier.
 _brm_is_level_indicator(column) =
     column.preprocess isa _BRMPopulationPreprocess &&
     column.preprocess.kind === :population_factor_dummy

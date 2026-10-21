@@ -45,7 +45,8 @@ whatever scale and correlation are set.
 
 On an `SBBRMI` with exact total-coefficient blocks, a coefficient the block
 absorbed has no sampled coordinate: its value places every group's total at
-the population value `A β` (zero deviations), with the block's unaddressed
+its population value `A β` — with group-level predictors in the block, the
+group's own `A (W[g,:] .* β)` — (zero deviations), with the block's unaddressed
 absorbed coefficients at 0. An `|ID|` such a block absorbed keeps its address:
 `ID = Σ` or `(; sd)` sets the block's total scale, the SD of each group's
 total around `A β`, which is the margin's between-group SD.
@@ -556,8 +557,8 @@ function _brm_sb_start_known_writes!(writes, t, d, block, P, lookup)
     nothing
 end
 
-# An exact-total block samples each group's total `A β + deviation`; place every
-# total at the population value `A β` the absorbed coefficients give.
+# An exact-total block samples each group's total `A (W[g,:] .* β) + deviation`;
+# place every total at the population value the absorbed coefficients give.
 function _brm_sb_start_totals!(writes, absorbed, sb, names, totals)
     for block in totals
         given = get(absorbed, block.predictor, nothing)
@@ -566,13 +567,13 @@ function _brm_sb_start_totals!(writes, absorbed, sb, names, totals)
         for (coefficient, value) in given
             β[only(findall(==(coefficient), collect(block.population_columns)))] = value
         end
-        row = block.A * β
+        mu = _total_location(block, β)
         coordinates = _total_coordinates(sb, block, names).totals
-        size(coordinates, 2) == length(row) || error(
+        size(coordinates) == size(mu) || error(
             "brm_start: internal: exact-total block of `$(block.predictor)` has " *
-            "$(size(coordinates, 2)) totals per group for $(length(row)) columns")
-        for g in axes(coordinates, 1), k in eachindex(row)
-            push!(writes, (coordinates[g, k], row[k]))
+            "$(size(coordinates)) totals for $(size(mu)) population values")
+        for g in axes(coordinates, 1), k in axes(coordinates, 2)
+            push!(writes, (coordinates[g, k], mu[g, k]))
         end
     end
 end

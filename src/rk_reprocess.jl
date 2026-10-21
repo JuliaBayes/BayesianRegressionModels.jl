@@ -17,6 +17,11 @@
 # The replay's emitted program must equal the fit's, statement for statement:
 # anything a fit site still derived from the new data would show up as a
 # different literal, and is refused rather than evaluated.
+#
+# A design may omit responses (prediction). Each omitted response plans as a
+# `_BRMAbsentResponse`: the fit's route, no values. It is never bound, and
+# RKPPL binds its observation without a value (rkppl-use §14), so values that
+# do not read it evaluate and the density is refused, naming it.
 
 """
     reprocess(rk::RKBRMI, new_data; freeze_constants=true, resample_groups=(),
@@ -42,19 +47,27 @@ returned backend evaluates the same draws on the new rows: densities through
   (`have=(:unconstrained, :b_p_g, ports...)`); everything else stays frozen.
 - `held_out`: the response hold-outs of the replay, as in `RKBRMI`.
 
-`new_data` supplies every data column the model reads, responses included.
+`new_data` supplies every data column the model reads. With
+`freeze_constants=true` it may omit responses: they are bound without values,
+so authored values (`want=(:mu,)`, `@plate` cell outputs) evaluate on the new
+rows, while the density and other queries that read an omitted response are
+refused, naming it. A model whose planning reads the response values (for
+example an `mi(y)` response or a bounded likelihood) needs them.
 """
 function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
         resample_groups=(), held_out=_rk_held_out_names(rk.plan))
     prefix = "RK reprocess"
-    rebound = _brm_rebind_brmi(parent(rk), new_data)
-    freeze_constants || return RKBRMI(rebound; held_out)
+    freeze_constants || return RKBRMI(_brm_rebind_brmi(parent(rk), new_data); held_out)
     groups = _rk_resample_group_set(resample_groups; prefix)
     training = _rk_training_columns(parent(rk))
     unknown = setdiff(groups, keys(training))
     isempty(unknown) || error(
         "$prefix: `resample_groups` names $(sort!(collect(unknown))), which " *
         "is not a data column of the fitted model")
+    absent = Dict{Symbol,Any}(name => _BRMAbsentResponse{eltype(training[name])}(name)
+        for name in _rk_response_names(rk.plan)
+        if haskey(training, name) && !_brm_df_has_column(new_data, name))
+    rebound = _brm_rebind_brmi(parent(rk), _BRMReplayData(new_data, absent))
     _, fitted = _brm_resolve_constants(parent(rk); prefix)
     constants = Dict{Symbol,Any}(c.name => c.value for c in fitted)
     plan = _brm_with_frozen_replay(_BRMFrozenReplay(training, groups)) do
@@ -127,6 +140,20 @@ function _rk_check_replay_groupings(plan, groups::Set{Symbol}; prefix)
             "`freeze_constants=false`")
     end
 end
+
+# Replay data with each omitted response standing in as a `_BRMAbsentResponse`.
+struct _BRMReplayData{D}
+    data::D
+    absent::Dict{Symbol,Any}
+end
+Base.hasproperty(d::_BRMReplayData, key::Symbol) =
+    haskey(getfield(d, :absent), key) || hasproperty(getfield(d, :data), key)
+Base.getproperty(d::_BRMReplayData, key::Symbol) = haskey(getfield(d, :absent), key) ?
+    getfield(d, :absent)[key] : getproperty(getfield(d, :data), key)
+
+# Every response the fit conditions on, held out or not.
+_rk_response_names(plan) = _rk_observed_names(plan)
+_rk_response_names(plan::_RKHeldOutPlan) = _rk_observed_names(plan.parent)
 
 _rk_held_out_names(plan) = ()
 _rk_held_out_names(plan::_RKHeldOutPlan) = Tuple(sort!(collect(plan.held_out)))
