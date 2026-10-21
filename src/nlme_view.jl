@@ -676,6 +676,9 @@ function _rk_nlme_compact_cell_value_and_gradient! end
 function _rk_nlme_population_prior end
 function _rk_nlme_population_prior_value end
 function _rk_nlme_population_prior_value_gradient end
+# Implemented by `BayesianRegressionModelsReactiveKernelsEnzymeExt`: an Enzyme
+# `mode` carrying the runtime-activity setting of the caller's `ad_backend`.
+function _brm_enzyme_mode end
 _brm_nlme_forward_backend(ad_backend) = nothing
 
 # A cell query still addresses the original packed coordinate space. Overlay
@@ -837,7 +840,7 @@ function brm_nlme_model(backend::RKBRMI; ad_backend,
     unit = _brm_nlme_unit_point(backend, view; shared_point)
     sampler = _rk_retained_pointwise_sampler(backend; ad_backend)
     pointwise = _rk_pointwise_query(backend)
-    eta_hvp = _rk_eta_hvp_query(backend, unit)
+    eta_hvp = _rk_eta_hvp_query(backend, unit, ad_backend)
     attribution = _brm_nlme_attribution(backend, view,
         _rk_pointwise_values(pointwise, unit))
     eta_blocks = Int[]
