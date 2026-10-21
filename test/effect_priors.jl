@@ -404,16 +404,22 @@ end
         end
     end)
 
-    # Correlation priors are block-wide by construction: one shared `|ID|`
-    # covariance block spans every predictor that slices it, so there is no
-    # per-predictor correlation to address.
-    @test_throws "correlation priors are block-wide" eval(quote
+    # refused: correlation priors on a shared `|ID|` are block-wide by
+    # construction -- one covariance block spans every predictor that slices
+    # it, so there is no per-predictor correlation to address (decision
+    # `0g7cchs`). `cor(lp, g)` is the address of one predictor's correlated
+    # block grouped by a column without an ID (decision `06ntfvg`), and
+    # whether `p` is an ID is known only once the formula is bound, so this
+    # refusal fires at lowering rather than in the parser.
+    per_predictor_cor = eval(quote
         @brm begin
             eta ~ 1 + (1 + x | p | subject)
             cor(eta, p) ~ LKJCholesky(2, 2)
             y ~ Normal(eta, 1)
         end
     end)
+    @test_throws "correlation priors are block-wide" SBBRMI(
+        per_predictor_cor(df); mod=@__MODULE__, total_groups=())
 
     # Collections in an address slot are DEFERRED, not rejected on principle,
     # so they must fail by name rather than fall through to the generic

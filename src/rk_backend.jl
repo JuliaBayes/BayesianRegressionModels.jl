@@ -462,9 +462,10 @@ struct RKBRMI{P<:BRMI,PL,M}
     plan::PL
     model::M
     # The retained parent is the model the plan lowered: `optional(...)`
-    # priors are already resolved (`_brm_resolve_optional_priors`).
+    # priors and grouping-column addresses are already resolved
+    # (`_brm_resolve_prior_addresses`).
     function RKBRMI(parent::BRMI, plan, model)
-        parent = _brm_resolve_optional_priors(parent)
+        parent = _brm_resolve_prior_addresses(parent)
         new{typeof(parent),typeof(plan),typeof(model)}(parent, plan, model)
     end
 end

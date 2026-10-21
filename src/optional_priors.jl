@@ -116,7 +116,10 @@ Base.@nospecializeinfer function _brm_ranef_address_present(@nospecialize(brmi::
     catch
         return true
     end
-    isnothing(margins) && return _brm_grouping_name_present(brmi, id)
+    if isnothing(margins)
+        reached = _brm_grouping_address_present(brmi, address)
+        return isnothing(reached) ? _brm_grouping_name_present(brmi, id) : reached
+    end
     class === :cor && return true
     predictor = length(address) >= 3 && address[3] !== _EFFECT_COLON ? address[3] : nothing
     coefficient = length(address) == 4 ? address[4] : nothing

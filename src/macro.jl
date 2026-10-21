@@ -28,8 +28,9 @@ name is gensym-ed). The two-argument form bakes `df` in and returns the
 - `effect(lp, coefficient) ~ Normal(location, scale)` — an SBBRMI
   population-coefficient prior override.
 - `sd(lp, ID[, coefficient]) ~ Exponential(scale)` and
-  `cor(:, ID) ~ LKJCholesky(K, eta)` — SBBRMI priors for a shared
-  `|ID|` random-effect block.
+  `cor(:, ID) ~ LKJCholesky(K, eta)` — priors for a shared `|ID|`
+  random-effect block; a block written without an ID is addressed by its
+  grouping column (`sd(lp, g)`, `cor(lp, g)`, see [`effect`](@ref)).
 
 Multiple `~` lines produce a multi-response / distributional model.
 Inside an observed family's argument expression, nested `@brm(expr)` is the
@@ -120,6 +121,7 @@ function assign end
     effect(linear_predictor, coefficient)
     sd(linear_predictor, id[, coefficient])
     cor(:, id)
+    cor(linear_predictor, group)
 
 Address a prior BRM owns, by naming the **parameter** as the head and the
 target in the slots. Every slot is one name or `:`, and `:` means *the
@@ -141,11 +143,36 @@ contrasts, or — for the first categorical term of a predictor without an
 intercept — its `K` cell means, each also addressable as `<column>_lvl_<k>`; `sd` and `cor` address a shared `|ID|` random-effect covariance
 block. `sd`'s trailing coefficient slot may be omitted and means `:`, so
 `sd(:, pk)` is the block-wide scale and `sd(log_ka, pk, weight)` is one
-margin. Because `:` is positional rather than a trailing omission,
+margin, while `sd(log_ka, pk)` sets every margin `log_ka` contributes.
+Because `:` is positional rather than a trailing omission,
 `sd(:, pk, weight)` addresses the `weight` margin across *every* predictor
-slicing the block. Correlation priors are block-wide by construction — one
-shared `|ID|` covariance spans every predictor that slices it — so `cor`
-takes `:` in the predictor slot.
+slicing the block. Correlation priors on a shared `|ID|` are block-wide by
+construction — one covariance spans every predictor that slices it — so
+`cor(:, ID)` takes `:` in the predictor slot.
+
+A random-effect block written without an ID — plain `(… | g)` or uncorrelated
+`(… || g)` — is addressed by its grouping column, as brms' `group =` is:
+
+```julia
+@brm begin
+    mu ~ 1 + c1 + (1 + c1 || probe)
+    log(sigma) ~ 1 + (1 | probe)
+    sd(:, probe)     ~ Exponential(50)   # every margin grouped by `probe`
+    sd(sigma, probe) ~ Exponential(1)    # more specific: `sigma`'s block
+    sd(mu, probe, c1) = 0.5              # a known value
+end
+```
+
+One column can group several independent blocks — each predictor's block and
+one block per `||` term — and an `sd` statement sets every margin of them it
+matches, most specific first. `cor(:, g)` sets the correlation of the one
+correlated block grouped by `g`; with one per predictor, write
+`cor(<linear_predictor>, g)`. `ranef(<linear_predictor|:>, g) ~ TDist(nu)` sets
+the law of the matching blocks. An addressed block lowers as a one-predictor
+`|ID|` block under a generated ID (`|lp__g|`, the `k`-th `||` term
+`|lp__g__nocor__k|`); a block no statement reaches is left as written. An `|ID|`
+block keeps its ID address only, and a name that is both an `|ID|` and the
+grouping column of a block without one is refused as ambiguous.
 
 An interaction term is addressed the way the formula spells it:
 `effect(mu, gen & mathz)` sets one shared `Normal` prior over every
@@ -1641,6 +1668,7 @@ const _TERM_PRIOR_HEAD_EXAMPLE =
 #     effect(<lp|:>, <coefficient|:>)   -> [lp, coefficient]
 #     sd(<lp|:>, <ID>[, <coefficient>]) -> [:sd, ID, lp[, coefficient]]
 #     cor(:, <ID>)                      -> [:cor, ID]
+#     cor(<lp>, <group>)                -> [:cor, group, lp]
 #     sd(<lp|:>, <term>[, <block>])     -> [:term_sd, key, lp[, block]]
 #     simplex(<lp|:>, <term>)           -> [:term_simplex, key, lp]
 #     latent(<lp|:>, <term>)            -> [:term_latent, key, lp]
@@ -1731,14 +1759,15 @@ function _prior_address(head::Symbol, args::Vector{Symbol})
         end
         return full
     elseif head === :cor
+        # `cor(:, ID)`, or `cor(lp, g)` for the correlated block of one
+        # predictor grouped by a column `g` without an `|ID|`. Whether the
+        # target is an ID is known only once the formula is bound, so the
+        # backend refuses a predictor on a shared `|ID|` block.
         length(args) == 2 || error(
-            "@brm: `cor` takes exactly `cor(:, <ID>)`; got `$spelling`.")
-        args[1] === _EFFECT_COLON || error(
-            "@brm: correlation priors are block-wide — one shared `|ID|` " *
-            "covariance block spans every linear predictor that slices it, so " *
-            "there is no per-predictor correlation to address. Write " *
-            "`cor(:, $(args[2]))`, not `$spelling`.")
-        return Symbol[:cor, args[2]]
+            "@brm: `cor` takes exactly `cor(<linear_predictor|:>, <ID|group>)`; " *
+            "got `$spelling`.")
+        return args[1] === _EFFECT_COLON ? Symbol[:cor, args[2]] :
+            Symbol[:cor, args[2], args[1]]
     end
     error("@brm: unknown prior-address head `$head`; valid heads are " *
           join(("`$h`" for h in _PRIOR_HEADS), ", ") * ".")
@@ -1779,6 +1808,19 @@ function _brm_known_value_expr(rhs, lhs)
     only(values)
 end
 
+# The operation key of a prior statement with internal `effect(...)` address
+# `address`: a generated LOCAL NAME. A term key carries `(`/`)`/`,`, which are
+# legal inside a `Symbol` but not in emitted Julia source, so those three
+# characters are folded out. An interaction key's `&` is folded the same way,
+# to the `_x_` the emitted `int_a_x_b` columns already use. Nothing else is
+# touched -- `:` already rode through this key before term addresses existed,
+# and rewriting it would move the generated name of every ALREADY-configured
+# model.
+_brm_prior_statement_key(address) =
+    Symbol("__effect__", replace(join(string.(address), "__"),
+                                 "(" => "_", ")" => "", "," => "_",
+                                 "&" => "_x_"))
+
 function _parse_effect!(lhs::Expr, rhs; info, known::Bool=false, optional::Bool=false)
     head = lhs.args[1]::Symbol
     args = map(_prior_slot, lhs.args[2:end])
@@ -1795,17 +1837,9 @@ function _parse_effect!(lhs::Expr, rhs; info, known::Bool=false, optional::Bool=
         rhs = Expr(:call, _brm_known, _brm_known_value_expr(rhs, lhs))
     end
     address = _prior_address(head, args)
-    # The key becomes a generated LOCAL NAME. A term key carries `(`/`)`/`,`,
-    # which are legal inside a `Symbol` but not in emitted Julia source, so
-    # those three characters are folded out. An interaction key's `&` is
-    # folded the same way, to the `_x_` the emitted `int_a_x_b` columns
-    # already use. Nothing else is touched -- `:` already rode through this
-    # key before term addresses existed, and rewriting it would move the
-    # generated name of every ALREADY-configured model. The ADDRESS itself is
-    # untouched, so diagnostics stay spelled the way the user wrote them.
-    key = Symbol("__effect__", replace(join(string.(address), "__"),
-                                       "(" => "_", ")" => "", "," => "_",
-                                       "&" => "_x_"))
+    # The ADDRESS itself is untouched, so diagnostics stay spelled the way
+    # the user wrote them.
+    key = _brm_prior_statement_key(address)
     haskey(info.alllocals, key) && error(
         "@brm: duplicate `$head($(join(args, ", ")))` prior statement")
     info.alllocals[key] = :local
@@ -2931,7 +2965,7 @@ function _prior_address_spelling(address::Vector{Symbol})
         return class, length(address) == 4 ?
             [predictor, address[2], address[4]] : [predictor, address[2]]
     elseif class === :cor
-        return :cor, [_EFFECT_COLON, address[2]]
+        return :cor, [length(address) >= 3 ? address[3] : _EFFECT_COLON, address[2]]
     elseif class === :term_sd
         return :sd, [address[3], address[2], address[4:end]...]
     elseif haskey(_TERM_PRIOR_CLASS_HEAD, class)
