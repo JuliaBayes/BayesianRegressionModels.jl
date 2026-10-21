@@ -165,9 +165,10 @@ Not feature-complete against brms. The gaps a brms user is most likely to hit:
   residual copulas are not implemented.
 - **No fixed / known covariance groups.** `by=` is the only [`gr`](@ref)
   option — no `cov=`, so no phylogenetic or pedigree random effects.
-- **Autocorrelation shorthands are first-order only.** [`ar_errors`](@ref)
-  gives Gaussian residuals an AR(1) process within each group (brms'
-  `ar(time, gr)` autocorrelation, exact likelihood, gap-aware);
+- **Autocorrelation shorthands are first-order only.** [`ar_errors`](@ref) in
+  a `@plate for p in groups(g)` cell gives Gaussian residuals an AR(1) process
+  within each group (brms' `ar(time, gr)` autocorrelation, exact likelihood,
+  gap-aware);
   [`ar`](@ref)`(time; p=1)` emits an ordinary AR(1) noise column and
   [`dar`](@ref)`(time; p=1)` a direct differenced-AR(1) trajectory. Higher
   orders, MA, ARMA and non-Gaussian residual AR are written as a `@scan`

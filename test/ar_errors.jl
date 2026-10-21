@@ -1,10 +1,11 @@
-# test/ar_errors.jl — per-group AR(1) residuals:
-# `y ~ ar_errors(Normal(mu, sigma), phi; time = day, by = probe)`.
+# test/ar_errors.jl — per-group AR(1) residuals: in a
+# `@plate for p in groups(probe; order = day)` cell,
+# `y[p] ~ ar_errors(Normal(mu[p], sigma), phi; time = day[p])`.
 #
 # Run: julia --startup-file=no --project=test test/ar_errors.jl
 #
-# The shorthand is a source rewrite into a `@plate for` cell holding an
-# observed `@scan` (decision `0det9mo`). Checked here: the printed expansion,
+# The shorthand is a source rewrite into the cell's observed `@scan`
+# (decisions `0det9mo` and `1pnob5t`: the plate is the grouping). Checked here: the printed expansion,
 # its refusals, the RK log density and gradient against independent oracles —
 # a multivariate normal per group with covariance
 # `sigma^2 / (1 - phi^2) * phi^|t_i - t_j|` for shared `sigma` and `phi`, and
@@ -28,14 +29,18 @@ shared_ar(data) = @brm data begin
     phi ~ Uniform(-1, 1)
     sigma ~ Exponential(1)
     mu ~ 1 + x + (1 | probe)
-    y ~ ar_errors(Normal(mu, sigma), phi; time = day, by = probe)
+    @plate for p in groups(probe; order = day)
+        y[p] ~ ar_errors(Normal(mu[p], sigma), phi; time = day[p])
+    end
 end
 
 varying_ar(data) = @brm data begin
     atanh(phi) ~ 1 + (1 | probe)
     log(sigma) ~ 1 + (1 | probe)
     mu ~ 1 + x
-    y ~ ar_errors(Normal(mu, sigma), phi; time = day, by = probe)
+    @plate for p in groups(probe; order = day)
+        y[p] ~ ar_errors(Normal(mu[p], sigma[p]), phi[p]; time = day[p])
+    end
 end
 
 # Each group's rows in time order.
@@ -70,6 +75,9 @@ function ar_recursion_loglik(y, mu, sigma, phi, data)
 end
 
 
+# The same kind of series, pre-grouped: one vector per subject.
+const SCAN_PANEL = (; y=[[0.1, 0.3], [0.2, -0.1, 0.4]], day=[[1, 2], [1, 2, 4]])
+
 const PROBES = sort(unique(PANEL.probe))
 probe_index(data) = [findfirst(==(g), PROBES) for g in data.probe]
 
@@ -90,10 +98,23 @@ rk_density(backend, u) = LogDensityProblems.logdensity(
                     end
                 end
             end""", sprint(show, shared_ar(PANEL)))
-        # Row-varying values are read per group, shared ones bare.
+        # Values read as `x[p]` vary along the series, bare ones are shared.
         varying = sprint(show, varying_ar(PANEL))
         @test occursin("y[p][1] ~ Normal(mu[p][1], sigma[p][1] / sqrt(1 - phi[p][1] ^ 2))", varying)
         @test occursin("phi[p][t] ^ k", varying)
+        # Any argument that reads the group's rows is indexed entry by entry,
+        # directly or through a cell local; anything else is shared.
+        exprs = sprint(show, @brm PANEL begin
+            phi ~ Uniform(-1, 1)
+            log_s ~ Normal(0, 1)
+            mu ~ 1 + x + (1 | probe)
+            @plate for p in groups(probe; order = day)
+                m = mu[p] .+ 0.5
+                y[p] ~ ar_errors(Normal(m, exp(log_s)), phi; time = day[p])
+            end
+        end)
+        @test occursin("y[p][1] ~ Normal(m[1], exp(log_s) / sqrt(1 - phi ^ 2))", exprs)
+        @test occursin("y[p][t] ~ Normal(m[t] + phi ^ k * (y[p][t - 1] - m[t - 1])", exprs)
         # The shorthand and its expansion are one model.
         written = @brm PANEL begin
             phi ~ Uniform(-1, 1)
@@ -118,16 +139,35 @@ rk_density(backend, u) = LogDensityProblems.logdensity(
     @testset "refusals at the formula boundary" begin
         @test_throws "Gaussian innovations" @eval @brm PANEL begin
             phi ~ Uniform(-1, 1)
-            y ~ ar_errors(StudentT(3, 0, 1), phi; time = day, by = probe)
+            @plate for p in groups(probe; order = day)
+                y[p] ~ ar_errors(StudentT(3, 0, 1), phi; time = day[p])
+            end
         end
-        @test_throws "bind `exp(s)` to a name" @eval @brm PANEL begin
+        # refused: the shorthand is the per-group recurrence over long-format
+        # rows (decision 0det9mo); a cell over pre-grouped data writes its @scan.
+        @test_throws "write the `@scan` it stands for" @eval @brm SCAN_PANEL begin
             phi ~ Uniform(-1, 1)
-            s ~ Normal(0, 1)
-            y ~ ar_errors(Normal(0, exp(s)), phi; time = day, by = probe)
+            @plate for i in eachindex(y)
+                y[i] ~ ar_errors(Normal(0, 1), phi; time = day[i])
+            end
         end
-        @test_throws "time = t, by = g" @eval @brm PANEL begin
+        @test_throws "time = t[p]" @eval @brm PANEL begin
             phi ~ Uniform(-1, 1)
-            y ~ ar_errors(Normal(0, 1), phi; by = probe)
+            @plate for p in groups(probe; order = day)
+                y[p] ~ ar_errors(Normal(0, 1), phi)
+            end
+        end
+        # refused: the grouping is the plate's, not a keyword (decision
+        # 1pnob5t, guiding principle 198kldn).
+        @test_throws "takes no `by=`" @eval @brm PANEL begin
+            phi ~ Uniform(-1, 1)
+            @plate for p in groups(probe; order = day)
+                y[p] ~ ar_errors(Normal(0, 1), phi; time = day[p], by = probe)
+            end
+        end
+        @test_throws "one series per `@plate` cell" @eval @brm PANEL begin
+            phi ~ Uniform(-1, 1)
+            y ~ ar_errors(Normal(0, 1), phi; time = day, by = probe)
         end
         # A repeated time has no AR(1) step; the gap rule needs whole steps.
         @test_throws "repeats time 3 in group \"p2\"" shared_ar(
@@ -176,7 +216,9 @@ rk_density(backend, u) = LogDensityProblems.logdensity(
             atanh(phi) ~ 1 + (1 | ph | probe)
             log(sigma) ~ 1 + (1 | sg | probe)
             mu ~ 1 + x
-            y ~ ar_errors(Normal(mu, sigma), phi; time = day, by = probe)
+            @plate for p in groups(probe; order = day)
+                y[p] ~ ar_errors(Normal(mu[p], sigma[p]), phi[p]; time = day[p])
+            end
         end
         backend, problem = consumer_problem(model(PANEL))
         names = coordinate_names(backend.model.layout)

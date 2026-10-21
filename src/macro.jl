@@ -740,8 +740,6 @@ _brm(x::Expr; df=nothing) = begin
     lhs, x = named ? x.args : (:($(gensym("model"))(__df__)), x)
     source = Base.remove_linenums!(Meta.isexpr(x, :block) ?
         deepcopy(x) : Expr(:block, deepcopy(x)))
-    # `y ~ ar_errors(...)` is the plate + scan it expands to (`ar_errors.jl`).
-    x, ar_errors_checks = _brm_expand_ar_errors(x)
     alllocals = OrderedDict{Symbol,Symbol}()
     jointkeys = Set{Symbol}()
     captures = Set{Symbol}()
@@ -779,7 +777,6 @@ _brm(x::Expr; df=nothing) = begin
         [:($nonlocal = @getproperty __ddf__.$nonlocal) for nonlocal in nonlocals]...,
         :((;$(maybelocals...)) = $maybedata(__df__)),
         x,
-        ar_errors_checks...,
         :(__caps__ = $capturedata(__df__, ($(map(QuoteNode, real_captures)...),))),
         finalize,
     )
@@ -859,9 +856,19 @@ parse!(x::Expr; info) = if x.head == :block
 elseif _is_brm_plate(x)
     groupings = hasproperty(info, :groupings) ? info.groupings : Dict{Symbol,_BRMPlateGrouping}()
     grouped_reads = hasproperty(info, :grouped_reads) ? info.grouped_reads : Set{Symbol}()
+    # `y[p] ~ ar_errors(...)` is the `@scan` it states (`ar_errors.jl`); its
+    # time checks run when the model is built.
+    x, ar_errors_checks = _brm_expand_cell_ar_errors(x)
     kernel, inbody_ragged = _brm_plate_kernel(x; groupings, grouped_reads)
     parsed = parse!(kernel; info)
+    isempty(ar_errors_checks) || (parsed = Expr(:block, parsed, ar_errors_checks...))
     inbody_ragged ? Expr(:block, :($_brm_depwarn_plate_inbody_ragged()), parsed) : parsed
+elseif _is_brm_ar_errors(x)
+    # The series and its grouping are the plate's (decision `1pnob5t`).
+    error("@brm: `ar_errors(...)` observes one series per `@plate` cell: write " *
+        "`@plate for p in groups(g; order = t)` with " *
+        "`y[p] ~ ar_errors(Normal(mu[p], sigma), phi; time = t[p])` in its cell; got " *
+        "`$(sprint(Base.show_unquoted, x))`")
 elseif _is_brm_plate_grouping(x)
     # Collected by `_brm_plate_groupings` before parsing and consumed by the
     # `@plate for` rewrite; the declaration itself emits nothing.

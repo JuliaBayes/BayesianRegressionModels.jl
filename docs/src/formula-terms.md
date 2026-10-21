@@ -678,7 +678,7 @@ pair order. Neither can yet be combined with `cdar` cells.
 | `mi(y)` | brms-style observed/imputed split — missing rows become parameters drawn from the same family |
 | [`weighted(y, w)`](@ref) | typed observation weights on the likelihood |
 | `truncated`, `censored`, [`interval_censored`](@ref) | truncation and censoring — see [Likelihoods](@ref) |
-| [`ar_errors`](@ref)`(Normal(mu, sigma), phi; time, by)` | AR(1) residuals within each `by` group, in `time` order — shorthand for a `@plate` + `@scan` recurrence (below) |
+| [`ar_errors`](@ref)`(Normal(mu[p], sigma), phi; time = t[p])` | in a `@plate for p in groups(g; order = t)` cell: AR(1) residuals along the group's rows — shorthand for the cell's `@scan` recurrence (below) |
 
 `mm`'s membership weights are part of the random-effect contribution and are a
 different thing from `weighted(...)`, which scales the likelihood.
@@ -723,9 +723,11 @@ end
 read bare. Observing the response entry by entry gives each row its
 conditional density given the group's earlier rows, so this block is the exact
 likelihood of AR(1) residuals observed on the recorded days, and with `y`
-omitted it draws whole trajectories. `y ~ ar_errors(Normal(mu, sigma), phi;
-time = day, by = probe)` is shorthand for exactly this block; write the block
-when you need another family, a higher order or another start or gap rule.
+omitted it draws whole trajectories. In the same cell,
+`y[p] ~ ar_errors(Normal(mu[p], sigma), phi; time = day[p])` is shorthand for
+exactly this `@scan`; write the block when you need another family, a higher
+order or another start or gap rule. The grouping is the plate's: there is no
+`by=` keyword.
 
 ### Downstream grouped terms: the reusable-term pattern
 

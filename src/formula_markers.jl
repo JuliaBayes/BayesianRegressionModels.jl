@@ -335,19 +335,24 @@ _check_term_kwargs(::typeof(ragged), kwargs) =
     "indexed axis>)`.")
 
 """
-    y ~ ar_errors(Normal(mu, sigma), phi; time = t, by = g)
+    @plate for p in groups(g; order = t)
+        y[p] ~ ar_errors(Normal(mu[p], sigma), phi; time = t[p])
+    end
 
-Gaussian observations whose residuals follow an AR(1) process within each group
-of `g`, in the order of the integer time column `t`:
-`y[t] - mu[t] = phi^k * (y[t-k] - mu[t-k]) + e[t]`, where `k` is the number of
-time steps since the group's previous row.
+Gaussian observations whose residuals follow an AR(1) process along each cell's
+series, in the order of the integer time column `t`:
+`y[s] - mu[s] = phi^k * (y[s-k] - mu[s-k]) + e[s]`, where `k` is the number of
+time steps since the previous entry. The plate is the grouping: over
+long-format rows, `groups(g; order = t)` gives one cell per group with its rows
+in `t` order (see [`kernel`](@ref)); over pre-grouped data, `eachindex(...)`
+gives one cell per stored series.
 
 `ar_errors` is shorthand for the recurrence it states. `@brm` replaces the
-statement by this `@plate` / `@scan` source before building the model, and
-`show` and the descriptor print that expansion:
+statement by this `@scan` before building the model, and `show` and the
+descriptor print that expansion:
 
 ```julia
-@plate for p in groups(g; order = t)    # one cell per group, rows in `t` order
+@plate for p in groups(g; order = t)
     @scan begin
         y[p][1] ~ Normal(mu[p][1], sigma / sqrt(1 - phi ^ 2))
         for s in 2:length(t[p])
@@ -359,26 +364,25 @@ statement by this `@plate` / `@scan` source before building the model, and
 end
 ```
 
-- `sigma` is the innovation SD. The first row of each group comes from the
-  stationary law `Normal(mu, sigma / sqrt(1 - phi^2))`, so `|phi| < 1` is
-  required. This is the exact AR(1) likelihood (brms' `ar(cov = TRUE)`).
+- `sigma` is the innovation SD. The first entry comes from the stationary law
+  `Normal(mu, sigma / sqrt(1 - phi^2))`, so `|phi| < 1` is required. This is
+  the exact AR(1) likelihood (brms' `ar(cov = TRUE)`).
 - A gap of `k` steps uses `phi^k` and innovation variance
   `sigma^2 (1 - phi^(2k)) / (1 - phi^2)`: the exact density of the process
   observed only on the recorded steps. Without gaps this is the plain recursion.
-- Rows may come in any order; each group's rows are taken in `t` order. Within
-  a group every time must be a whole number and occur once.
-- `mu`, `sigma` and `phi` are names or numbers. A name a formula declares
-  (`mu ~ 1 + x + (1 | g)`, `log(sigma) ~ 1 + (1 | g)`,
-  `atanh(phi) ~ 1 + (1 | g)`) or a data column varies by row and is read as
-  `mu[p]`, as above; a name with a distribution prior (`phi ~ Uniform(-1, 1)`)
-  is shared and read bare, as `sigma` and `phi` are above.
-- Only `Normal` innovations and order 1. For another family, a higher order or
-  a different start or gap rule, write the `@plate for` / `@scan` recurrence
-  directly; the expansion above is the template.
+- Each series' times must be whole numbers, each at most once; the model
+  refuses others when it is built, naming the group and value.
+- The cell's spelling says what varies along the series: `mu[p]` (a predictor
+  with one value per row, a data column) is read entry by entry, a bare name or
+  a number is shared. `atanh(phi) ~ 1 + (1 | g)` read as `phi[p]` lets the
+  persistence vary by group.
+- `ar_errors` takes no `by=`: the grouping is the plate's (decision `1pnob5t`).
+  Only `Normal` innovations and order 1. For another family, a higher order or
+  a different start or gap rule, write the `@scan` above yourself.
 
-Each row's pointwise log likelihood is its conditional density given the
-group's earlier rows. With `y` omitted, the same block draws whole AR(1)
-trajectories per group.
+Each entry's pointwise log likelihood is its conditional density given the
+series' earlier entries. With `y` omitted, the same cell draws whole AR(1)
+trajectories.
 """
 function ar_errors end
 
