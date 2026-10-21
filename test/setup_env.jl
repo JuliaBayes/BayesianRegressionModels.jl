@@ -100,7 +100,10 @@ const PINS = [
     # `@rkppl` submodel (c4008d62, snag per-cell-submode-cd87e071), and
     # contains ce48fc77 (`rk_ode_rk45_tol`), 9bef9c04 (per-row provider-law
     # subject cells) and fef26022 (queries skip unread plate outputs).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "6c7e18af9b824792f6a1a3861320df94d62bb33a"),  # main
+    # d92d6677 adds ac01d1f1d (`prepare_predictive`) and 2512d6b1c
+    # (`predictive_node` / `predictive_targets` for a caller's own vectorized
+    # cut), which test/rk_predictive.jl reads through `rk_bound_plan`.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "d92d667752b842f215d71b7efc893441b14d3c05"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.5); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "d16c4efb72b963f45de9d6f632c38d46706c23e1"),  # main

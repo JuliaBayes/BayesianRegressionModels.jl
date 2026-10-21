@@ -170,7 +170,7 @@ export truncated, censored, interval_censored
 # Fusion append API (cross-package: the RK reporter resolves this by name).
 export rk_translate_artifact
 export rk_artifact_inputs
-export rk_bound_data
+export rk_bound_data, rk_bound_plan
 export rkppl_model, rk_model
 # Re-export every Distributions.jl family BRM lowers so
 # `using BayesianRegressionModels` is the only import a model file needs — no
