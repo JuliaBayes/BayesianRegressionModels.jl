@@ -5193,6 +5193,11 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         freeze || throw(ArgumentError("total-coefficient replay requires freeze_constants=true; rebuild the model to fit a different population/random design basis"))
         new_data[key] = copy(e.const_)
         new_preproc[key] = e
+    elseif e.kind === :total_group_design
+        freeze || throw(ArgumentError("total-coefficient replay requires freeze_constants=true; rebuild the model to fit different group-level predictors"))
+        _sb_total_check_group_design(e, df)
+        new_data[key] = copy(e.const_.W)
+        new_preproc[key] = e
     elseif e.kind === :s2z_weights
         freeze || throw(ArgumentError("S2Z replay requires freeze_constants=true; centering weights are fitted-level quantities"))
         levels = _sb_df_column(df, e.raw_ref)
@@ -5536,6 +5541,46 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         error("sbimpl: reprocess: unknown preproc kind `$(e.kind)` for key `$key`")
     end
     push!(handled, key)
+    nothing
+end
+
+# A replay frame's columns, read the way population-design replay reads data.
+struct _SBTotalReplayData{D}
+    df::D
+end
+Base.getindex(d::_SBTotalReplayData, key::Symbol) = _sb_df_column(d.df, key)
+Base.get(d::_SBTotalReplayData, key::Symbol, default) =
+    _sb_df_has_column(d.df, key) ? _sb_df_column(d.df, key) : default
+
+# A replay keeps the fitted totals, which already contain each group's
+# group-level predictor values (`W`). Every replay row must therefore carry its
+# group's fitted value: a changed value has no representation in the totals.
+function _sb_total_check_group_design(e::PreprocEntry, df)
+    record = e.const_
+    isempty(record.columns) && return nothing
+    group = record.group
+    raw = _sb_df_column(df, group)
+    raw isa AbstractVector || error(
+        "sbimpl: reprocess: random-effects grouping column `$group` must be a " *
+        "vector, got $(typeof(raw))")
+    idx = _sb_apply_group_levels(record.levels, raw, group)
+    data = _SBTotalReplayData(df)
+    cache = Dict{Symbol,Vector{Float64}}()
+    for entry in record.columns
+        x = _brm_replay_population_column(entry.column, data, cache)
+        z = _brm_replay_population_column(entry.slope, data, cache)
+        for (r, g) in pairs(idx)
+            expected = (isnothing(z) ? 1.0 : z[r]) * record.W[g, entry.position]
+            isapprox(x[r], expected; rtol=1e-12) && continue
+            error("sbimpl: reprocess: population column `$(entry.column.label)` of " *
+                  "`$(e.raw_ref)` is integrated into the exact `$group` totals as a " *
+                  "group-level predictor, so the fitted totals already contain its value " *
+                  "for every `$group` level. Row $r (level `$(record.levels[g])`) has " *
+                  "$(x[r]), but the fit implies $expected. A changed group-level value " *
+                  "has no representation in the fitted totals; refit, or use " *
+                  "`generative_plan(plan, new_df)` and `transport_draws` for new groups.")
+        end
+    end
     nothing
 end
 

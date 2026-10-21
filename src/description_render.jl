@@ -235,9 +235,12 @@ _brmd_law_math(::Val{:uniform},a) = "\\operatorname{Uniform}(" * (isempty(a) ? "
 _brmd_law_math(::Val{:student_t_standard},a) = "t_{"*only(a)*"}(0,1)"
 _brmd_law_math(::Val{:student_t_location_scale},a) = "t_{"*a[1]*"}("*join(a[2:3],",")*")"
 _brmd_law_math(::Val{:mvnormal_cholesky},a) = "\\mathcal N(" * a[1] * "," * a[2] * a[2] * "^{\\mathsf T})"
-# The absorbed coefficients' prior p(beta) is integrated out exactly.
-_brmd_law_math(::Val{:exact_total},a) = "\\int\\prod_{i}\\mathcal N\\left(\\mathbf t_{i}\\mid A\\boldsymbol\\beta,\\operatorname{diag}\\left("*
-    a[1]*"\\right)^{2}\\right)\\,p(\\boldsymbol\\beta)\\,d\\boldsymbol\\beta"
+# The absorbed coefficients' prior p(beta) is integrated out exactly. With
+# group-level predictors each group's mean uses its own column values w_i.
+_brmd_exact_total_math(sds,group_level::Bool=false) = "\\int\\prod_{i}\\mathcal N\\left(\\mathbf t_{i}\\mid "*
+    (group_level ? "A(\\mathbf w_{i}\\circ\\boldsymbol\\beta)" : "A\\boldsymbol\\beta")*",\\operatorname{diag}\\left("*
+    sds*"\\right)^{2}\\right)\\,p(\\boldsymbol\\beta)\\,d\\boldsymbol\\beta"
+_brmd_law_math(::Val{:exact_total},a) = _brmd_exact_total_math(a[1])
 _brmd_law_math(::Val{L},a) where L = "\\operatorname{" * _brmd_escape(L) * "}(" * join(a,",") * ")"
 _brmd_law_prose(::Val{:normal_sd}) = "Gaussian distribution; the second argument is the residual standard deviation."
 _brmd_law_prose(::Val{:standard_normal}) = "Standard Gaussian distribution."
@@ -278,6 +281,8 @@ function _brmd_distribution_math(c,x::BRMDescriptionComponent)
     law===:affine && return "\\operatorname{LocationScale}("*
         brm_description_math(c,x.arguments[1])*","*brm_description_math(c,x.arguments[2])*","*
         _brmd_distribution_math(c,x.arguments[3])*")"
+    law===:exact_total && return _brmd_exact_total_math(
+        brm_description_math(c,x.arguments[1]),haskey(x.keywords,:group_columns))
     _brmd_law_math(Val(law),map(a -> brm_description_math(c,a),x.arguments))
 end
 _brmd_distribution_math(c,x) = brm_description_math(c,x)
@@ -899,11 +904,23 @@ function _brmd_builtin_kind(::Val{:total_effect},c)
     prose=String["`$(c.provenance.owner)` samples its `$(k.group)` group totals directly as exact total coefficients. The total of column k for group i is the population part (Aβ)ₖ plus the deviation of that column's random-effect block. The absorbed population coefficients β ($(join((string(l) for l in k.population_columns),", "))) keep their declared priors from the effective inventory and are integrated out exactly: the totals carry the marginal density and the posterior of totals and SDs is that of the conventional parameterization. β is recovered from its exact conditional Gaussian in generated quantities; m and q are the prior locations and precisions of β."]
     isempty(k.mixture) || push!(prose,"Student-t population priors use their exact Gaussian scale-mixture representation: coefficient a has precision qₐλₐ with λₐ ~ Gamma(νₐ/2, νₐ/2), inventoried separately; coefficients without a mixture have λₐ = 1.")
     any(iszero,k.precision) && push!(prose,"A coefficient with zero prior precision has an improper flat prior and is integrated against constant density.")
-    BRMDescriptionFragment(prose=Tuple(prose),equations=(
+    group_columns=get(k,:group_columns,())
+    isempty(group_columns) && return BRMDescriptionFragment(prose=Tuple(prose),equations=(
         "\\mathbf t_{i}=A\\boldsymbol\\beta+\\mathbf b_{i},\\quad "*beta*",\\quad "*deviations,
         "A="*_brmd_matrix_math(k.A)*",\\quad m="*brm_description_math(c,k.location)*",\\quad q="*brm_description_math(c,k.precision),
         "p(\\mathbf t\\mid\\mathrm{SD})="*_brmd_law_math(Val(:exact_total),(sds,)),
         "\\boldsymbol\\beta\\mid\\mathbf t\\sim\\mathcal N\\left(Q^{-1}h,Q^{-1}\\right),\\quad Q="*precision*"+J\\,A^{\\mathsf T}"*sd*"^{-2}A,\\quad h="*precision*"m+A^{\\mathsf T}"*sd*"^{-2}\\sum_{i=1}^{J}\\mathbf t_{i}"),
+        covers=(c.id,))
+    push!(prose,"$(join(("`$l`" for l in group_columns),", ")) $(length(group_columns)==1 ? "is a group-level predictor" : "are group-level predictors"): constant within each `$(k.group)` level, or a random slope column times a per-level value. Group i's population part is (A(wᵢ∘β))ₖ, where wᵢ holds 1 for a coefficient matched to a random column and level i's value of each group-level column; W stacks the wᵢ.")
+    weights="\\mathbf w_{i}=\\left["*join((label in group_columns ? "{"*brm_description_symbol(c,label)*"}_{i}" : "1"
+        for label in k.population_columns),",")*"\\right]^{\\mathsf T}"
+    rows="\\mathbf a_{k}"
+    BRMDescriptionFragment(prose=Tuple(prose),equations=(
+        "\\mathbf t_{i}=A(\\mathbf w_{i}\\circ\\boldsymbol\\beta)+\\mathbf b_{i},\\quad "*beta*",\\quad "*weights*",\\quad "*deviations,
+        "A="*_brmd_matrix_math(k.A)*",\\quad m="*brm_description_math(c,k.location)*",\\quad q="*brm_description_math(c,k.precision),
+        "p(\\mathbf t\\mid\\mathrm{SD})="*_brmd_exact_total_math(sds,true),
+        "\\boldsymbol\\beta\\mid\\mathbf t\\sim\\mathcal N\\left(Q^{-1}h,Q^{-1}\\right),\\quad Q="*precision*"+\\sum_{k}\\mathrm{SD}_{k}^{-2}\\,("*rows*rows*"^{\\mathsf T})\\circ(W^{\\mathsf T}W),\\quad h="*precision*"m+\\sum_{k}\\mathrm{SD}_{k}^{-2}\\,"*rows*"\\circ(W^{\\mathsf T}\\mathbf t_{\\cdot k})",
+        "\\mathbf a_{k}^{\\mathsf T}\\text{ is row }k\\text{ of }A,\\quad \\mathbf t_{\\cdot k}=[t_{1k},\\ldots,t_{Jk}]^{\\mathsf T}"),
         covers=(c.id,))
 end
 _brmd_builtin_kind(::Val{K},_c) where K = nothing
@@ -988,6 +1005,7 @@ function brm_description(d::BRMDescriptor; hooks=(),labels=Dict(),prior_anchors=
             blocks=Tuple(g.key for g in groups if haskey(g,:total) && g.block.binding===t.name),
             columns=b.columns,population_columns=b.population_columns,A=_brmd_snapshot(b.A),
             location=_brmd_snapshot(b.location),precision=_brmd_snapshot(b.precision),mixture=Tuple(b.mixture))
+        isempty(b.group_columns) || (kwargs=merge(kwargs,(; group_columns=b.group_columns)))
         push!(roots,_brmd_component(env,(:total_effect,b.predictor),:total_effect,nothing,(),kwargs;outputs))
     end
     for prior in priors

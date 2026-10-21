@@ -11,7 +11,15 @@ end, (;), @__MODULE__)
 
 # Compile-time information only. The corresponding numerical design and prior
 # constants live in model data; descriptors/replay use the same binding record.
-"""Fitted design, prior and coordinate identities for one exact total-coefficient block."""
+"""
+Fitted design, prior and coordinate identities for one exact total-coefficient block.
+
+Group `g`'s total of random column `c` has mean `sum_p A[c,p] * W[g,p] * beta[p]`
+over the absorbed population coefficients `beta` (`population_columns`). `W` is
+1 for a coefficient whose column matches a random column; a group-level
+predictor (`group_columns`: a column constant within each group, or a random
+slope column times a per-group value) carries its per-group value.
+"""
 struct TotalEffectBlock
     predictor::Symbol
     group::Symbol
@@ -23,7 +31,9 @@ struct TotalEffectBlock
     group_count::Symbol
     columns::Tuple
     population_columns::Tuple
+    group_columns::Tuple
     A::Matrix{Float64}
+    W::Matrix{Float64}
     location::Vector{Float64}
     precision::Vector{Float64}
     mixture::Vector{Int}
@@ -47,6 +57,9 @@ function _total_coordinates(model, block, names)
     (;totals,scales,mixture)
 end
 
+# Each group's mean total `A * (W[g,:] .* beta)`, groups × random columns.
+_total_location(block, beta) = block.W*Diagonal(beta)*transpose(block.A)
+
 function _total_conditional(block, coordinates, draw)
     totals = draw[coordinates.totals]
     tau = exp.(draw[coordinates.scales])
@@ -54,11 +67,13 @@ function _total_conditional(block, coordinates, draw)
     for (m,c) in pairs(block.mixture)
         precision[c] *= exp(draw[coordinates.mixture[m]])
     end
-    J = size(totals,1)
-    Dinv = Diagonal(inv.(tau.^2))
-    Q = Symmetric(J*block.A'*Dinv*block.A + Diagonal(precision))
+    A, W = block.A, block.W
+    G = transpose(W)*W
+    WT = transpose(W)*totals
+    Q = Symmetric(Diagonal(precision) +
+        sum((A[c,:]*transpose(A[c,:])) .* G ./ tau[c]^2 for c in axes(A,1)))
     factor = cholesky(Q)
-    h = block.A'*Dinv*vec(sum(totals;dims=1)) + precision.*block.location
+    h = precision.*block.location + sum(A[c,:] .* WT[:,c] ./ tau[c]^2 for c in axes(A,1))
     (;mean=factor\h, factor, tau, totals)
 end
 
@@ -93,7 +108,7 @@ function recover_population_draws(model, draws::AbstractMatrix, names;
             beta = conditional.mean + conditional.factor.U\randn(rng,length(conditional.mean))
             population[i,:] = beta
             totals[i,:,:] = conditional.totals
-            deviations[i,:,:] = conditional.totals .- transpose(block.A*beta)
+            deviations[i,:,:] = conditional.totals .- _total_location(block,beta)
         end
         out[block.predictor] = (;population,totals,deviations,
             population_columns=block.population_columns,columns=block.columns)
@@ -138,16 +153,17 @@ function _sampled_total_blocks(model,caller,remedy)
 end
 
 # One scalar cell per sampled total (group, coefficient), column-major. Each
-# has a constant location (its prior total), a log-scale coordinate and the
-# compiled frame c = 1. The WarmupHMC wrapper and the pilot selector share this
-# order. A generated block has no sampler coordinate and contributes no cell.
+# has a constant location (its prior total, which a group-level predictor makes
+# group-specific), a log-scale coordinate and the compiled frame c = 1. The
+# WarmupHMC wrapper and the pilot selector share this order. A generated block
+# has no sampler coordinate and contributes no cell.
 function _total_centering_cells(model,names,blocks=_total_blocks_by_placement(model).sampled)
     indices,scales,locations = Int[],Int[],Float64[]
     for block in blocks
         coords = _total_coordinates(model,block,names)
-        mu = block.A*block.location
+        mu = _total_location(block,block.location)
         for k in axes(coords.totals,2), g in axes(coords.totals,1)
-            push!(indices,coords.totals[g,k]);push!(scales,coords.scales[k]);push!(locations,mu[k])
+            push!(indices,coords.totals[g,k]);push!(scales,coords.scales[k]);push!(locations,mu[g,k])
         end
     end
     (;indices,scales,locations,targets=ones(length(indices)))
@@ -283,13 +299,26 @@ function _sb_total_plan(brmi, prepared, predictor, overrides, buckets, sd_overri
     isnothing(all_priors) && (all_priors = fill(nothing,length(design.columns)))
     infos = map(_sb_total_population_prior,all_priors)
     any(i -> !isnothing(maps[i]) && isnothing(infos[i]),eachindex(maps)) && return nothing
-    absorbed = findall(i -> !isnothing(maps[i]) && !isnothing(infos[i]),eachindex(maps))
-    isempty(absorbed) && return nothing
-    A = hcat((maps[i] for i in absorbed)...)
-    rank(A) == size(A,2) || return nothing
+    matched = findall(i -> !isnothing(maps[i]) && !isnothing(infos[i]),eachindex(maps))
+    isempty(matched) && return nothing
+    rank(hcat((maps[i] for i in matched)...)) == length(matched) || return nothing
+    indices, levels = first(plans).indices, first(plans).levels
+    group_level = _sb_total_group_level_columns(prepared.context.data,target,group,design,
+        columns,maps,infos,matched,indices,levels)
+    absorbed = sort!(vcat(matched,collect(keys(group_level))))
+    A = hcat((haskey(group_level,i) ? _sb_total_unit(length(columns),group_level[i].column) :
+              maps[i] for i in absorbed)...)
+    W = hcat((haskey(group_level,i) ? group_level[i].values : ones(length(levels))
+              for i in absorbed)...)
     remaining = setdiff(collect(eachindex(maps)),absorbed)
     frozen = _sb_frozen_preproc_entry(prepared.context.data,Symbol(:total_A_,target),:total_basis,target)
     isnothing(frozen) || (A = copy(frozen.const_))
+    # What a replay needs to check a group-level column against the fitted W:
+    # its design column, the random column it multiplies and its W position.
+    group_records = Tuple((; position=findfirst(==(i),absorbed),
+        column=_sb_design_column_record(design.columns[i]),
+        slope=_sb_design_column_record(columns[group_level[i].column]))
+        for i in absorbed if haskey(group_level,i))
     prior_info = infos[absorbed]
     scale_priors = Any[]
     # Per total column: the declared `|ID|` (or `nothing`) and whether an
@@ -335,9 +364,108 @@ function _sb_total_plan(brmi, prepared, predictor, overrides, buckets, sd_overri
         getf(prior) in (Normal,LogNormal,Cauchy,Exponential,TDist,LocationScale,Gamma) || return nothing
         isempty(_sb_prior_references(_sb_effect_prior_arg(prior))) || return nothing
     end
-    (; target,group,columns,design,A,prior_info,scale_priors,column_ids,scale_configured,claimed,absorbed,remaining,
-       remaining_priors=all_priors[remaining],
-       indices=first(plans).indices,levels=first(plans).levels)
+    (; target,group,columns,design,A,W,group_records,prior_info,scale_priors,column_ids,scale_configured,
+       claimed,absorbed,remaining,remaining_priors=all_priors[remaining],indices,levels)
+end
+
+_sb_total_unit(k,c) = (u = zeros(k,1); u[c] = 1.; u)
+
+# Stacked (group, random column) × coefficient design of the totals' mean.
+_sb_total_effective_design(A,W) = reduce(vcat,(W .* transpose(A[c,:]) for c in axes(A,1)))
+
+# Per-group `w` with `x[r] == z[r] * w[group of r]` on every row, or `nothing`.
+# A group whose rows all have `z == 0` fixes no value: it reads 0, its rows
+# must have `x == 0`, and `determined` is false for it.
+function _sb_total_group_values(x,z,indices,J)
+    values, determined = zeros(J), falses(J)
+    for (r,g) in pairs(indices)
+        if iszero(z[r])
+            iszero(x[r]) || return nothing
+        elseif determined[g]
+            isapprox(x[r],z[r]*values[g];rtol=1e-12) || return nothing
+        else
+            values[g], determined[g] = x[r]/z[r], true
+        end
+    end
+    (; values, determined)
+end
+
+# The one random column `x` is a per-group multiple of, or `nothing` when none
+# or several are.
+function _sb_total_group_level(x,columns,indices,J)
+    found = nothing
+    for (c,z) in pairs(columns)
+        fit = _sb_total_group_values(x,z.values,indices,J)
+        isnothing(fit) && continue
+        isnothing(found) || return nothing
+        found = (; column=c, fit.values)
+    end
+    found
+end
+
+# Group-level predictors join the totals' mean through W: a population column
+# identical on every row of each group joins the intercept total, and one equal
+# to a random slope column times a per-group value joins that slope's total.
+# They are found on the fitted rows, kept only while the totals' mean design
+# stays of full column rank, and then frozen: a rebuild (`generative_plan(plan,
+# new_df)`) absorbs exactly the fitted columns, checks that they are still
+# group-level on its rows, and keeps the fitted value of every fitted group.
+function _sb_total_group_level_columns(data,target,group,design,columns,maps,infos,
+                                       matched,indices,levels)
+    J = length(levels)
+    out = Dict{Int,NamedTuple}()
+    fitted = _sb_frozen_preproc(data)
+    frozen = _sb_frozen_preproc_entry(data,_sb_total_group_design_name(target),
+                                      :total_group_design,target)
+    if isnothing(frozen)
+        # A fit recorded before group-level absorption has a basis but no W
+        # record; its rebuild keeps that representation.
+        !isnothing(fitted) && haskey(fitted,_sb_total_basis_name(target)) && return out
+        effective = _sb_total_effective_design(hcat((maps[i] for i in matched)...),ones(J,length(matched)))
+        for (i,column) in pairs(design.columns)
+            isnothing(maps[i]) && !isnothing(infos[i]) && !isnothing(column.source) || continue
+            # A String column's level indicators stay sampled, like a
+            # CategoricalVector column's contrast block.
+            _brm_is_level_indicator(column) && continue
+            found = _sb_total_group_level(column.values,columns,indices,J)
+            isnothing(found) && continue
+            candidate = hcat(effective,_sb_total_effective_design(
+                _sb_total_unit(length(columns),found.column),reshape(found.values,J,1)))
+            rank(candidate) == size(candidate,2) || continue
+            effective = candidate
+            out[i] = found
+        end
+        return out
+    end
+    record = frozen.const_
+    position = Dict(level => g for (g,level) in enumerate(record.levels))
+    for entry in record.columns
+        label = entry.column.label
+        i = findfirst(c -> c.label === label,design.columns)
+        c = findfirst(z -> z.label === entry.slope.label,columns)
+        (isnothing(i) || isnothing(c)) && error(
+            "exact totals: the fitted model integrates group-level column `$label` of " *
+            "`$target` into its `$group` totals, but the rebuilt design no longer has it")
+        fit = _sb_total_group_values(design.columns[i].values,columns[c].values,indices,J)
+        isnothing(fit) && error(
+            "exact totals: population column `$label` of `$target` is integrated into the " *
+            "`$group` totals as a group-level predictor, so it must be the same on every " *
+            "row of a `$group` level$(entry.slope.label === :Intercept ? "" : " (as a multiple of `$(entry.slope.label)`)"); " *
+            "the new data break that. Fit a new model for a column that varies within `$group`.")
+        values = fit.values
+        for (g,level) in enumerate(levels)
+            k = get(position,level,0)
+            k == 0 && continue
+            value = record.W[k,entry.position]
+            fit.determined[g] && !isapprox(values[g],value;rtol=1e-12) && error(
+                "exact totals: `$group` level `$level` has group-level `$label` = $(values[g]) " *
+                "in the new data, but the fit integrated it at $value; its fitted total " *
+                "cannot represent a changed value")
+            values[g] = value
+        end
+        out[i] = (; column=c, values)
+    end
+    out
 end
 
 Base.@nospecializeinfer function _sb_plan_totals(@nospecialize(brmi),prepared,overrides,buckets,sd_overrides,selection;
@@ -372,10 +500,14 @@ end
 # `population_model` reads back from a TotalEffectBlock.
 _sb_total_design_name(predictor) = Symbol(:total_Z_,predictor)
 _sb_total_basis_name(predictor) = Symbol(:total_A_,predictor)
+# Each group's value of every absorbed coefficient's column (`W`).
+_sb_total_group_design_name(predictor) = Symbol(:total_W_,predictor)
 # Each row's total contribution: its group's totals against the row's design.
 _sb_total_location(total,idx,zn) = :(rows_dot_product($total[$idx,:],$zn))
-# The population counterpart: every group at the population mean `A * beta`.
-_sb_total_population_location(zn,an,beta) = :($zn * ($an * $beta))
+# The population counterpart: every group at its population mean
+# `A * (W[g,:] .* beta)`, which group-level predictors keep group-specific.
+_sb_total_population_location(zn,an,wn,beta,idx) =
+    :(rows_dot_product(brm_total_location($wn,$an,$beta)[$idx,:],$zn))
 
 function _sb_emit_total!(stmts,data,target,plan;mod::Module=@__MODULE__)
     suffix = plan.target
@@ -384,6 +516,7 @@ function _sb_emit_total!(stmts,data,target,plan;mod::Module=@__MODULE__)
     idx, ng = Symbol(:total_group_,suffix), Symbol(:total_ng_,suffix)
     nk, np = Symbol(:total_nk_,suffix), Symbol(:total_np_,suffix)
     an, loc, prec = _sb_total_basis_name(suffix), Symbol(:total_location_,suffix), Symbol(:total_precision_,suffix)
+    wn = _sb_total_group_design_name(suffix)
     j,k,p = length(plan.levels),length(plan.columns),length(plan.absorbed)
     for (key,value) in (ng=>j,nk=>k,np=>p,an=>plan.A,
                        loc=>Float64[v.location for v in plan.prior_info],
@@ -393,6 +526,12 @@ function _sb_emit_total!(stmts,data,target,plan;mod::Module=@__MODULE__)
     end
     data[idx] = plan.indices
     _sb_record_preproc!(data,an,PreprocEntry(:total_basis,copy(plan.A),plan.target,true))
+    # W is fitted per group level: a replay keeps it and checks its rows against
+    # it, a rebuild for new groups keeps every fitted group's value.
+    data[wn] = plan.W
+    _sb_record_preproc!(data,wn,PreprocEntry(:total_group_design,
+        (; levels=plan.levels,W=copy(plan.W),group=plan.group,columns=plan.group_records),
+        plan.target,true))
     # The group-index entry owns the count on replay (including changed
     # vocabulary size); a second static entry would overwrite that update.
     _sb_record_preproc!(data,idx,PreprocEntry(:group_index,
@@ -419,9 +558,9 @@ function _sb_emit_total!(stmts,data,target,plan;mod::Module=@__MODULE__)
         end
         push!(stmts,:($cp = $(Expr(:vect,entries...))))
     end
-    push!(stmts,:($total::matrix[$ng,$nk] ~ brm_total($tau,$an,$loc,$cp)))
-    push!(stmts,:($beta = brm_total_recover_rng($total,$tau,$an,$loc,$cp)))
-    push!(stmts,:($deviations = brm_total_deviations($total,$an*$beta)))
+    push!(stmts,:($total::matrix[$ng,$nk] ~ brm_total($tau,$an,$wn,$loc,$cp)))
+    push!(stmts,:($beta = brm_total_recover_rng($total,$tau,$an,$wn,$loc,$cp)))
+    push!(stmts,:($deviations = brm_total_deviations($total,brm_total_location($wn,$an,$beta))))
     zcols = Any[isnothing(c.source) ? :(rep_vector(1.,num_elements($idx))) :
                     _sb_shared_population_column!(data,c) for c in plan.columns]
     zn = _sb_total_design_name(suffix)
@@ -444,7 +583,8 @@ function _sb_emit_total!(stmts,data,target,plan;mod::Module=@__MODULE__)
     push!(stmts,:($target = $total_lp))
     block = TotalEffectBlock(plan.target,plan.group,total,Symbol(tau,:_tau),beta,deviations,idx,ng,
         Tuple(c.label for c in plan.columns),Tuple(plan.design.columns[c].label for c in plan.absorbed),
-        plan.A,copy(data[loc]),copy(data[prec]),mixture_indices,mixture)
+        Tuple(r.column.label for r in plan.group_records),
+        plan.A,copy(plan.W),copy(data[loc]),copy(data[prec]),mixture_indices,mixture)
     # The description reads the emitted scale priors, column identities and
     # design order from this record; it never reparses the generated families.
     data[_SB_BINDINGS_KEY][total] = (;role=:total_effect,logical=plan.target,family=:brm_total,total=block,

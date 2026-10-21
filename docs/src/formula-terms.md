@@ -460,6 +460,28 @@ group blocks require it. One adaptive wrapper combines totals and S2Z contrasts
 with ordinary and R2D2 random effects and HSGP weights; only `cdar` cells need
 a wrapper of their own.
 
+**Group-level predictors.** A population column that is identical on every row
+of each group (a group-level predictor such as a per-subject covariate) shifts
+only that group's total, so its coefficient is integrated with the intercept.
+With such columns stacked per group in ``\mathbf w_j`` (1 for the intercept),
+
+```math
+\mathbf{total}_j\mid\tau,\beta \sim \mathcal N\!\left(A(\mathbf w_j\circ\beta),\;\operatorname{diag}(\tau)^2\right),
+```
+
+and integrating ``\beta`` out stays exact and linear in the number of groups.
+With an independent random slope, a column equal to that slope's column times a
+per-group value joins the slope's total the same way. Sampled beside the totals,
+such a coefficient would trade off one-for-one against every group's total.
+`TotalEffectBlock.group_columns` lists them; they are recovered like the
+intercept. Categorical columns stay sampled even when constant within each
+group, whether coded as a `CategoricalVector` or a plain `String` column; code a
+two-level group-level factor as a numeric 0/1 column to integrate it. The
+per-group values are frozen with the fit: `reprocess` refuses a
+replay row whose value differs from its group's fitted value, and
+`generative_plan(plan, new_df)` keeps fitted groups' values and reads new
+groups' values from their rows.
+
 #### WarmupHMC and recovery
 
 BRM discovers each total's scale and supplies independent centering controls:

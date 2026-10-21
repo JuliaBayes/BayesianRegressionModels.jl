@@ -342,6 +342,8 @@ function _brmd_total_priors!(priors,d,groups,anchors,notation)
         keywords = isempty(b.mixture) ? NamedTuple() :
             (; scale_mixture=BRMDescriptionReference(:scale_mixture,:scalar,(:total_effect,b.predictor,:scale_mixture)),
                mixture_coefficients=Tuple(b.mixture))
+        # Group-level predictors make each group's mean its own; the law reads this.
+        isempty(b.group_columns) || (keywords = merge(keywords,(; group_columns=Tuple(String.(b.group_columns)))))
         density = ExprColumn(brm_total,sds,b.A,b.location,b.precision;keywords...)
         push!(priors,_brmd_prior(d,(:total_effect,b.predictor,:totals),density,NamedTuple(),
             (; kind=:conditional,representation=:exact_total,dimension=(d.plan.data[b.group_count],length(b.columns)),
