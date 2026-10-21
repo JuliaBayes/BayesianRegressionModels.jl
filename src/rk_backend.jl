@@ -4852,8 +4852,10 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         (; group_index=idx, group_source=source,
             group_levels=collect(state.by.levels), n_groups=length(state.by.levels))
     end
+    # `fits` (each axis's center and half-width) is metadata for design
+    # checks (`rk_design_binder`); the emitted basis computes its own.
     _RKTermSpec(:hsgp, collect(axes),
-        (; id, k, c, iso=state.iso,
+        (; id, k, c, iso=state.iso, fits=state.fits,
             fixed_fits=state.explicit_domain ? state.fits : nothing,
             latent=state.latent, orthogonal, common..., grouped...), id, id)
 end
