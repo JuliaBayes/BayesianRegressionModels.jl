@@ -3218,9 +3218,13 @@ fit's draws onto the full data with [`reprocess`](@ref).
 Formula statements `sd(:, ID) ~ Exponential(scale)` and
 `cor(:, ID) ~ LKJCholesky(K, eta)` configure a shared `|ID|` block.
 An SD statement can instead select one emitted margin with
-`sd(predictor, ID, coefficient)`, or write `sd(predictor, ID)` when that
-predictor contributes exactly one margin. See [`ranefcoefnames`](@ref)
-for the authoritative ordered addresses. Omitted statements retain historical
+`sd(predictor, ID, coefficient)`, or every margin one predictor contributes
+with `sd(predictor, ID)`. See [`ranefcoefnames`](@ref) for the authoritative
+ordered addresses. A block written without an ID, `(… | g)` or `(… || g)`, is
+addressed by its grouping column instead (`sd(:, g)`, `sd(lp, g, x)`,
+`cor(lp, g)`); it then lowers as the generated `|lp__g|` block (the `k`-th `||`
+term as `|lp__g__nocor__k|`), and that ID is what this backend's `parent`, its
+descriptor and [`brm_start`](@ref) show. Omitted statements retain historical
 defaults; Julia's Exponential scale is converted to Stan's rate.
 
 Use [`stan_code`](@ref) to extract the transpiled Stan source. For

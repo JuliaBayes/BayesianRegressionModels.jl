@@ -28,8 +28,9 @@ name is gensym-ed). The two-argument form bakes `df` in and returns the
 - `effect(lp, coefficient) ~ Normal(location, scale)` — an SBBRMI
   population-coefficient prior override.
 - `sd(lp, ID[, coefficient]) ~ Exponential(scale)` and
-  `cor(:, ID) ~ LKJCholesky(K, eta)` — SBBRMI priors for a shared
-  `|ID|` random-effect block.
+  `cor(:, ID) ~ LKJCholesky(K, eta)` — priors for a shared `|ID|`
+  random-effect block; a block written without an ID is addressed by its
+  grouping column (`sd(lp, g)`, `cor(lp, g)`, see [`effect`](@ref)).
 
 Multiple `~` lines produce a multi-response / distributional model.
 Inside an observed family's argument expression, nested `@brm(expr)` is the
@@ -120,6 +121,7 @@ function assign end
     effect(linear_predictor, coefficient)
     sd(linear_predictor, id[, coefficient])
     cor(:, id)
+    cor(linear_predictor, group)
 
 Address a prior BRM owns, by naming the **parameter** as the head and the
 target in the slots. Every slot is one name or `:`, and `:` means *the
@@ -141,11 +143,36 @@ contrasts, or — for the first categorical term of a predictor without an
 intercept — its `K` cell means, each also addressable as `<column>_lvl_<k>`; `sd` and `cor` address a shared `|ID|` random-effect covariance
 block. `sd`'s trailing coefficient slot may be omitted and means `:`, so
 `sd(:, pk)` is the block-wide scale and `sd(log_ka, pk, weight)` is one
-margin. Because `:` is positional rather than a trailing omission,
+margin, while `sd(log_ka, pk)` sets every margin `log_ka` contributes.
+Because `:` is positional rather than a trailing omission,
 `sd(:, pk, weight)` addresses the `weight` margin across *every* predictor
-slicing the block. Correlation priors are block-wide by construction — one
-shared `|ID|` covariance spans every predictor that slices it — so `cor`
-takes `:` in the predictor slot.
+slicing the block. Correlation priors on a shared `|ID|` are block-wide by
+construction — one covariance spans every predictor that slices it — so
+`cor(:, ID)` takes `:` in the predictor slot.
+
+A random-effect block written without an ID — plain `(… | g)` or uncorrelated
+`(… || g)` — is addressed by its grouping column, as brms' `group =` is:
+
+```julia
+@brm begin
+    mu ~ 1 + c1 + (1 + c1 || probe)
+    log(sigma) ~ 1 + (1 | probe)
+    sd(:, probe)     ~ Exponential(50)   # every margin grouped by `probe`
+    sd(sigma, probe) ~ Exponential(1)    # more specific: `sigma`'s block
+    sd(mu, probe, c1) = 0.5              # a known value
+end
+```
+
+One column can group several independent blocks — each predictor's block and
+one block per `||` term — and an `sd` statement sets every margin of them it
+matches, most specific first. `cor(:, g)` sets the correlation of the one
+correlated block grouped by `g`; with one per predictor, write
+`cor(<linear_predictor>, g)`. `ranef(<linear_predictor|:>, g) ~ TDist(nu)` sets
+the law of the matching blocks. An addressed block lowers as a one-predictor
+`|ID|` block under a generated ID (`|lp__g|`, the `k`-th `||` term
+`|lp__g__nocor__k|`); a block no statement reaches is left as written. An `|ID|`
+block keeps its ID address only, and a name that is both an `|ID|` and the
+grouping column of a block without one is refused as ambiguous.
 
 An interaction term is addressed the way the formula spells it:
 `effect(mu, gen & mathz)` sets one shared `Normal` prior over every
