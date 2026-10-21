@@ -87,10 +87,11 @@ function build_grouped(data)
         theta ~ 1 + (1 | p | subject)
         effect(theta, Intercept) ~ Normal(0, 0.7)
         sd(:, p) ~ Exponential(0.9)
-        pred ~ kernel(t, theta) do ts, a
-            original_object_scan(ts, a)
+        events = groups(event_subject => subject)
+        @plate for i in eachindex(theta)
+            pred[i] = original_object_scan(t[i], theta[i])
+            y[events[i]] ~ Normal(pred[i], 0.8)
         end
-        ragged(y, event_subject) ~ Normal(pred, 0.8)
     end
 end
 end

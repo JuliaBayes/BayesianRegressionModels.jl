@@ -48,9 +48,9 @@ function _brm_kernel_check_subject_frame_lp(lp_col, nsub; prefix="BRM kernel pre
     for (column, n) in lens
         n == nsub || error(
             "$prefix: kernel(...) linear predictor `$lp` has no random-effect term, so " *
-            "it is read on the kernel's subject frame (one row per subject), but its " *
-            "data column `$column` has $n rows for $nsub subjects. Declare a secondary " *
-            "axis with a model-scope `ragged($lp, group)` statement instead.")
+            "it is read per subject (one entry per subject), but its data vector " *
+            "`$column` has $n rows for $nsub subjects. Read it at each subject's " *
+            "indices instead, `$lp[rows[i]]` with `rows = groups(group => labels)`.")
     end
     nothing
 end
@@ -123,12 +123,13 @@ function _brm_kernel_cell_label_column(ragged_cols; prefix="BRM kernel preparati
         "$prefix: kernel(...) `ragged(...)` input(s) ",
         join(("`$n`" for n in unlabelled), ", "), " have no cell labels to join ",
         "against: no per-cell linear predictor carries a random effect that would ",
-        "label the plate's cells. Name the cell label column at model scope — ",
-        "`ragged(x, group => cells)`, where `cells` lists each cell's label once, ",
-        "on the per-cell frame beside the per-cell data — so every row joins its ",
-        "cell by label. Matching rows to cells by position is refused: a per-cell ",
-        "column ordered differently from `group`'s first appearance would bind to ",
-        "the wrong cell without any error.")
+        "label the plate's cells. Name the cells' label vector — `x[rows[i]]` with ",
+        "`rows = groups(group => cells)` in a `@plate for` cell, or ",
+        "`ragged(x, group, cells)` as a `kernel(...)` positional, where `cells` lists ",
+        "each cell's label once — so every entry joins its cell by label. Matching ",
+        "entries to cells by position is refused: a per-cell vector ordered ",
+        "differently from `group`'s first appearance would bind to the wrong cell ",
+        "without any error.")
     cells = [getargs(c)[3] for c in ragged_cols]
     names = unique(name.(cells))
     length(names) == 1 || error(
@@ -216,17 +217,16 @@ function _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals;
     elseif decl isa DataColumn
         v = parent(decl)
         v isa AbstractVector{<:AbstractVector} && error(
-            "$prefix: kernel(...) `ragged($a_name, $grp_name)`: `$a_name` is ALREADY a ",
-            "ragged per-subject column, so there is nothing to group. Pass it directly, ",
-            "without `ragged(...)`.")
+            "$prefix: `$a_name` read through `$grp_name`: `$a_name` is ALREADY a ",
+            "ragged per-subject column, so there is nothing to group. Read it per cell ",
+            "directly, `$a_name[i]`.")
         _brm_ragged_column_length!(lens, a_name, v)
     end
     for (nm, L) in lens
         L == n_ev || error(
-            "$prefix: kernel(...) `ragged($a_name, $grp_name)`: `$a_name` is declared ",
-            "over a $L-row axis (data column `$nm`) but `$grp_name` has $n_ev rows. ",
-            "The grouping column must name the subject of EVERY row of ",
-            "`$a_name`'s own frame.")
+            "$prefix: `$a_name` read through `$grp_name`: `$a_name` has $L entries ",
+            "(data vector `$nm`) but `$grp_name` has $n_ev. The grouping column must ",
+            "name the subject of EVERY entry of `$a_name`.")
     end
 
     rows = _brm_kernel_ragged_partition(a_name, grp_name, ev_vals, g_vals; prefix)

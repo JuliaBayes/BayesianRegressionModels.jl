@@ -23,7 +23,7 @@ using BayesianRegressionModels
 using StanBlocks
 using Distributions: Exponential, Normal
 
-@testset "two independent top-level ragged outputs reflect (snag Failure 1)" begin
+@testset "two independent grouped responses reflect (snag Failure 1)" begin
     joint_df = (;
         subject    = ["s1", "s2", "s3"],
         weight     = [60.0, 75.0, 90.0],
@@ -34,18 +34,19 @@ using Distributions: Exponential, Normal
         qt_time    = [0.3, 0.3, 0.9, 0.6],
         qt_y       = [10.0, 11.0, 9.5, 10.5],
     )
+    # The formula-level `ragged(y, g) ~ …` of the original report is retired
+    # (todo 1nfukuv); both responses are observed in the cell through
+    # `groups` bindings.
     builder = @brm begin
         sigma_pk ~ Exponential(1)
         sigma_qt ~ Exponential(1)
         log_CL ~ 1 + weight + (1 | p | subject)
-        pred_pk ~ kernel(ragged(pk_time, pk_subject), log_CL) do ts, lCL
-            exp(-exp(lCL) .* ts)
+        pk = groups(pk_subject => subject)
+        qt = groups(qt_subject => subject)
+        @plate for i in eachindex(log_CL)
+            pk_y[pk[i]] ~ Normal(exp.(-exp(log_CL[i]) .* pk_time[pk[i]]), sigma_pk)
+            qt_y[qt[i]] ~ Normal(400.0 .- exp(log_CL[i]) .* qt_time[qt[i]], sigma_qt)
         end
-        pred_qt ~ kernel(ragged(qt_time, qt_subject), log_CL) do ts, lCL
-            400.0 .- exp(lCL) .* ts
-        end
-        ragged(pk_y, pk_subject) ~ Normal(pred_pk, sigma_pk)
-        ragged(qt_y, qt_subject) ~ Normal(pred_qt, sigma_qt)
     end
 
     # Build + BOTH reflection paths must not throw (the historical failure was a
@@ -55,13 +56,11 @@ using Distributions: Exponential, Normal
     @test (sdesc = StanBlocks.stan_descriptor(sb.model)) !== nothing
     @test (bdesc = brm_descriptor(builder, joint_df; mod=@__MODULE__, name=:joint)) !== nothing
 
-    # Each ragged response axis keeps its own generated-draw + pointwise-loglik
-    # twin — the pair that the offset MethodError used to prevent emitting.
-    names = Set(String(o.name) for o in sdesc.outputs)
-    @test "pk_y_gen" in names
-    @test "qt_y_gen" in names
-    @test "pk_y_likelihood" in names
-    @test "qt_y_likelihood" in names
+    # Each grouped response keeps its own generated draw and pointwise
+    # log-likelihood — the pair that the offset MethodError used to prevent.
+    for response in (:pk_y, :qt_y), role in (:posterior_predictive, :pointwise_loglik)
+        @test brm_output(bdesc, response; role) !== nothing
+    end
 end
 
 @testset "kernel ragged reprocess: frozen replay + legacy guard (snag Failure 2)" begin

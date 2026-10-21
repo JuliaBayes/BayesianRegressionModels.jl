@@ -143,10 +143,10 @@ different linear predictors in one model may be defined on different axes. The
 columns have one row per person, while its observation columns have one row per
 sample.
 
-[`ragged`](@ref)`(x, group)` attaches a flat secondary frame to the grouping
-axis, and [`kernel`](@ref) broadcasts a do-block *cell* — arbitrary Julia,
-including a structural or ODE-like time course — over pre-grouped rows, taking
-the per-group values of ordinary linear predictors as arguments. In brms this
+An `@plate for` cell (see [`kernel`](@ref)) evaluates arbitrary Julia — a
+structural or ODE-like time course, say — once per group, taking the per-group
+values of ordinary linear predictors as arguments and reading another vector's
+entries per group through a [`groups`](@ref) binding. In brms this
 class of model is `nlf()` plus manual `data2` bookkeeping, or Stan by hand.
 
 Two smaller gains: [`VBRMI`](@ref) gives you a pure-Julia

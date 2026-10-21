@@ -256,11 +256,10 @@ end
     plate_builder = @brm begin
         sigma ~ Exponential(1)
         log_CL ~ 1 + (1 | p | subject)
-        ragged(obs_time, obs_subject)
-        ragged(y, obs_subject)
+        obs_rows = groups(obs_subject => subject)
         @plate for i in eachindex(log_CL)
-            loc[i] = exp.(-exp(log_CL[i]) .* obs_time[i])
-            y[i] ~ normal(loc[i], sigma)
+            loc[i] = exp.(-exp(log_CL[i]) .* obs_time[obs_rows[i]])
+            y[obs_rows[i]] ~ normal(loc[i], sigma)
         end
     end
     kernel_builder = @brm begin

@@ -32,11 +32,11 @@ exp_quad_gather(data) = @brm data begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + weight + (1 | p | subject)
     drift ~ 0 + hsgp(d_time; k=4, domain=(-1.5, 1.5))
-    ragged(drift, d_subject)
-    ragged(y, obs_subject)
+    d_rows = groups(d_subject => subject)
+    obs_rows = groups(obs_subject => subject)
     @plate for i in eachindex(log_CL)
-        loc[i] = exp(log_CL[i]) + sum(drift[i])
-        y[i] ~ normal(loc[i], sigma)
+        loc[i] = exp(log_CL[i]) + sum(drift[d_rows[i]])
+        y[obs_rows[i]] ~ normal(loc[i], sigma)
     end
 end
 
@@ -44,10 +44,10 @@ exp_quad_twin(data) = @brm data begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + weight + (1 | p | subject)
     drift ~ 0 + hsgp(d_time; k=4, domain=(-1.5, 1.5))
-    ragged(y, obs_subject)
+    obs_rows = groups(obs_subject => subject)
     @plate for i in eachindex(log_CL)
         loc[i] = exp(log_CL[i])
-        y[i] ~ normal(loc[i], sigma)
+        y[obs_rows[i]] ~ normal(loc[i], sigma)
     end
 end
 
@@ -55,11 +55,11 @@ periodic_gather(data) = @brm data begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + weight + (1 | p | subject)
     drift ~ 0 + hsgp(d_time; k=3, cov=:periodic, period=24.0)
-    ragged(drift, d_subject)
-    ragged(y, obs_subject)
+    d_rows = groups(d_subject => subject)
+    obs_rows = groups(obs_subject => subject)
     @plate for i in eachindex(log_CL)
-        loc[i] = exp(log_CL[i]) + sum(drift[i])
-        y[i] ~ normal(loc[i], sigma)
+        loc[i] = exp(log_CL[i]) + sum(drift[d_rows[i]])
+        y[obs_rows[i]] ~ normal(loc[i], sigma)
     end
 end
 
@@ -67,10 +67,10 @@ periodic_twin(data) = @brm data begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + weight + (1 | p | subject)
     drift ~ 0 + hsgp(d_time; k=3, cov=:periodic, period=24.0)
-    ragged(y, obs_subject)
+    obs_rows = groups(obs_subject => subject)
     @plate for i in eachindex(log_CL)
         loc[i] = exp(log_CL[i])
-        y[i] ~ normal(loc[i], sigma)
+        y[obs_rows[i]] ~ normal(loc[i], sigma)
     end
 end
 

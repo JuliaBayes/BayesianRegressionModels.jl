@@ -282,8 +282,9 @@ end
         event_effect ~ 0 + hsgp(event_x; k=3, domain=(-1.0, 1.0))
         length_scale(:, hsgp(event_x)) ~ LogNormal(0, 1)
         sd(:, hsgp(event_x)) ~ LogNormal(0, 1)
+        events = groups(event_subject => subject)
         @plate for i in eachindex(mu)
-            loc[i] = mu[i] .+ ragged(event_effect, event_subject)[i]
+            loc[i] = mu[i] .+ event_effect[events[i]]
             y[i] ~ normal(loc[i], sigma)
         end
     end
@@ -502,7 +503,7 @@ end
     @test occursin("flat-row grouped", err.message)
 end
 
-@stestset "a ragged(y, group) join over interleaved rows is attributed by subject" begin
+@stestset "a grouped observation over interleaved rows is attributed by subject" begin
     backend = RKBRMI(nlme_ragged_pk(NLME_RAGGED_DATA))
     m = brm_nlme_model(backend; ad_backend=NLME_AD)
     n = length(m.view.levels)
@@ -537,10 +538,10 @@ end
     end
 end
 
-@stestset "a ragged join observed per subject gives one subject's value and η gradient" begin
-    # brm-use keeps a population-PK response flat at top level,
-    # `ragged(y, group) ~ …`. RK observes that join per subject, so the model
-    # has a subject cell, as an in-cell observation does.
+@stestset "a grouped observation gives one subject's value and η gradient" begin
+    # A population-PK response with one entry per observation is observed in
+    # the cell through `obs = groups(obs_subject => subject)`, so the model has
+    # a subject cell.
     backend = RKBRMI(nlme_ragged_pk(NLME_RAGGED_DATA))
     m = brm_nlme_model(backend; ad_backend=NLME_AD)
     @test m.cell_query !== nothing && m.cell_gradient !== nothing

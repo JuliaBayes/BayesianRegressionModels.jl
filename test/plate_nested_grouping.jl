@@ -191,23 +191,14 @@ tie_model(data) = @brm data begin
     end
 end
 
-tie_ragged_model(data) = @brm data begin
-    alpha ~ 1 + (1 | region | region_g) + (1 | district | district_g)
-    sigma ~ Exponential(1)
-    ragged(ev_x, ev_district)
-    ragged(ev_y, ev_district)
-    @plate for d in eachindex(alpha)
-        ev_y[d] ~ Normal(alpha[d] .+ ev_x[d], sigma)
-    end
-end
-
+# Event entries join the cells by the label vector their binding names: with
+# both groupings listing one label per cell, nothing is guessed.
 tie_named_model(data) = @brm data begin
     alpha ~ 1 + (1 | region | region_g) + (1 | district | district_g)
     sigma ~ Exponential(1)
-    ragged(ev_x, ev_district => district_g)
-    ragged(ev_y, ev_district => district_g)
+    events = groups(ev_district => district_g)
     @plate for d in eachindex(alpha)
-        ev_y[d] ~ Normal(alpha[d] .+ ev_x[d], sigma)
+        ev_y[events[d]] ~ Normal(alpha[d] .+ ev_x[events[d]], sigma)
     end
 end
 
@@ -218,20 +209,14 @@ end
     @test sb.data[:kernel_nsub_count_s_cell] == 4
     @test StanBlocks.stanc_check(StanBlocks.stan_code(sb.model); warn_pedantic=false).ok
     @test RKBRMI(tie_model(data)) isa RKBRMI
-    # refused: event rows join cells by label, and both columns could label
-    # them; a guessed column would join the wrong cells silently whenever their
-    # labels overlap.
-    message = "grouping columns `region_g`, `district_g` each list one unique label per row"
-    @test_throws message SBBRMI(tie_ragged_model(data); mod=@__MODULE__, total_groups=())
-    @test_throws message RKBRMI(tie_ragged_model(data))
     named = SBBRMI(tie_named_model(data); mod=@__MODULE__, total_groups=())
     @test named.data[:kernel_nsub_ev_y_cell] == 4
     @test StanBlocks.stanc_check(StanBlocks.stan_code(named.model); warn_pedantic=false).ok
     @test RKBRMI(tie_named_model(data)) isa RKBRMI
 end
 
-# A flat response observed against the plate result joins it by the per-row
-# grouping's labels.
+# A response on the event axis observed against the plate result joins it by
+# the per-row grouping's labels.
 const NESTED_EVENTS = merge(NESTED, (;
     ev_district=NESTED.district_g[[1, 1, 2, 5, 5, 5, 9, 12]],
     ev_x=[0.1, 0.2, -0.1, 0.3, 0.0, 0.2, -0.2, 0.4],
@@ -239,14 +224,14 @@ const NESTED_EVENTS = merge(NESTED, (;
 flat_response_model(data) = @brm data begin
     alpha ~ 1 + (1 | region | region_g) + (1 | district | district_g)
     sigma ~ Exponential(1)
-    ragged(ev_x, ev_district)
+    events = groups(ev_district => district_g)
     @plate for d in eachindex(alpha)
-        loc[d] = alpha[d] .+ ev_x[d]
+        loc[d] = alpha[d] .+ ev_x[events[d]]
+        ev_y[events[d]] ~ Normal(loc[d], sigma)
     end
-    ragged(ev_y, ev_district) ~ Normal(loc, sigma)
 end
 
-@stestset "a flat response joins the plate result by the per-row grouping" begin
+@stestset "an event-axis response joins the plate result by the per-row grouping" begin
     sb = SBBRMI(flat_response_model(NESTED_EVENTS); mod=@__MODULE__, total_groups=())
     @test sb.data[:kernel_nsub_loc] == ND
     @test StanBlocks.stanc_check(StanBlocks.stan_code(sb.model); warn_pedantic=false).ok

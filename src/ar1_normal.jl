@@ -1,9 +1,4 @@
-# ---- `groups(g; order = t)` and `AR1Normal(...)` in a `@plate` cell ---------
-#
-# `groups` is an ordinary function: the indices of each group. In
-# `@plate for p in groups(probe; order = day)` the cell's `p` is one group's
-# indices, so a read `x[p]` means what the same Julia loop computes (decision
-# `1pnob5t`, user 2026-10-21: no macro-only magic in the grouping).
+# ---- `AR1Normal(...)` in a `@plate for p in groups(...)` cell ----------------
 #
 # `y[p] ~ AR1Normal(mu[p], sigma[p], phi; time = day[p])` observes the cell's
 # series under AR(1) residuals. Until a called submodel can hold the observed
@@ -31,45 +26,6 @@
 # An argument that reads the group's rows — `mu[p]`, `mu[p] .+ offset`, or a
 # cell local computed from one — is indexed entry by entry; any other argument
 # (`phi`, `exp(log_sigma)`, a number) is shared by every entry.
-
-"""
-    groups(g; order = nothing)
-
-The indices of each group of `g`: for each distinct value of `g`, in sorted
-order of the values, the indices of `g` that hold it. They are in ascending
-`order` (a vector indexed like `g`) when it is given, ties in index order, and
-in index order otherwise.
-
-```julia
-julia> groups(["b", "a", "b", "a"]; order = [4, 9, 1, 2])
-2-element Vector{Vector{Int64}}:
- [4, 2]
- [3, 1]
-```
-
-In a `@brm` model, `@plate for p in groups(probe; order = day)` has one cell per
-group of the data vector `probe`, and `p` is that group's indices: a read
-`x[p]` of a value indexed like `probe` is `x` at those indices in that order,
-as the same loop computes in Julia.
-See [`kernel`](@ref) and [`AR1Normal`](@ref).
-"""
-function groups(g::AbstractVector; order::Union{Nothing,AbstractVector}=nothing)
-    labels = collect(_brm_group_values(g))
-    any(ismissing, labels) && throw(ArgumentError("groups: `g` has missing values"))
-    cells = sort!(unique(labels))
-    position = Dict(label => j for (j, label) in enumerate(cells))
-    rows = [Int[] for _ in cells]
-    for (r, label) in enumerate(labels)
-        push!(rows[position[label]], r)
-    end
-    if order !== nothing
-        length(order) == length(labels) || throw(DimensionMismatch(
-            "groups: `order` has $(length(order)) values for $(length(labels)) in `g`"))
-        any(ismissing, order) && throw(ArgumentError("groups: `order` has missing values"))
-        foreach(cell -> sort!(cell; by=r -> order[r], alg=Base.Sort.DEFAULT_STABLE), rows)
-    end
-    rows
-end
 
 """
     @plate for p in groups(g; order = t)
