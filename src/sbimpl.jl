@@ -4666,7 +4666,8 @@ _sb_plan_obs_shaped(rhs::Expr) =
 #   constant rides in data exactly where a literal would sit (brm-use "named
 #   numeric constants ride in data"), so `a ~ normal(a0, s0)` classifies like
 #   `a ~ normal(0.1, 0.5)`. It reads no parameter, so even a bound column
-#   under it would inform nothing.
+#   under it would inform nothing. A `dirichlet(...)` concentration BRM places
+#   in data (`s ~ dirichlet(s_alpha)`, the R2D2 shares) is such a constant too.
 # - the RHS reads no row-varying value and another statement reads the
 #   target: a latent such as `a ~ normal(0, tau)` feeding `mu = exp(a) .* x`.
 #   A leaf nothing reads (`y ~ normal(mu0, sigma)`) stays an observation —
@@ -4675,9 +4676,14 @@ _sb_plan_obs_shaped(rhs::Expr) =
 # A predictor term emitted as a SLIC submodel call is never an observation,
 # whatever it reads (`_sb_plan_submodel_term`).
 function _sb_plan_observation_keys(body, data, @nospecialize(brmi), mod::Module)
-    constants = Set{Symbol}(k for (k, v) in pairs(data) if v isa Real)
-    varying = setdiff(Set{Symbol}(keys(data)), constants)
     statements = _sb_plan_statements(body)
+    constants = Set{Symbol}(k for (k, v) in pairs(data) if v isa Real)
+    for stmt in statements
+        rhs = _sb_plan_statement_rhs(stmt)
+        Meta.isexpr(rhs, :call) && first(rhs.args) === :dirichlet || continue
+        union!(constants, (k for k in _sb_plan_value_refs(rhs) if haskey(data, k)))
+    end
+    varying = setdiff(Set{Symbol}(keys(data)), constants)
     read = Set{Symbol}()
     for stmt in statements
         rhs = _sb_plan_statement_rhs(stmt)
