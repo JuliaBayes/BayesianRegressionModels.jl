@@ -506,10 +506,13 @@ function _brmd_covariance_factor_binding(d,owner)
     nothing
 end
 
+# A consumer term's replay record (`:submodel_hook`) names a hook call to repeat,
+# not a fitted constant.
 function _brmd_constants(plan)
     Tuple((; input=key, kind=entry.kind, source=_brmd_snapshot(entry.raw_ref),
              value=_brmd_snapshot(entry.const_), dimension_coupled=entry.dim_coupled)
-          for (key,entry) in sort!(collect(plan.preproc); by=p -> string(first(p))))
+          for (key,entry) in sort!(collect(plan.preproc); by=p -> string(first(p)))
+          if entry.kind !== :submodel_hook)
 end
 
 function _brmd_environment(d, owner, kind, priors, constants, notation=();groups=())
