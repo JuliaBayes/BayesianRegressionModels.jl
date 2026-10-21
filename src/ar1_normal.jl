@@ -6,31 +6,30 @@
 # `1pnob5t`, user 2026-10-21: no macro-only magic in the grouping).
 #
 # `y[p] ~ AR1Normal(mu[p], sigma[p], phi; time = day[p])` observes the cell's
-# series under AR(1) residuals. Until a called submodel can hold the observed
-# `@scan` on both backends (StanBlocks snag `scan-inside-call-2ea17cef`,
-# ReactiveKernels snag `per-cell-submode-cd87e071`), `@brm` replaces the
-# statement by the `@scan` it states — the temporary rewrite the user accepted
-# (2026-10-21) while those land:
+# series under AR(1) residuals. `@brm` keeps the statement as written and
+# checks it; each backend calls its own BRM-owned submodel holding the
+# observed `@scan` (`_sb_ar1_normal` in `sb_cell_julia.jl`, the `@rkppl`
+# definitions below), the same recurrence on both:
 #
 #     @scan begin
-#         y[p][1] ~ Normal(mu[p][1], sigma[p][1] / sqrt(1 - phi ^ 2))
-#         for t in 2:length(day[p])
-#             k = day[p][t] - day[p][t - 1]
-#             y[p][t] ~ Normal(mu[p][t] + phi ^ k * (y[p][t - 1] - mu[p][t - 1]),
-#                              sigma[p][t] * sqrt((1 - phi ^ (2 * k)) / (1 - phi ^ 2)))
+#         y[1] ~ Normal(mu[1], sigma[1] / sqrt(1 - phi[1] ^ 2))
+#         for t in 2:length(time)
+#             k = time[t] - time[t - 1]
+#             y[t] ~ Normal(mu[t] + phi[t] ^ k * (y[t - 1] - mu[t - 1]),
+#                           sigma[t] * sqrt((1 - phi[t] ^ (2 * k)) / (1 - phi[t] ^ 2)))
 #         end
 #     end
 #
-# `show` prints the statement as written; the backends and the descriptor see
-# the expansion. `sigma` is the innovation SD and the first entry comes from
-# the stationary law; a gap of `k` time steps uses `phi ^ k` with the matching
-# innovation variance. That is the exact density of the AR(1) process observed
-# on the recorded steps. Without `time` every step is one (`k = 1`): the plain
+# `sigma` is the innovation SD and the first entry comes from the stationary
+# law; a gap of `k` time steps uses `phi ^ k` with the matching innovation
+# variance. That is the exact density of the AR(1) process observed on the
+# recorded steps. Without `time` every step is one (`k = 1`): the plain
 # recursion.
 #
 # An argument that reads the group's rows — `mu[p]`, `mu[p] .+ offset`, or a
-# cell local computed from one — is indexed entry by entry; any other argument
-# (`phi`, `exp(log_sigma)`, a number) is shared by every entry.
+# cell local computed from one — varies along the series; any other argument
+# (`phi`, `exp(log_sigma)`, a number) is shared by every entry and reaches the
+# submodel filled to the series' length.
 
 """
     groups(g; order = nothing)
@@ -97,22 +96,26 @@ order.
   `log(sigma) ~ 1 + (1 | g)` read as `sigma[p]`, or `atanh(phi) ~ 1 + (1 | g)`
   read as `phi[p]`, lets the scale or the persistence vary by group.
 
-For now `@brm` evaluates the statement as the `@scan` recurrence it states, in
-the cell, and the descriptor and draws show that recurrence: each entry's
-pointwise log likelihood is its conditional density given the series' earlier
-entries, and with `y` omitted the cell draws whole trajectories. `show` prints
-the statement as written.
+`@brm` keeps the statement as written, and each backend calls a BRM-owned
+submodel holding the recurrence (an `@slic` submodel on SBBRMI, an `@rkppl`
+one on RKBRMI), the cell's series passed as its arguments:
 
 ```julia
 @scan begin
-    y[p][1] ~ Normal(mu[p][1], sigma / sqrt(1 - phi ^ 2))
-    for s in 2:length(t[p])
-        k = t[p][s] - t[p][s - 1]
-        y[p][s] ~ Normal(mu[p][s] + phi ^ k * (y[p][s - 1] - mu[p][s - 1]),
-                         sigma * sqrt((1 - phi ^ (2 * k)) / (1 - phi ^ 2)))
+    y[1] ~ Normal(mu[1], sigma[1] / sqrt(1 - phi[1] ^ 2))
+    for s in 2:length(time)
+        k = time[s] - time[s - 1]
+        y[s] ~ Normal(mu[s] + phi[s] ^ k * (y[s - 1] - mu[s - 1]),
+                      sigma[s] * sqrt((1 - phi[s] ^ (2 * k)) / (1 - phi[s] ^ 2)))
     end
 end
 ```
+
+A shared argument reaches it filled to the series' length. `show` and the
+descriptor print the statement; the generative plan declares an `AR1Normal`
+observation of `y`. Each entry's pointwise log likelihood is its conditional
+density given the series' earlier entries, and with `y` omitted the cell draws
+whole trajectories.
 
 Order 1 only. For another innovation family, a higher order or a different
 start or gap rule, write the `@scan` yourself (see [`kernel`](@ref)).
@@ -121,12 +124,23 @@ function AR1Normal end
 
 _is_brm_ar1_normal(x) = isxcall(x, :~) && isxcall(x.args[3], :AR1Normal)
 
-# The `@plate` with every `AR1Normal` observation of its cell replaced by its
-# `@scan`, and the build-time checks of their time columns.
-function _brm_expand_cell_ar1_normal(plate)
+# The positional and keyword arguments of an `AR1Normal(...)` call.
+function _brm_ar1_normal_arguments(call)
+    positional, keywords = Any[], Dict{Symbol,Any}()
+    for arg in call.args[2:end]
+        for a in (Meta.isexpr(arg, :parameters) ? arg.args : Any[arg])
+            Meta.isexpr(a, :kw, 2) ? (keywords[a.args[1]] = a.args[2]) : push!(positional, a)
+        end
+    end
+    positional, keywords
+end
+
+# The build-time checks of a `@plate`'s `AR1Normal` observations, which stay
+# in the cell as written: one per statement with a time column.
+function _brm_cell_ar1_normal_checks(plate)
     i, range, body = _brm_plate_loop(plate)
     stmts = Meta.isexpr(body, :block) ? body.args : Any[body]
-    any(_is_brm_ar1_normal, stmts) || return plate, Any[]
+    any(_is_brm_ar1_normal, stmts) || return Any[]
     header = _brm_plate_header_grouping(range)
     # Every read in a `groups(...)` cell is a group's rows, so an argument's
     # spelling says whether it varies along the series.
@@ -134,33 +148,26 @@ function _brm_expand_cell_ar1_normal(plate)
         "@brm: `AR1Normal(...)` observes the rows of a `@plate for $i in groups(g; " *
         "order = t)` cell; in a `@plate for $i in $(sprint(Base.show_unquoted, range))` " *
         "cell write the `@scan` it stands for (see the `AR1Normal` docstring)")
-    locals = Dict{Symbol,Any}(stmt.args[1] => stmt.args[2] for stmt in stmts
-        if Meta.isexpr(stmt, :(=), 2) && stmt.args[1] isa Symbol)
     checks = Any[]
-    expanded = map(stmts) do stmt
-        _is_brm_ar1_normal(stmt) || return stmt
-        scan, time = _brm_cell_ar1_normal_scan(stmt, i, locals, stmts, header)
+    for stmt in stmts
+        _is_brm_ar1_normal(stmt) || continue
+        time = _brm_check_cell_ar1_normal(stmt, i)
         time === nothing || push!(checks,
             :($_brm_check_ar1_normal_time($(QuoteNode(stmt.args[2].args[1])),
                 $time, $(header.group), $(something(header.order, :nothing)))))
-        scan
     end
-    loop = Expr(:for, plate.args[3].args[1], Expr(:block, expanded...))
-    Expr(:macrocall, plate.args[1], plate.args[2], loop), checks
+    checks
 end
 
-function _brm_cell_ar1_normal_scan(stmt, i, locals, stmts, header)
+# Refuses an `AR1Normal` statement the backends cannot read and returns its
+# time column, if any: it observes the cell's response `y[p]` with three
+# positional arguments and an optional `time = t[p]`.
+function _brm_check_cell_ar1_normal(stmt, i)
     lhs, rhs = stmt.args[2], stmt.args[3]
-    source(x) = sprint(Base.show_unquoted, x)
-    shown = source(stmt)
+    shown = sprint(Base.show_unquoted, stmt)
     _brm_plate_indexed(lhs, i) && lhs.args[1] isa Symbol || error(
         "@brm: `AR1Normal(...)` observes a response read as `y[$i]` in its cell; got `$shown`")
-    positional, keywords = Any[], Dict{Symbol,Any}()
-    for arg in rhs.args[2:end]
-        for a in (Meta.isexpr(arg, :parameters) ? arg.args : Any[arg])
-            Meta.isexpr(a, :kw, 2) ? (keywords[a.args[1]] = a.args[2]) : push!(positional, a)
-        end
-    end
+    positional, keywords = _brm_ar1_normal_arguments(rhs)
     haskey(keywords, :by) && error(
         "@brm: `AR1Normal(...)` takes no `by=`: the plate is the grouping. Write " *
         "`@plate for $i in groups(g; order = t)` and observe `y[$i] ~ AR1Normal(...)` " *
@@ -168,51 +175,42 @@ function _brm_cell_ar1_normal_scan(stmt, i, locals, stmts, header)
     length(positional) == 3 && all(==(:time), keys(keywords)) || error(
         "@brm: write `y[$i] ~ AR1Normal(mu, sigma, phi)` or `y[$i] ~ AR1Normal(mu, " *
         "sigma, phi; time = t[$i])`; got `$shown`")
-    mu, sigma, phi = positional
     time = get(keywords, :time, nothing)
     time === nothing || _brm_plate_indexed(time, i) && time.args[1] isa Symbol || error(
         "@brm: `AR1Normal(...; time = t[$i])` reads the cell's time column; got `$shown`")
-
-    used = Set{Symbol}(keys(locals))
-    push!(used, i)
-    _brm_cell_value_refs!(used, Expr(:block, stmts...))
-    fresh(name) = (while name in used; name = Symbol(name, :_); end; push!(used, name); name)
-    t, k = fresh(:t), fresh(:k)
-
-    # Whether `value` reads a group's rows, directly or through cell locals.
-    series(value, seen=Set{Symbol}()) =
-        value isa Symbol ? (haskey(locals, value) && !(value in seen) &&
-            series(locals[value], push!(seen, value))) :
-        value isa Expr && (_brm_plate_indexed(value, i) ||
-            any(arg -> series(arg, seen), value.args))
-    reader(value) = !series(value) ? (_ -> value) :
-        value isa Symbol || _brm_plate_indexed(value, i) ? (index -> :($value[$index])) :
-        (index -> Expr(:ref, value, index))
-    m, s, f = reader(mu), reader(sigma), reader(phi)
-    obs(index) = :($lhs[$index])
-    previous = :($t - 1)
-    seed = :($(obs(1)) ~ Normal($(m(1)), $(s(1)) / sqrt(1 - $(f(1)) ^ 2)))
-    # The series' length, read off data where the cell has it: with `y`
-    # omitted, the cell draws the series and `y[p]` has no length to read.
-    arguments = (mu, sigma, phi)
-    along = findfirst(series, arguments)
-    span = time !== nothing ? time :
-        header.order !== nothing ? :($(header.order)[$i]) :
-        along !== nothing ? arguments[along] : lhs
-    steps = if time === nothing
-        Expr(:for, :($t = 2:length($span)), Expr(:block,
-            :($(obs(t)) ~ Normal($(m(t)) + $(f(t)) * ($(obs(previous)) - $(m(previous))),
-                $(s(t))))))
-    else
-        Expr(:for, :($t = 2:length($time)), Expr(:block,
-            :($k = $time[$t] - $time[$previous]),
-            :($(obs(t)) ~ Normal(
-                $(m(t)) + $(f(t)) ^ $k * ($(obs(previous)) - $(m(previous))),
-                $(s(t)) * sqrt((1 - $(f(t)) ^ (2 * $k)) / (1 - $(f(t)) ^ 2))))))
-    end
-    scan = Expr(:macrocall, Symbol("@scan"), LineNumberNode(0), Expr(:block, seed, steps))
-    scan, time === nothing ? nothing : time.args[1]
+    time === nothing ? nothing : time.args[1]
 end
+
+# An `AR1Normal` observation in a kernel cell, once the plate's row reads are
+# cell parameters: `y ~ AR1Normal(mu, sigma, phi; time = t)`. Returns the
+# response, the three arguments with whether each varies along the series (it
+# reads a parameter, directly or through a cell local), the time column and
+# the series' length, read off data where the cell has it: with the response
+# omitted, the cell draws the series.
+function _brm_kernel_ar1_normal(statement, params, body)
+    response = statement.args[2]
+    positional, keywords = _brm_ar1_normal_arguments(statement.args[3])
+    time = get(keywords, :time, nothing)
+    locals = Dict{Symbol,Any}(s.args[1] => s.args[2] for s in body
+        if Meta.isexpr(s, :(=), 2) && s.args[1] isa Symbol)
+    series(value, seen=Set{Symbol}()) =
+        value isa Symbol ? (value in params || haskey(locals, value) &&
+            !(value in seen) && series(locals[value], push!(seen, value))) :
+        value isa Expr && any(arg -> series(arg, seen), value.args)
+    along = map(series, Tuple(positional))
+    first_series = findfirst(along)
+    span = time !== nothing ? time :
+        first_series !== nothing ? positional[first_series] : response
+    # A gathered read `x[rows]` is as long as its index, which is data.
+    Meta.isexpr(span, :ref, 2) && span.args[2] isa Symbol && span.args[2] in params &&
+        (span = span.args[2])
+    (; response, arguments=Tuple(positional), along, time, length=:(length($span)))
+end
+
+# The arguments a backend's AR(1) submodel takes, one entry per step: a
+# shared value is filled to the series' length with the backend's `fill`.
+_brm_ar1_normal_series(spec, fill) = Tuple(along ? value : Expr(:call, fill, value, spec.length)
+    for (value, along) in zip(spec.arguments, spec.along))
 
 # The entries of each series are distinct whole time steps in increasing
 # order, as the cell reads them: a repeated time has no AR(1) step, and the gap

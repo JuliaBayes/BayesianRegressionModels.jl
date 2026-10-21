@@ -4781,6 +4781,22 @@ function _sb_plan_collect!(declarations, x, data_scope, context, obs_keys, plate
         return _sb_plan_collect!(declarations, x.args[end], data_scope, context,
                                  obs_keys, plate_params, unbound_cell)
     end
+    # A cell's `AR1Normal` calls BRM's AR(1) submodel
+    # (`_sb_cell_ar1_normal_calls`) on the response passed as `obs`, or on its
+    # own drawn series, `<node>_obs`, when the response is omitted: one
+    # observation of that response, family `:AR1Normal`, the submodel call as
+    # its expression.
+    if _sb_plan_ar1_normal_call(x)
+        arguments, keywords = _sb_plan_call_parts(x.args[3])
+        observed = haskey(keywords, :obs)
+        target = observed ? keywords.obs : _sb_plan_lhs_name(x.args[2])
+        draw = observed ? _sb_plan_generated(context, target) :
+            Symbol(join((context..., target), "_"), "_obs")
+        push!(declarations, GenerativeDeclaration(:observation, target, :AR1Normal,
+            get(data_scope, target, nothing), draw, Tuple(context), _sb_plan_copy(x),
+            arguments, keywords, nothing, (), (;)))
+        return nothing
+    end
     if x.head === :call && length(x.args) >= 3 && x.args[1] === :~
         target = _sb_plan_lhs_name(x.args[2])
         isnothing(target) && error(
@@ -6651,7 +6667,8 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     # keep slicing; the dropped cell parameter becomes a fresh per-cell `~`.
     kept_params = slice_params[kept]
     # The cell is Julia source; give StanBlocks its Stan spellings.
-    body_stmts = _sb_cell_statements(body_stmts, _brm_inline_scope(lam))
+    body_stmts = _sb_cell_statements(_sb_cell_ar1_normal_calls(body_stmts, kept_params),
+        _brm_inline_scope(lam))
     plate_body = Expr(:block, body_stmts...)
     plate_call = Expr(:call, :plate,
         Expr(:parameters, Expr(:kw, :outer, Expr(:tuple, nsub_sym))),

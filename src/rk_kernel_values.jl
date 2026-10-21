@@ -365,6 +365,9 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
                 "RK backend: kernel `$name` sampled cell declarations need a statistical submodel")
             argument = arguments[index]
             argument isa NamedColumn && parent(argument) isa MissingColumn && continue
+            # The emitter calls the AR(1) submodel in the cell, which observes
+            # the response in place (`scan_observed`).
+            _is_brm_ar1_normal(statement) && (push!(body, statement); continue)
             source = argument isa NamedColumn ? _rk_kernel_column_name(argument) :
                 (argument isa ExprColumn && getf(argument) === ragged ?
                     _rk_kernel_column_name(first(getargs(argument))) : nothing)
@@ -543,6 +546,12 @@ _rk_rowwise_callable(callable) = false
 function _rk_scan_observed_params(raw_body, params)
     observed = Symbol[]
     for statement in raw_body
+        # `y ~ AR1Normal(...)` observes `y` through the AR(1) submodel's scan.
+        if _is_brm_ar1_normal(statement)
+            param = statement.args[2]
+            param in params && !(param in observed) && push!(observed, param)
+            continue
+        end
         _is_brm_scan(statement) || continue
         for s in _brm_plate_flat_statements(Any[statement])
             isxcall(s, :~) && Meta.isexpr(s.args[2], :ref) || continue
@@ -551,6 +560,70 @@ function _rk_scan_observed_params(raw_body, params)
         end
     end
     observed
+end
+
+# The `@rkppl` submodels `AR1Normal` calls in a cell (`ar1_normal.jl`): the
+# exact AR(1) density over one series, given one mean, scale and persistence
+# per step, at the recorded integer times or one step apart. The carried
+# array they return is the response, which the call observes in place.
+const _RK_AR1_NORMAL_SUBMODELS = (
+    timed=:(brm_ar1_normal(mu, sigma, phi, time) = begin
+        @scan begin
+            y[1] ~ Normal(mu[1], sigma[1] / sqrt(1 - phi[1] ^ 2))
+            for t in 2:length(time)
+                k = time[t] - time[t - 1]
+                y[t] ~ Normal(mu[t] + phi[t] ^ k * (y[t - 1] - mu[t - 1]),
+                    sigma[t] * sqrt((1 - phi[t] ^ (2 * k)) / (1 - phi[t] ^ 2)))
+            end
+        end
+        return y
+    end),
+    stepped=:(brm_ar1_normal_steps(mu, sigma, phi) = begin
+        @scan begin
+            y[1] ~ Normal(mu[1], sigma[1] / sqrt(1 - phi[1] ^ 2))
+            for t in 2:length(mu)
+                y[t] ~ Normal(mu[t] + phi[t] * (y[t - 1] - mu[t - 1]), sigma[t])
+            end
+        end
+        return y
+    end),
+)
+
+# A cell statement in the emitted program: its calls bound, and an
+# `AR1Normal` observation calling the AR(1) submodel, added to the program's
+# definitions once.
+_rk_kernel_cell_statement(statement, kernel, defs, bindings, taken) =
+    _is_brm_ar1_normal(statement) ?
+        _rk_kernel_ar1_normal_call!(statement, kernel, defs, bindings, taken) :
+        _rk_kernel_bind_calls(statement, kernel.scope, bindings, taken)
+
+function _rk_kernel_ar1_normal_call!(statement, kernel, defs, bindings, taken)
+    defs === nothing && error(
+        "RK backend: internal: kernel `$(kernel.name)` emits an `AR1Normal` cell " *
+        "without the program's definitions")
+    spec = _brm_kernel_ar1_normal(statement, kernel.params, kernel.body)
+    submodel = _rk_ar1_normal_submodel!(defs, taken,
+        _RK_AR1_NORMAL_SUBMODELS[spec.time === nothing ? :stepped : :timed])
+    arguments = Any[_brm_ar1_normal_series(spec, :fill)...]
+    spec.time === nothing || push!(arguments, spec.time)
+    bound = Any[_rk_kernel_bind_calls(argument, kernel.scope, bindings, taken)
+        for argument in arguments]
+    Expr(:call, :~, spec.response, Expr(:call, submodel, bound...))
+end
+
+# The name of a definition in `defs` with the template's signature and body,
+# adding it under a name free in the program when absent.
+function _rk_ar1_normal_submodel!(defs, taken, template)
+    call, body = template.args
+    for definition in defs
+        Meta.isexpr(definition, :(=), 2) || continue
+        signature = first(definition.args)
+        Meta.isexpr(signature, :call) && isequal(signature.args[2:end], call.args[2:end]) &&
+            isequal(last(definition.args), body) && return first(signature.args)
+    end
+    name = _rk_ast_fresh_name(string(first(call.args)), taken)
+    push!(defs, Expr(:(=), Expr(:call, name, call.args[2:end]...), body))
+    name
 end
 
 # A scan-observed response is conditioned under its own column name, which the
@@ -573,6 +646,8 @@ function _rk_kernel_observed_columns(brmi, params, arguments, raw_body)
     for statement in raw_body
         Meta.isexpr(statement, :call) && length(statement.args) == 3 &&
             first(statement.args) === :~ || continue
+        # The AR(1) submodel observes its response in place (`scan_observed`).
+        _is_brm_ar1_normal(statement) && continue
         index = findfirst(==(statement.args[2]), params)
         index === nothing && continue
         argument = arguments[index]
@@ -1013,7 +1088,7 @@ end
 # in the same order, because RK prepares a cell's data-only work once only when
 # bound data fix the plate's domain (rkppl-use §13 "Arrays per index").
 function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
-        rendered=())
+        rendered=(), defs=nothing)
     # `rendered` outputs are already emitted program expressions (hoisted
     # observation arguments): their calls are bound, not cell source.
     written = Any[outputs..., rendered...]
@@ -1026,7 +1101,7 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
     slice = _rk_kernel_value_slice(kernel, Expr(:tuple, last.(written)..., scanned...))
     any(input -> input.kind === :omitted, slice.inputs) && error(
         "RK backend: kernel `$(kernel.name)` reads an unbound in-cell response outside its observation")
-    cell = Any[[_rk_kernel_bind_calls(statement, kernel.scope, bindings, taken)
+    cell = Any[[_rk_kernel_cell_statement(statement, slice, defs, bindings, taken)
         for statement in slice.body];
         [Expr(:(=), cells, _rk_kernel_bind_calls(value, kernel.scope, bindings, taken))
             for (cells, value) in outputs];
@@ -1156,7 +1231,7 @@ function _rk_emit_value_assignment!(defs, statements, bindings, taken,
         end
     end
     _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
-        rendered=arguments === nothing ? () : arguments.outputs)
+        rendered=arguments === nothing ? () : arguments.outputs, defs)
     append!(statements, after)
 end
 
