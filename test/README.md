@@ -354,6 +354,27 @@ naming every predictor whose block on `g` would stay conventional:
 julia --project=test test/total_effects_offset.jl
 ```
 
+## Exact totals for some blocks of a group
+
+`total_effects_selection.jl` checks `total_groups=[:g => [:b]]` on several
+per-unit linear predictors that share one grouping and one `@plate` cell:
+
+- `:auto` stays conventional;
+- a whole-group request names each skipped predictor, why, and the eligible
+  subset;
+- the pair form integrates exactly the named blocks;
+- the malformed or ineligible requests are refused.
+
+Its BridgeStan density equals the conventional program's marginal over the
+integrated intercept, also for a block whose scale prior is
+`truncated(Normal(0, 1); lower=0)`. It checks that `generative_plan(plan,
+new_df)` keeps the fitted selection, and that the joint WarmupHMC wrapper maps
+the totals beside the group's conventional blocks:
+
+```sh
+julia --project=test test/total_effects_selection.jl
+```
+
 ## Exact-total descriptions
 
 `description_totals.jl` describes each synthetic model under the default

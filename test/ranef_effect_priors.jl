@@ -223,12 +223,17 @@ end
     end
     @test_throws "does not match" SBBRMI(wrong_dimension(df); mod=@__MODULE__, total_groups=())
 
-    ambiguous_shorthand = @brm begin
+    # A predictor-only address sets every margin that predictor contributes,
+    # as `sd(:, p, coefficient)` sets one coefficient across every predictor
+    # (decision `06ntfvg`, fan-out prong; it used to refuse more than one).
+    predictor_fanout = @brm begin
         eta ~ 1 + (1 + x | p | subject)
         sd(eta, p) ~ Exponential(1)
         y ~ Normal(eta, 1)
     end
-    @test_throws "is ambiguous" SBBRMI(ambiguous_shorthand(df); mod=@__MODULE__, total_groups=())
+    @test occursin("b_p_subject_tau ~ exponential((1.0 ./ 1));",
+        BayesianRegressionModels.stan_code(
+            SBBRMI(predictor_fanout(df); mod=@__MODULE__, total_groups=())))
 
     # `sd(eta, p)` and `sd(eta, p, x)` reach the same single margin, but they
     # are NOT a duplicate: naming the coefficient is strictly more specific, so
@@ -375,12 +380,15 @@ end
     end
     @test_throws "stratified" SBBRMI(stratified(stratified_df); mod=@__MODULE__, total_groups=())
 
-    @test_throws LoadError eval(quote
-        @brm begin
-            eta ~ 1
-            cor(eta, p) ~ LKJCholesky(1, 1)
-        end
-    end)
+    # `cor(lp, g)` parses -- it addresses one predictor's correlated block
+    # grouped by a column without an ID (decision `06ntfvg`) -- and a target
+    # that names no block fails at lowering.
+    no_block = @brm begin
+        eta ~ 1
+        cor(eta, p) ~ LKJCholesky(1, 1)
+        y ~ Normal(eta, 1)
+    end
+    @test_throws "matches no shared" SBBRMI(no_block(df); mod=@__MODULE__, total_groups=())
 end
 
 # `sd(:, ID, coefficient)` — ONE margin across EVERY predictor that slices the
