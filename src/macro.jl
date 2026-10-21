@@ -1638,6 +1638,7 @@ const _TERM_PRIOR_HEAD_EXAMPLE =
 #     effect(<lp|:>, <coefficient|:>)   -> [lp, coefficient]
 #     sd(<lp|:>, <ID>[, <coefficient>]) -> [:sd, ID, lp[, coefficient]]
 #     cor(:, <ID>)                      -> [:cor, ID]
+#     cor(<lp>, <group>)                -> [:cor, group, lp]
 #     sd(<lp|:>, <term>[, <block>])     -> [:term_sd, key, lp[, block]]
 #     simplex(<lp|:>, <term>)           -> [:term_simplex, key, lp]
 #     latent(<lp|:>, <term>)            -> [:term_latent, key, lp]
@@ -1728,14 +1729,15 @@ function _prior_address(head::Symbol, args::Vector{Symbol})
         end
         return full
     elseif head === :cor
+        # `cor(:, ID)`, or `cor(lp, g)` for the correlated block of one
+        # predictor grouped by a column `g` without an `|ID|`. Whether the
+        # target is an ID is known only once the formula is bound, so the
+        # backend refuses a predictor on a shared `|ID|` block.
         length(args) == 2 || error(
-            "@brm: `cor` takes exactly `cor(:, <ID>)`; got `$spelling`.")
-        args[1] === _EFFECT_COLON || error(
-            "@brm: correlation priors are block-wide — one shared `|ID|` " *
-            "covariance block spans every linear predictor that slices it, so " *
-            "there is no per-predictor correlation to address. Write " *
-            "`cor(:, $(args[2]))`, not `$spelling`.")
-        return Symbol[:cor, args[2]]
+            "@brm: `cor` takes exactly `cor(<linear_predictor|:>, <ID|group>)`; " *
+            "got `$spelling`.")
+        return args[1] === _EFFECT_COLON ? Symbol[:cor, args[2]] :
+            Symbol[:cor, args[2], args[1]]
     end
     error("@brm: unknown prior-address head `$head`; valid heads are " *
           join(("`$h`" for h in _PRIOR_HEADS), ", ") * ".")
@@ -1776,6 +1778,19 @@ function _brm_known_value_expr(rhs, lhs)
     only(values)
 end
 
+# The operation key of a prior statement with internal `effect(...)` address
+# `address`: a generated LOCAL NAME. A term key carries `(`/`)`/`,`, which are
+# legal inside a `Symbol` but not in emitted Julia source, so those three
+# characters are folded out. An interaction key's `&` is folded the same way,
+# to the `_x_` the emitted `int_a_x_b` columns already use. Nothing else is
+# touched -- `:` already rode through this key before term addresses existed,
+# and rewriting it would move the generated name of every ALREADY-configured
+# model.
+_brm_prior_statement_key(address) =
+    Symbol("__effect__", replace(join(string.(address), "__"),
+                                 "(" => "_", ")" => "", "," => "_",
+                                 "&" => "_x_"))
+
 function _parse_effect!(lhs::Expr, rhs; info, known::Bool=false, optional::Bool=false)
     head = lhs.args[1]::Symbol
     args = map(_prior_slot, lhs.args[2:end])
@@ -1792,17 +1807,9 @@ function _parse_effect!(lhs::Expr, rhs; info, known::Bool=false, optional::Bool=
         rhs = Expr(:call, _brm_known, _brm_known_value_expr(rhs, lhs))
     end
     address = _prior_address(head, args)
-    # The key becomes a generated LOCAL NAME. A term key carries `(`/`)`/`,`,
-    # which are legal inside a `Symbol` but not in emitted Julia source, so
-    # those three characters are folded out. An interaction key's `&` is
-    # folded the same way, to the `_x_` the emitted `int_a_x_b` columns
-    # already use. Nothing else is touched -- `:` already rode through this
-    # key before term addresses existed, and rewriting it would move the
-    # generated name of every ALREADY-configured model. The ADDRESS itself is
-    # untouched, so diagnostics stay spelled the way the user wrote them.
-    key = Symbol("__effect__", replace(join(string.(address), "__"),
-                                       "(" => "_", ")" => "", "," => "_",
-                                       "&" => "_x_"))
+    # The ADDRESS itself is untouched, so diagnostics stay spelled the way
+    # the user wrote them.
+    key = _brm_prior_statement_key(address)
     haskey(info.alllocals, key) && error(
         "@brm: duplicate `$head($(join(args, ", ")))` prior statement")
     info.alllocals[key] = :local
@@ -2923,7 +2930,7 @@ function _prior_address_spelling(address::Vector{Symbol})
         return class, length(address) == 4 ?
             [predictor, address[2], address[4]] : [predictor, address[2]]
     elseif class === :cor
-        return :cor, [_EFFECT_COLON, address[2]]
+        return :cor, [length(address) >= 3 ? address[3] : _EFFECT_COLON, address[2]]
     elseif class === :term_sd
         return :sd, [address[3], address[2], address[4:end]...]
     elseif haskey(_TERM_PRIOR_CLASS_HEAD, class)
