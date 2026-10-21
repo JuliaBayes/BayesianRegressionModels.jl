@@ -136,6 +136,46 @@ zscaled_interaction(d) = @brm d begin
     mu ~ 1 + zscale(x) & z
     y ~ Normal(mu, sigma)
 end
+censored_below(d) = @brm d begin
+    mu ~ 1 + zscale(x)
+    y ~ censored(Normal(mu, 1); lower=lo)
+end
+pk_censored(d) = @brm d begin
+    sigma ~ Exponential(1)
+    log_CL ~ 1 + zscale(weight) + (1 | p | subject)
+    effect(log_CL, Intercept) ~ Normal(0, 1)
+    sd(:, p) ~ Exponential(1)
+    @plate for i in eachindex(log_CL)
+        conc[i] = dose[i] .* exp.(-exp(log_CL[i]) .* t[i])
+        y[i] ~ censored(normal(conc[i], sigma); lower=lo[i])
+    end
+end
+# Long-format reads joined to their subject, observed in a `@plate` cell or
+# as the joined rows, censored below a per-read limit.
+reads_in_cell(d) = @brm d begin
+    sigma ~ Exponential(1.0)
+    log_k ~ 1 + (1 | p | subject)
+    effect(log_k, Intercept) ~ Normal(0.0, 1.0)
+    sd(:, p) ~ Exponential(1.0)
+    ragged(obs_time, obs_subject)
+    ragged(obs_limit, obs_subject)
+    ragged(y, obs_subject)
+    @plate for i in eachindex(log_k)
+        loc[i] = exp.(-exp(log_k[i]) .* obs_time[i])
+        y[i] ~ censored(Normal(loc[i], sigma); lower=obs_limit[i])
+    end
+end
+reads_joined(d) = @brm d begin
+    sigma ~ Exponential(1.0)
+    log_k ~ 1 + (1 | p | subject)
+    effect(log_k, Intercept) ~ Normal(0.0, 1.0)
+    sd(:, p) ~ Exponential(1.0)
+    ragged(obs_time, obs_subject)
+    @plate for i in eachindex(log_k)
+        loc[i] = exp.(-exp(log_k[i]) .* obs_time[i])
+    end
+    ragged(y, obs_subject) ~ censored(Normal(loc, sigma); lower=obs_limit)
+end
 end
 const RM = ReprocessModels
 
@@ -148,6 +188,7 @@ const TRAIN = (; x=collect(range(0.3, 4.1; length=N)) .^ 1.3,
     other=["b", "c", "a"][mod1.(1:N, 3)],
     keep=[isodd(i) || i > 8 for i in 1:N],
     xm=Union{Missing,Float64}[i % 4 == 0 ? missing : 0.4 + 0.3i for i in 1:N],
+    lo=fill(-0.5, N),
     y=sin.(1:N) .+ 0.1 .* (1:N))
 rows_of(data, rows) = map(v -> v isa AbstractVector ? v[rows] : v, data)
 without(data, name) = NamedTuple{filter(!=(name), keys(data))}(data)
@@ -155,11 +196,22 @@ without(data, name) = NamedTuple{filter(!=(name), keys(data))}(data)
 const PK = (; subject=["s1", "s2", "s3", "s4", "s5"],
     weight=[60.0, 72.0, 81.0, 55.0, 90.0], dose=[100.0, 120.0, 80.0, 100.0, 150.0],
     t=[[0.5, 1.0, 2.0], [0.25, 1.5], [0.5, 1.0, 2.0, 4.0], [1.0], [0.5, 2.0]],
+    lo=[fill(0.15, 3), fill(0.15, 2), fill(0.15, 4), fill(0.15, 1), fill(0.15, 2)],
     y=[[1.0, 0.8, 0.5], [1.2, 0.7], [0.9, 0.7, 0.4, 0.2], [0.6], [1.3, 0.5]])
 # Subject j's reads in the flattened `conc` of the training data.
 const PK_ENDS = cumsum([0; length.(PK.t)])
 pk_reads(conc, subjects) =
     reduce(vcat, [conc[(PK_ENDS[j] + 1):PK_ENDS[j + 1]] for j in subjects])
+
+const READS = (; subject=["b", "a", "c"], obs_subject=["a", "c", "b", "a", "b", "c"],
+    obs_time=[0.5, 0.25, 1.5, 1.0, 3.0, 2.0], obs_limit=[0.05, 0.05, 0.1, 0.4, 0.05, 0.05],
+    y=[0.81, 0.76, 0.52, 0.4, 0.21, 0.33])
+# The subjects `keep` with their reads.
+function reads_of(keep)
+    rows = findall(in(keep), READS.obs_subject)
+    (; subject=keep, obs_subject=READS.obs_subject[rows], obs_time=READS.obs_time[rows],
+        obs_limit=READS.obs_limit[rows], y=READS.y[rows])
+end
 
 # An authored value of `rk`'s graph on its own bound data.
 function graph_value(rk, want, u)
@@ -355,7 +407,7 @@ end
     for (build, rows) in ((RM.string_factor, [3, 6]), (RM.monotonic, [7]),
             (RM.fitted_constant, 2:5), (RM.zscaled, 2:5), (RM.zscaled, [7]),
             (RM.grouped, [3, 6]), (RM.smooth, [7]), (RM.thin_plate, 2:5),
-            (RM.shrunk, 2:5))
+            (RM.shrunk, 2:5), (RM.censored_below, 2:5))
         rk = RKBRMI(build(TRAIN))
         u = point(rk)
         design = rows_of(TRAIN, rows)
@@ -368,15 +420,28 @@ end
         check_no_density(replay, u)
     end
     # One array of reads per subject: `conc` follows each subject's `t`.
-    rk = RKBRMI(RM.pk(PK))
-    u = point(rk)
-    for subjects in ([2], [4, 1])
-        design = rows_of(PK, subjects)
+    for build in (RM.pk_censored, RM.pk)
+        rk = RKBRMI(build(PK))
+        u = point(rk)
+        for subjects in ([2], [4, 1])
+            design = rows_of(PK, subjects)
+            replay = reprocess(rk, without(design, :y))
+            @test graph_value(replay, :conc, u) == graph_value(reprocess(rk, design), :conc, u)
+            check_no_density(replay, u)
+        end
+    end
+    # Long-format reads: the rows follow each subject's `obs_subject` reads.
+    for build in (RM.reads_in_cell, RM.reads_joined), keep in (["c"], ["c", "a"])
+        rk = RKBRMI(build(READS))
+        u = point(rk)
+        design = reads_of(keep)
         replay = reprocess(rk, without(design, :y))
-        @test graph_value(replay, :conc, u) == graph_value(reprocess(rk, design), :conc, u)
+        @test graph_value(replay, :loc, u) == graph_value(reprocess(rk, design), :loc, u)
         check_no_density(replay, u)
     end
     # New subjects without responses take caller-supplied effects.
+    rk = RKBRMI(RM.pk(PK))
+    u = point(rk)
     b = graph_value(rk, :b_p_subject, u)
     replay = reprocess(rk, without(merge(rows_of(PK, [2]), (; subject=["new"])), :y);
         resample_groups=[:subject])
