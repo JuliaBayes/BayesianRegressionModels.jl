@@ -330,47 +330,57 @@ in formula order. Each entry has
 ```
 
 `class` is `:sd`, `:cor`, or `:ranef` (the block's standardized law, such as
-`ranef(:, ID) ~ TDist(nu)`). `predictor === nothing` means the statement is not
-predictor-specific — `sd(:, ID)`, and always `cor(:, ID)`, since a shared
-`|ID|` covariance block spans every predictor that slices it. `coefficient ===
-nothing` means the whole block rather than one margin. `sd(lp, ID, coef)`
-carries both symbols.
+`ranef(:, ID) ~ TDist(nu)`). `id` is the address target: an `|ID|`, or the
+grouping column of random-effect blocks written without one (see
+[`@brm`](@ref)). `predictor === nothing` means the statement is not
+predictor-specific — `sd(:, ID)`, and `cor(:, ID)`, since a shared `|ID|`
+covariance block spans every predictor that slices it; `cor(lp, g)` names the
+correlated block of one predictor grouped by an ID-less column `g`.
+`coefficient === nothing` means the whole block rather than one margin.
+`sd(lp, ID, coef)` carries both symbols.
 Use [`ranefcoefnames`](@ref) for the authoritative ordered margin addresses of
 a shared `|ID|` block.
 """
 Base.@nospecializeinfer function ranef_effect_priors(@nospecialize(brmi::BRMI))
     out = NamedTuple[]
     for op_nc in _brm_operation_values(brmi)
-        op = _named_op(op_nc)
-        isnothing(op) && continue
-        getf(op) === (~) || continue
-        lhs, rhs = getargs(op, 2)
-        lhs_e = _as_expr_column(lhs)
-        isnothing(lhs_e) && continue
-        getf(lhs_e) === effect || continue
-        address = getargs(lhs_e)
-        isempty(address) && continue
-        class = first(address)
-        class in (:sd, :cor, :ranef) || continue
-        valid = class === :cor ? length(address) == 2 : length(address) in (2, 3, 4)
-        valid || error(
-            "ranef_effect_priors: malformed random-effect address " *
-            "`effect($(join(address, ", ")))`")
-        rhs_e = _as_expr_column(rhs)
-        isnothing(rhs_e) && error(
-            "ranef_effect_priors: `effect(...)` RHS is not a distribution expression")
-        # `nothing` uniformly means "every linear predictor slicing the block":
-        # both the block-wide `sd(:, ID)` (two-symbol address) and the margin
-        # form `sd(:, ID, coef)` (an explicit Colon in slot 3) reach every
-        # predictor, and the backend should not have to distinguish them.
-        predictor = length(address) >= 3 && address[3] !== _EFFECT_COLON ?
-                    address[3] : nothing
-        coefficient = length(address) == 4 ? address[4] : nothing
-        push!(out, (; class, id=address[2], predictor, coefficient,
-                     family=getf(rhs_e), arguments=getargs(rhs_e),
-                     keywords=getkwargs(rhs_e), expression=rhs_e))
+        spec = _brm_ranef_effect_prior(op_nc)
+        isnothing(spec) || push!(out, spec)
     end
     out
+end
+
+# The `ranef_effect_priors` entry of one operation, or `nothing` when it is not
+# a random-effect `sd`/`cor`/`ranef` statement.
+Base.@nospecializeinfer function _brm_ranef_effect_prior(@nospecialize(op_nc))
+    op = _named_op(op_nc)
+    isnothing(op) && return nothing
+    getf(op) === (~) || return nothing
+    lhs, rhs = getargs(op, 2)
+    lhs_e = _as_expr_column(lhs)
+    isnothing(lhs_e) && return nothing
+    getf(lhs_e) === effect || return nothing
+    address = getargs(lhs_e)
+    isempty(address) && return nothing
+    class = first(address)
+    class in (:sd, :cor, :ranef) || return nothing
+    valid = class === :cor ? length(address) in (2, 3) : length(address) in (2, 3, 4)
+    valid || error(
+        "ranef_effect_priors: malformed random-effect address " *
+        "`effect($(join(address, ", ")))`")
+    rhs_e = _as_expr_column(rhs)
+    isnothing(rhs_e) && error(
+        "ranef_effect_priors: `effect(...)` RHS is not a distribution expression")
+    # `nothing` uniformly means "every linear predictor slicing the block":
+    # both the block-wide `sd(:, ID)` (two-symbol address) and the margin
+    # form `sd(:, ID, coef)` (an explicit Colon in slot 3) reach every
+    # predictor, and the backend should not have to distinguish them.
+    predictor = length(address) >= 3 && address[3] !== _EFFECT_COLON ?
+                address[3] : nothing
+    coefficient = length(address) == 4 ? address[4] : nothing
+    (; class, id=address[2], predictor, coefficient,
+       family=getf(rhs_e), arguments=getargs(rhs_e),
+       keywords=getkwargs(rhs_e), expression=rhs_e)
 end
 
 # ---- term-parameter prior statements ---------------------------------------

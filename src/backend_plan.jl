@@ -1451,14 +1451,22 @@ function _brm_group_declaration(predictor::Symbol, term::ExprColumn)
         explicit_id, id, uncorrelated, descriptor)
 end
 
+# The `~` expression of an operation whose formula terms declare the observation
+# model's random-effect groups, else `nothing`. Hyper-predictor ranefs lower
+# through their own per-level blocks, not through the shared group
+# declarations.
+function _brm_group_declaring_expression(@nospecialize(operation))
+    expression = operation isa NamedColumn ? parent(operation) : operation
+    expression isa ExprColumn && getf(expression) === (~) || return nothing
+    isnothing(_hyper_predictor_statement(expression)) || return nothing
+    expression
+end
+
 Base.@nospecializeinfer function _brm_group_declarations(@nospecialize(brmi::BRMI))
     declarations = _BRMGroupDeclaration[]
     for (predictor, operation) in _brm_operation_entries(brmi)
-        expression = operation isa NamedColumn ? parent(operation) : operation
-        expression isa ExprColumn && getf(expression) === (~) || continue
-        # Hyper-predictor ranefs lower through their own per-level blocks, not
-        # through the observation model's shared group declarations.
-        isnothing(_hyper_predictor_statement(expression)) || continue
+        expression = _brm_group_declaring_expression(operation)
+        isnothing(expression) && continue
         _, rhs = getargs(expression, 2)
         for term in _brm_additive_terms(rhs)
             _brm_is_grouped_term(term) || continue
@@ -1467,6 +1475,13 @@ Base.@nospecializeinfer function _brm_group_declarations(@nospecialize(brmi::BRM
     end
     Tuple(declarations)
 end
+
+# The raw data column a declaration groups by (the stratified `gr(g; by=b)`
+# groups by `g`), or `nothing` for a multi-membership `mm(...)` block.
+_brm_grouping_column(d::_BRMGroupDeclaration) = _brm_grouping_column(d.descriptor)
+_brm_grouping_column(g::NamedColumn) = name(g)
+_brm_grouping_column(g::Tuple{NamedColumn,NamedColumn}) = name(first(g))
+_brm_grouping_column(::MultiMembershipTerm) = nothing
 
 function _brm_group_strata(group_indices, stratum_indices, n_groups,
                            group::Symbol, by::Symbol)
@@ -2631,10 +2646,11 @@ function _brm_known_ranef_scale(spec, spelling; prefix)
     value
 end
 
-function _brm_known_ranef_cor(spec, n_terms::Int; prefix)
-    spelling = "cor(:, $(spec.id))"
+function _brm_known_ranef_cor(spec, n_terms::Int; prefix,
+                              spelling=_brm_ranef_spelling(spec),
+                              block="`|$(spec.id)|`")
     n_terms >= 2 || error(
-        "$prefix: `$spelling = R` fixes a correlation, but `|$(spec.id)|` has " *
+        "$prefix: `$spelling = R` fixes a correlation, but $block has " *
         "one margin and so no correlation to fix")
     value = _brm_known_spec_value(spec, spelling; prefix)
     value isa AbstractMatrix && size(value) == (n_terms, n_terms) || error(
@@ -2750,36 +2766,38 @@ _brm_ranef_distribution(T, spec; prefix) = error(
     "$prefix: random-effect blocks support the standardized laws `Normal()` " *
     "and `TDist(nu)`; got `$(spec.expression)`")
 
-_brm_ranef_sd_spelling(spec) =
-    "sd($(isnothing(spec.predictor) ? ":" : spec.predictor), $(spec.id)" *
+# A random-effect statement's address as the formula spells it.
+_brm_ranef_spelling(spec) =
+    "$(spec.class)($(isnothing(spec.predictor) ? ":" : spec.predictor), $(spec.id)" *
     (isnothing(spec.coefficient) ? "" : ", $(spec.coefficient)") * ")"
+_brm_ranef_sd_spelling(spec) = _brm_ranef_spelling(spec)
 
+# The margins one `sd(...)` statement claims, with its SPECIFICITY: the number
+# of concrete (non-`:`) slots beyond the block address, exactly as on the
+# population surface, so a more specific statement overrides a broader one and
+# an exact tie is an error rather than last-writer-wins. `nothing` is the
+# block-wide `sd(:, ID)`, the base layer every unclaimed margin falls through
+# to. A predictor-only `sd(lp, ID)` sets every margin `lp` contributes, as
+# `sd(:, ID, coefficient)` sets that coefficient across every predictor.
 function _brm_ranef_margin_claim(spec, margins;
                                  prefix="BRM backend lowering")
     spelling = _brm_ranef_sd_spelling(spec)
     if isnothing(spec.predictor) && isnothing(spec.coefficient)
         return nothing
-    elseif isnothing(spec.predictor)
-        hits = findall(m -> m.coefficient === spec.coefficient, margins)
-        isempty(hits) && error(
-            "$prefix: `$spelling` matches no random-effect margin")
-        return (hits, 1)
-    elseif isnothing(spec.coefficient)
-        hits = findall(m -> m.predictor === spec.predictor, margins)
-        isempty(hits) && error(
-            "$prefix: `$spelling` matches no random-effect margin")
-        length(hits) == 1 || error(
-            "$prefix: `$spelling` is ambiguous because that predictor " *
-            "contributes $(length(hits)) margins; name a coefficient")
-        return (hits, 1)
     end
-    hits = findall(m -> m.predictor === spec.predictor &&
-                        m.coefficient === spec.coefficient, margins)
+    hits = findall(margins) do m
+        (isnothing(spec.predictor) || m.predictor === spec.predictor) &&
+            (isnothing(spec.coefficient) || m.coefficient === spec.coefficient)
+    end
     isempty(hits) && error(
-        "$prefix: `$spelling` matches no random-effect margin")
-    length(hits) == 1 || error(
+        "$prefix: `$spelling` matches no random-effect margin. Its block's " *
+        "margins are " *
+        join(("($(m.predictor), $(m.coefficient))" for m in margins), ", ") *
+        "; `ranefcoefnames(brmi, :$(spec.id))` lists an `|ID|` block's.")
+    rank = isnothing(spec.predictor) || isnothing(spec.coefficient) ? 1 : 2
+    rank == 2 && length(hits) > 1 && error(
         "$prefix: `$spelling` matches $(length(hits)) margins and is ambiguous")
-    (hits, 2)
+    (hits, rank)
 end
 
 """
@@ -2798,8 +2816,16 @@ function _brm_resolve_ranef_effect_overrides(
         matches = Any[key for key in keys(bucket_margins)
                       if first(key) === spec.id]
         isempty(matches) && error(
-            "$prefix: `$(spec.class)(:, $(spec.id))` matches no shared " *
-            "`|$(spec.id)|` random-effect block")
+            "$prefix: `$(_brm_ranef_spelling(spec))` matches no shared " *
+            "`|$(spec.id)|` random-effect block. A random-effect address names " *
+            "an `|ID|`, or the grouping column of a block written without one")
+        spec.class === :cor && !isnothing(spec.predictor) && error(
+            "$prefix: correlation priors are block-wide — one shared " *
+            "`|$(spec.id)|` covariance block spans every linear predictor that " *
+            "slices it, so there is no per-predictor correlation to address. " *
+            "Write `cor(:, $(spec.id))`, not `$(_brm_ranef_spelling(spec))`. " *
+            "(`cor(<linear_predictor>, g)` addresses the correlated block of " *
+            "one predictor grouped by a column `g` that carries no `|ID|`.)")
         length(matches) == 1 || error(
             "$prefix: public `|$(spec.id)|` addresses $(length(matches)) blocks " *
             "with different grouping factors; use a unique ID")

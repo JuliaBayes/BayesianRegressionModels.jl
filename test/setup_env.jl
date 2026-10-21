@@ -90,9 +90,12 @@ const PINS = [
     # for prediction-only designs; dad59972 extends that to censored,
     # truncated and interval-censored responses (snag
     # rkppl-absent-cen-9af487f3). Both contain f13e68d4 (location-alias
-    # elision renames cell parameters). cc50dae0 observes a carried array
-    # that is bound data in `@scan`, at top level and per plate cell (snag
-    # observed-scan-rk-f3f85355); it contains 60ff95f1 (sampled seeds and
+    # elision renames cell parameters). ae731d3f + fe85d9f6 keep a location
+    # over a computed design queryable by its authored name, e.g. `mu` over a
+    # completed `mi` covariate (snag rkppl-location-a-2ec8954d); cc50dae0 is
+    # the RK main containing them. It also observes a carried array that is
+    # bound data in `@scan`, at top level and per plate cell (3581f5a8, snag
+    # observed-scan-rk-f3f85355), and contains 60ff95f1 (sampled seeds and
     # steps in plate-cell scans).
     ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "cc50dae06e9c212fb0d36c11332aeefef1d0e3a5"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered

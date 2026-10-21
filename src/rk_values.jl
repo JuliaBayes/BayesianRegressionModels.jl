@@ -42,12 +42,25 @@ function _rk_ast_declared_prior(prior, bindings, taken)
     prepared = _brm_prepare_expr(prior)
     prepared.callable === truncated &&
         return _rk_ast_truncated_prior(prepared, bindings, taken)
-    !any(key -> key in (:lower, :upper), keys(prepared.kwargs)) &&
+    _rk_declaration_bounded(prepared) ||
         return _rk_value_expr!(bindings, prepared, taken)
+    _rk_ast_restricted_prior(prepared, bindings, taken)
+end
+
+_rk_declaration_bounded(prepared) =
+    any(key -> key in (:lower, :upper), keys(prepared.kwargs))
+
+# `Family(args...; lower, upper)`: the family kernel restricted to the declared
+# bounds. A scale (`floor = 0.0`) intersects its lower bound with the positive
+# support, as SBBRMI's scale vectors do (`_sb_vector_prior_parts`).
+function _rk_ast_restricted_prior(prepared, bindings, taken; floor=nothing)
     base = _BRMPreparedExpr(prepared.callable, prepared.args,
         (; (key => value for (key, value) in pairs(prepared.kwargs)
             if !(key in (:lower, :upper)))...))
-    lower = _rk_value_expr!(bindings, get(prepared.kwargs, :lower, -Inf), taken)
+    lower = get(prepared.kwargs, :lower, something(floor, -Inf))
+    floor === nothing || (lower = lower isa Real ?
+        max(floor, Float64(lower)) : _BRMPreparedExpr(max, (floor, lower), (;)))
+    lower = _rk_value_expr!(bindings, lower, taken)
     upper = _rk_value_expr!(bindings, get(prepared.kwargs, :upper, Inf), taken)
     Expr(:call, :restricted, _rk_value_expr!(bindings, base, taken), lower, upper)
 end
@@ -88,6 +101,8 @@ function _rk_ast_positive_prior(prior, bindings, taken; default=:HalfNormal)
     prepared = _brm_prepare_expr(prior)
     prepared.callable === truncated &&
         return _rk_ast_truncated_prior(prepared, bindings, taken)
+    _rk_declaration_bounded(prepared) &&
+        return _rk_ast_restricted_prior(prepared, bindings, taken; floor=0.0)
     expression = _rk_value_expr!(bindings, prepared, taken)
     family = nameof(getf(prior))
     family in (:Exponential, :Gamma, :InverseGamma, :LogNormal, :Weibull,

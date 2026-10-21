@@ -445,9 +445,13 @@ the formula.
 
 `total_effect_blocks(sb)` reports the selected blocks. `total_groups=()` opts out;
 `total_groups=[:subject]` requires every block of that group to be eligible;
-otherwise it raises an error naming the predictors whose blocks would stay
-conventional. Explicit `centered_groups=[:subject]` selects conventional
-centered deviations.
+otherwise it raises an error naming each predictor whose block would stay
+conventional, why, and the eligible subset. `total_groups=[:subject => [:b]]`
+(or `:subject => :b`) requests only `b`'s block on `subject`; the group's other
+blocks stay conventional. This suits nonlinear mixed-effects models with one
+strongly identified per-subject margin beside weakly identified ones. Entries
+mix, as in `[:site, :subject => [:b, :c]]`. Explicit
+`centered_groups=[:subject]` selects conventional centered deviations.
 
 Automatic selection currently requires one grouping structure per predictor,
 independent margins, supported population priors, and a known relation between
@@ -455,12 +459,17 @@ the population and random-effect columns. Raw numeric columns, pure data
 expressions, and centered/scaled population columns with matching raw random
 columns are supported. `offset(...)` terms, of data or of model values, stay
 ordinary summands of the predictor beside the totals: they share no coefficient
-with them, so the marginalization stays exact. Correlated, crossed, stratified,
+with them, so the marginalization stays exact. Random-effect scale priors may be
+Normal, LogNormal, Cauchy, Exponential, TDist, LocationScale or Gamma with
+literal arguments, or one of them truncated at zero with no upper bound
+(`truncated(...; lower=0)` or `truncated(..., 0, Inf)`): on the positive scale
+the truncation only renormalizes by a constant. Correlated, crossed, stratified,
 multi-membership and R2D2 blocks use the conventional representation. A request for totals on an
 unsupported group raises an error.
 
-Automatic selection retains the conventional representation if some ordinary
-group blocks require it. One adaptive wrapper combines totals and S2Z contrasts
+Automatic selection retains the conventional representation for the whole model
+if some ordinary group blocks require it; request the eligible blocks with
+`group => predictors` to mix the two. One adaptive wrapper combines totals and S2Z contrasts
 with ordinary and R2D2 random effects and HSGP weights; only `cdar` cells need
 a wrapper of their own.
 

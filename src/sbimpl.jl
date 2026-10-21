@@ -3136,9 +3136,15 @@ summands. Original population
 coefficients and deviations are recovered in generated quantities. Inspect
 [`total_effect_blocks`](@ref), or use `total_groups=()` for the conventional
 representation. Naming a group explicitly requires every block of that group to
-be eligible and errors otherwise, naming the predictors whose blocks would stay
-conventional. Correlated, crossed, stratified, multi-membership and R2D2 blocks
-retain conventional emission under `:auto`.
+be eligible and errors otherwise, naming each predictor whose block would stay
+conventional and why. `total_groups=[:g => [:b]]` (or `:g => :b`) requests only
+`b`'s block on `g`, leaving the group's other blocks conventional; entries mix,
+as in `[:subject, :g => [:b, :c]]`. `:auto` keeps the whole model conventional
+when any block must stay conventional. Scale priors may be any supported family
+on the positive half-line, or one of them truncated at zero with no upper bound
+(`truncated(...; lower=0)` or `truncated(..., 0, Inf)`).
+Correlated, crossed, stratified, multi-membership and R2D2 blocks retain
+conventional emission under `:auto`.
 
 `s2z_groups` is an opt-in collection of grouping-factor names (default `()`,
 disabled) emitted in the posterior-preserving sum-to-zero parameterization:
@@ -3220,9 +3226,13 @@ fit's draws onto the full data with [`reprocess`](@ref).
 Formula statements `sd(:, ID) ~ Exponential(scale)` and
 `cor(:, ID) ~ LKJCholesky(K, eta)` configure a shared `|ID|` block.
 An SD statement can instead select one emitted margin with
-`sd(predictor, ID, coefficient)`, or write `sd(predictor, ID)` when that
-predictor contributes exactly one margin. See [`ranefcoefnames`](@ref)
-for the authoritative ordered addresses. Omitted statements retain historical
+`sd(predictor, ID, coefficient)`, or every margin one predictor contributes
+with `sd(predictor, ID)`. See [`ranefcoefnames`](@ref) for the authoritative
+ordered addresses. A block written without an ID, `(… | g)` or `(… || g)`, is
+addressed by its grouping column instead (`sd(:, g)`, `sd(lp, g, x)`,
+`cor(lp, g)`); it then lowers as the generated `|lp__g|` block (the `k`-th `||`
+term as `|lp__g__nocor__k|`), and that ID is what this backend's `parent`, its
+descriptor and [`brm_start`](@ref) show. Omitted statements retain historical
 defaults; Julia's Exponential scale is converted to Stan's rate.
 
 Use [`stan_code`](@ref) to extract the transpiled Stan source. For
@@ -3772,7 +3782,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
        s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts, held_out=(),
        resample_covariates=(), _frozen_preproc=nothing, _marginal_id_targets=nothing,
        _s2z_generated=nothing)
-    brmi = _brm_resolve_optional_priors(brmi)
+    brmi = _brm_resolve_prior_addresses(brmi)
     # A frozen re-emission codes releveled factors over their fitted levels.
     isnothing(_frozen_preproc) || (brmi = _sb_fit_factor_levels(brmi, _frozen_preproc))
     source_parent = brmi
@@ -4991,9 +5001,11 @@ function generative_plan(plan::GenerativePlan, new_df;
     # reports the missing builder rather than a declaration walk).
     centered_groups = isnothing(centered_groups) ? _generative_plan_centered(plan) :
         (centered_groups isa Set ? centered_groups : Set{Symbol}(centered_groups))
-    # Preserve the fitted representation and population/random basis relation.
-    # An empty selected set also preserves an explicit conventional opt-out.
-    selected = unique(b.group for b in total_effect_blocks(plan))
+    # Preserve the fitted representation and population/random basis relation:
+    # exactly the fitted blocks, so a fit that mixed exact totals with
+    # conventional blocks of one group rebuilds mixed. An empty selection also
+    # preserves an explicit conventional opt-out.
+    selected = [b.group => b.predictor for b in total_effect_blocks(plan)]
     # A rebuild for new groups keeps every `constant(...)` at its fitted value;
     # the new data need not carry what it was computed from.
     constants = filter(((_, entry),) -> entry.kind === :constant, plan.preproc)
@@ -6762,6 +6774,11 @@ function _sb_emit_prior!(stmts, target, ::typeof(truncated), op)
          getfield(@__MODULE__, token)) : token
     lower = isnothing(spec.lower) ? nothing : _sb_effect_prior_arg(spec.lower)
     upper = isnothing(spec.upper) ? nothing : _sb_effect_prior_arg(spec.upper)
+    # An infinite bound is an open end, as in `Distributions.truncated`.
+    lower isa Real && lower == -Inf && (lower = nothing)
+    upper isa Real && upper == Inf && (upper = nothing)
+    isnothing(lower) && isnothing(upper) &&
+        return (push!(stmts, only(translated)); true)
     producer, arguments = if isnothing(lower)
         StanBlocks.upper_conditioning, (family, upper, rhs.args[2:end]...)
     elseif isnothing(upper)
@@ -7199,7 +7216,9 @@ _sb_prior_arg(x::Symbol) = x
 # Inside an HSGP submodel the term's validity floor is its `rho_lower` input.
 _sb_prior_arg(::_BRMLengthScaleFloor) = :rho_lower
 _sb_prior_arg(x::NamedColumn) = _sb_prior_arg_named(x, parent(x))
-_sb_prior_arg_named(x, ::MissingColumn) = name(x)
+# An unbound `Inf` (a truncation bound) is Julia's number, which StanBlocks
+# renders as Stan's infinity; a bare name would resolve to a Main Float64.
+_sb_prior_arg_named(x, ::MissingColumn) = name(x) === :Inf ? Inf : name(x)
 _sb_prior_arg_named(x, ::DataColumn) = name(x)
 _sb_prior_arg_named(x, ::ExprColumn{typeof(assign)}) = name(x)
 # After a formula-local prior has been parsed, later references carry that
@@ -10395,49 +10414,6 @@ function _sb_ranef_lkj(spec, n_terms::Int)
     Float64(eta)
 end
 
-# Resolve one SD statement onto the margins it claims. `nothing` means the
-# whole block -- the base layer every unclaimed margin falls through to.
-# Otherwise the return is the claimed margin indices plus the statement's
-# SPECIFICITY, counted in concrete (non-`:`) slots beyond the ID exactly as on
-# the population surface, so a more specific statement can override a broader
-# one and an exact tie is an error rather than last-writer-wins.
-function _sb_ranef_margin_index(spec, margins)
-    spelling = "sd($(isnothing(spec.predictor) ? ":" : spec.predictor), " *
-               "$(spec.id)" *
-               (isnothing(spec.coefficient) ? "" : ", $(spec.coefficient)") * ")"
-    if isnothing(spec.predictor) && isnothing(spec.coefficient)
-        return nothing
-    elseif isnothing(spec.predictor)
-        # `sd(:, ID, coefficient)` -- one margin across EVERY predictor that
-        # slices this block. Only spellable since the head-position grammar.
-        hits = findall(m -> m.coefficient === spec.coefficient, margins)
-        isempty(hits) && error(
-            "sbimpl: `$spelling` matches no random-effect margin. Inspect " *
-            "`ranefcoefnames(brmi, :$(spec.id))` for valid addresses.")
-        return (hits, 1)
-    elseif isnothing(spec.coefficient)
-        hits = findall(m -> m.predictor === spec.predictor, margins)
-        isempty(hits) && error(
-            "sbimpl: `$spelling` matches no " *
-            "random-effect margin. Inspect `ranefcoefnames(brmi, :$(spec.id))`.")
-        length(hits) == 1 || error(
-            "sbimpl: `$spelling` is ambiguous " *
-            "because that predictor contributes $(length(hits)) margins; use " *
-            "`sd($(spec.predictor), $(spec.id), coefficient)`.")
-        return (hits, 1)
-    else
-        hits = findall(m -> m.predictor === spec.predictor &&
-                            m.coefficient === spec.coefficient, margins)
-        isempty(hits) && error(
-            "sbimpl: `$spelling` matches no random-effect margin. Inspect " *
-            "`ranefcoefnames(brmi, :$(spec.id))` for valid addresses.")
-        length(hits) == 1 || error(
-            "sbimpl: `$spelling` matches $(length(hits)) margins and is " *
-            "therefore ambiguous")
-        return (hits, 2)
-    end
-end
-
 # Resolve formula-level random-effect prior statements onto collected ID
 # buckets. The result is keyed exactly like `id_buckets`; entries are present
 # only for explicitly configured buckets, preserving default emission byte for
@@ -10698,11 +10674,6 @@ function _sb_ranef_r2d2_joint(brmi::BRMI, id, margins, include, effect_overrides
     (; predictors, n_extra=cursor - n_margins)
 end
 
-function _sb_ranef_r2d2_spelling(spec)
-    "sd($(isnothing(spec.predictor) ? ":" : spec.predictor), $(spec.id)" *
-    (isnothing(spec.coefficient) ? "" : ", $(spec.coefficient)") * ")"
-end
-
 Base.@nospecializeinfer function _sb_ranef_r2d2_overrides(@nospecialize(brmi::BRMI), id_buckets,
                                   effect_overrides=Dict{Symbol,Any}();
                                   frozen_preproc=nothing)
@@ -10746,7 +10717,7 @@ Base.@nospecializeinfer function _sb_ranef_r2d2_overrides(@nospecialize(brmi::BR
         if !isempty(block_specs)
             base_spec = only(block_specs)
             base = _sb_ranef_r2d2_config(
-                base_spec, _sb_ranef_r2d2_spelling(base_spec); block_wide=true)
+                base_spec, _brm_ranef_sd_spelling(base_spec); block_wide=true)
             # `Any` on purpose: a constant block reference (`Float64`) and a
             # sampled per-margin override (`Symbol`) legitimately coexist, and
             # under `include=` an omitted reference is `nothing` until the
@@ -10755,10 +10726,10 @@ Base.@nospecializeinfer function _sb_ranef_r2d2_overrides(@nospecialize(brmi::BR
             claims = Dict{Int,Int}()
             for spec in id_specs
                 spec === base_spec && continue
-                spelling = _sb_ranef_r2d2_spelling(spec)
+                spelling = _brm_ranef_sd_spelling(spec)
                 override = _sb_ranef_r2d2_config(
                     spec, spelling; override_only=true)
-                claim = _sb_ranef_margin_index(spec, margins)
+                claim = _brm_ranef_margin_claim(spec, margins; prefix="sbimpl")
                 isnothing(claim) && error(
                     "sbimpl: duplicate block-wide R2D2 statement for `|$id|`")
                 indices, rank = claim
@@ -10784,9 +10755,9 @@ Base.@nospecializeinfer function _sb_ranef_r2d2_overrides(@nospecialize(brmi::BR
         else
             claimed = Dict{Int,String}()
             for spec in id_specs
-                spelling = _sb_ranef_r2d2_spelling(spec)
+                spelling = _brm_ranef_sd_spelling(spec)
                 config = _sb_ranef_r2d2_config(spec, spelling)
-                claim = _sb_ranef_margin_index(spec, margins)
+                claim = _brm_ranef_margin_claim(spec, margins; prefix="sbimpl")
                 isnothing(claim) && error(
                     "sbimpl: internal block-wide R2D2 resolution error for `$spelling`")
                 indices, _ = claim
@@ -12217,17 +12188,26 @@ _sb_collect_terms_expr!(acc, ::typeof(doublepipe), x) = begin
     lhs, rhs = args
     rhs_nc = _as_named_column(rhs)
     isnothing(rhs_nc) && error("sbimpl: `||` zerocorr RHS must be a NamedColumn group, got $(typeof(rhs))")
+    for (i, term) in enumerate(_sb_zerocorr_terms(lhs, name(rhs_nc)))
+        nocor = NamedColumn(Symbol(name(rhs_nc), :__nocor__, i), parent(rhs_nc))
+        push!(acc, ExprColumn(|, term, nocor))
+    end
+end
+
+# The single-term blocks `(t1 + t2 + ... || g)` stands for, in order: the raw
+# effect each independent block declares. Each term becomes its OWN block,
+# which on its own has no intercept. The per-level decision belongs to the
+# ORIGINAL left-hand side, so every categorical term that is not the one it
+# selects is pinned to treatment coding here, with the same switch a user
+# would write.
+function _sb_zerocorr_terms(lhs, gname::Symbol)
     inner = filter(!_sb_is_drop_intercept, _zerocorr_inner(lhs))
     isempty(inner) && error(
-        "sbimpl: `(… || $(name(rhs_nc)))` has no terms after dropping `0`; an ",
+        "sbimpl: `(… || $gname)` has no terms after dropping `0`; an ",
         "uncorrelated block needs at least one slope or intercept term")
-    # Each term becomes its OWN single-term block, which on its own has no
-    # intercept. The per-level decision belongs to the ORIGINAL left-hand side,
-    # so every categorical term that is not the one it selects is pinned to
-    # treatment coding here, with the same switch a user would write.
     cellmeans_block = _brm_cellmeans_block(inner)
-    for (i, term) in enumerate(inner)
-        nocor = NamedColumn(Symbol(name(rhs_nc), :__nocor__, i), parent(rhs_nc))
+    terms = Any[]
+    for term in inner
         if !isnothing(_brm_categorical_term_block(term))
             if !isnothing(cellmeans_block) &&
                _brm_categorical_term_block(term) === cellmeans_block &&
@@ -12237,8 +12217,9 @@ _sb_collect_terms_expr!(acc, ::typeof(doublepipe), x) = begin
                 term = _sb_treatment_coded(term)
             end
         end
-        push!(acc, ExprColumn(|, term, nocor))
+        push!(terms, term)
     end
+    terms
 end
 
 _sb_treatment_coded(term::NamedColumn) = ExprColumn(factor, term; cmc=false)

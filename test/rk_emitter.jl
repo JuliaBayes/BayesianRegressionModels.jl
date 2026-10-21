@@ -3791,18 +3791,21 @@ end
         _ppl_s ~ Exponential(1)
         y ~ Normal(mu, _ppl_s)
     end)
-    # Half-normal location must be the literal 0 (:positive adds log(2)).
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    # A truncated Normal away from location 0 is the normalized truncation,
+    # not the half spelling (densities: test/rk_prior_spellings.jl).
+    shifted = only(BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         s ~ truncated(Normal(0.5, 1), 0, Inf)
         y ~ Normal(mu, s)
-    end)
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    end).parameters)
+    @test (shifted.args, shifted.support_override) == ((0.5, 1.0), (:truncated, 0.0, Inf))
+    assigned = only(BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         m = mean(x)
         s ~ truncated(Normal(m, 1), 0, Inf)
         y ~ Normal(mu, s)
-    end)
+    end).parameters)
+    @test (assigned.args, assigned.support_override) == ((:m, 1.0), (:truncated, 0.0, Inf))
 end
 
 @stestset "fail closed: priors, data, and cycles" begin
@@ -3813,11 +3816,6 @@ end
         mu ~ 1 + x
         effect(mu, x) ~ Exponential(1)
         s ~ Exponential(1)
-        y ~ Normal(mu, s)
-    end)
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + x
-        s ~ truncated(Normal(0, 1), 1, 2)
         y ~ Normal(mu, s)
     end)
     missing_df = (; df..., y=[0.5, missing, 0.1, 0.9, 1.4, 1.1])
@@ -5587,21 +5585,36 @@ end
     @test got[:h3] == (:Logistic, (0.0, 1.0), (:truncated, 0.0, Inf))
     @test got[:hn] == (:Normal, (0.0, 2.0), :positive)
     @test got[:hc] == (:Cauchy, (0.0, 2.0), :positive)
-    # Nonzero locations still fail closed (the +log(2) is exact only
-    # at 0), as do asymmetric bases and general bounds (sequenced).
-    @test_throws "must be the literal 0" BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + x
-        hh ~ truncated(Laplace(0.5, 1), 0, Inf)
-        y ~ Normal(mu, hh)
-    end)
+    # Nonzero locations, asymmetric bases and general bounds plan RKPPL's
+    # normalized truncation (densities: test/rk_prior_spellings.jl).
+    for (brmi, expected) in (
+            (@brm df begin
+                mu ~ 1 + x
+                hh ~ truncated(Laplace(0.5, 1), 0, Inf)
+                y ~ Normal(mu, hh)
+            end) => (:Laplace, (0.5, 1.0), (:truncated, 0.0, Inf)),
+            (@brm df begin
+                mu ~ 1 + x
+                hh ~ truncated(Normal(1, 2), 0, Inf)
+                y ~ Normal(mu, hh)
+            end) => (:Normal, (1.0, 2.0), (:truncated, 0.0, Inf)),
+            (@brm df begin
+                mu ~ 1 + x
+                hh ~ truncated(Exponential(1), 0, Inf)
+                y ~ Normal(mu, hh)
+            end) => (:Exponential, (1.0,), (:truncated, 0.0, Inf)),
+            (@brm df begin
+                mu ~ 1 + x
+                hh ~ truncated(Laplace(0, 1), 1, 2)
+                y ~ Normal(mu, hh)
+            end) => (:Laplace, (0.0, 1.0), (:truncated, 1.0, 2.0)))
+        p = only(BRM._brm_rk_plan(brmi).parameters)
+        @test (p.family, p.args, p.support_override) == expected
+    end
+    # An improper base has no mass to renormalize.
     @test_throws "out of slice 1" BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
-        hh ~ truncated(Exponential(1), 0, Inf)
-        y ~ Normal(mu, hh)
-    end)
-    @test_throws "out of slice 1" BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + x
-        hh ~ truncated(Laplace(0, 1), 1, 2)
+        hh ~ truncated(Flat(), 0, 1)
         y ~ Normal(mu, hh)
     end)
 end
