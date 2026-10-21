@@ -676,6 +676,9 @@ function _rk_nlme_compact_cell_value_and_gradient! end
 function _rk_nlme_population_prior end
 function _rk_nlme_population_prior_value end
 function _rk_nlme_population_prior_value_gradient end
+# Implemented by `BayesianRegressionModelsReactiveKernelsEnzymeExt`: an Enzyme
+# `mode` carrying the runtime-activity setting of the caller's `ad_backend`.
+function _brm_enzyme_mode end
 _brm_nlme_forward_backend(ad_backend) = nothing
 
 # A cell query still addresses the original packed coordinate space. Overlay
@@ -795,7 +798,7 @@ Base.show(io::IO, m::BRMNLMEModel) = print(io, "BRMNLMEModel(",
 """
     brm_nlme_model(backend::RKBRMI; ad_backend, observation_ad_backend=nothing,
         shared_point=nothing, subject_group=nothing,
-        nested_groups=NamedTuple()) -> BRMNLMEModel
+        nested_groups=NamedTuple(), progress=nothing) -> BRMNLMEModel
 
 Prepare an RK-lowered population model for NLME estimators: its
 [`brm_nlme_view`](@ref) partition, the backend's sampler query retaining its
@@ -823,61 +826,98 @@ query for
 [`brm_nlme_loglikelihood`](@ref) and
 [`brm_nlme_loglikelihood_and_gradient`](@ref).
 
+`progress` reports the preparation through Treebars: pass a Treebars node and
+the call builds a `Prepare NLME model` node under it, with one phase per step
+(subject partition, pointwise sampler, observation attribution, η
+Hessian-vector product, Gaussian observations, subject cells, population
+prior; a step the model does not need is skipped), or a backend symbol such as
+`:state` to start a new root. An interrupt requested on that node or an
+ancestor (`Treebars.request_interrupt!`) raises `Treebars.ProgressInterrupted`
+when the next step starts. `nothing` (the default) reports nothing.
+
 Refuses ([`BRMNLMEViewError`](@ref)) everything `brm_nlme_view` refuses, Student-t
 random-effect blocks (the estimators own a Gaussian η prior), and observed
 densities that cannot be attributed to subjects.
 """
 function brm_nlme_model(backend::RKBRMI; ad_backend,
         observation_ad_backend=nothing, shared_point=nothing,
-        subject_group=nothing, nested_groups=NamedTuple())
-    view = brm_nlme_view(backend; subject_group, nested_groups)
-    any(==(:subject_mixing), view.role) && _brm_nlme_error(
-        "brm_nlme_model: Student-t random-effect blocks are not covered; NLME " *
-        "estimators own a Gaussian random-effect prior")
-    unit = _brm_nlme_unit_point(backend, view; shared_point)
-    sampler = _rk_retained_pointwise_sampler(backend; ad_backend)
-    pointwise = _rk_pointwise_query(backend)
-    eta_hvp = _rk_eta_hvp_query(backend, unit)
-    attribution = _brm_nlme_attribution(backend, view,
-        _rk_pointwise_values(pointwise, unit))
-    eta_blocks = Int[]
-    previous = nothing
-    for margin in view.block_margins
-        margin.block == previous ? (eta_blocks[end] += 1) : push!(eta_blocks, 1)
-        previous = margin.block
+        subject_group=nothing, nested_groups=NamedTuple(), progress=nothing)
+    _brm_with_progress(progress; description="Prepare NLME model") do node
+        _brm_nlme_model(backend, node; ad_backend, observation_ad_backend,
+            shared_point, subject_group, nested_groups)
     end
-    # NLMEEstimation's Gaussian-observation protocol currently serves FOCE(I),
-    # which does not accept RaggedNLMELayout. Keep the ragged conditional and
-    # Hessian paths active without advertising an unusable observation model.
-    gaussian = !_brm_nlme_ragged(view) && _brm_nlme_gaussian_plan(backend.plan)
-    observations_query = gaussian ? _rk_observation_query(backend) : nothing
-    forward_backend = observation_ad_backend === nothing ?
-        _brm_nlme_forward_backend(ad_backend) : observation_ad_backend
-    observations_pushforward = gaussian && forward_backend !== nothing ?
-        _rk_observation_pushforward(backend, view, unit, forward_backend) : nothing
-    observed, observation_attribution = gaussian ?
-        _brm_nlme_observed(backend, attribution, length(view.levels)) :
-        (Vector{Vector{Float64}}(), Pair{Symbol,Vector{Int}}[])
-    cells = _brm_nlme_subject_cells(backend, view, attribution)
-    cell_query = cells === nothing ? nothing : map(cells) do cell
-        (; cell.names, cell.positions, query=_rk_nlme_cell_query(backend, cell.names))
+end
+
+# The preparation steps of `brm_nlme_model`, each a phase of `node`. A step the
+# model does not need (Gaussian observations, subject cells) is left skipped.
+const _BRM_NLME_MODEL_PHASES = (view="Subject partition",
+    sampler="Pointwise sampler", attribution="Observation attribution",
+    eta_hvp="η Hessian-vector product", observations="Gaussian observations",
+    cells="Subject cells", prior="Population prior")
+
+function _brm_nlme_model(backend::RKBRMI, node; ad_backend, observation_ad_backend,
+        shared_point, subject_group, nested_groups)
+    _brm_with_phases(node, _BRM_NLME_MODEL_PHASES) do phases
+        view, unit = _brm_run_phase(phases.view) do _
+            v = brm_nlme_view(backend; subject_group, nested_groups)
+            any(==(:subject_mixing), v.role) && _brm_nlme_error(
+                "brm_nlme_model: Student-t random-effect blocks are not covered; NLME " *
+                "estimators own a Gaussian random-effect prior")
+            v, _brm_nlme_unit_point(backend, v; shared_point)
+        end
+        sampler = _brm_run_phase(phases.sampler) do _
+            _rk_retained_pointwise_sampler(backend; ad_backend)
+        end
+        pointwise, attribution = _brm_run_phase(phases.attribution) do _
+            query = _rk_pointwise_query(backend)
+            query, _brm_nlme_attribution(backend, view, _rk_pointwise_values(query, unit))
+        end
+        eta_hvp = _brm_run_phase(phases.eta_hvp) do _
+            _rk_eta_hvp_query(backend, unit, ad_backend)
+        end
+        eta_blocks = Int[]
+        previous = nothing
+        for margin in view.block_margins
+            margin.block == previous ? (eta_blocks[end] += 1) : push!(eta_blocks, 1)
+            previous = margin.block
+        end
+        # NLMEEstimation's Gaussian-observation protocol currently serves FOCE(I),
+        # which does not accept RaggedNLMELayout. Keep the ragged conditional and
+        # Hessian paths active without advertising an unusable observation model.
+        gaussian = !_brm_nlme_ragged(view) && _brm_nlme_gaussian_plan(backend.plan)
+        observations_query, observations_pushforward, observed, observation_attribution =
+            gaussian ? _brm_run_phase(phases.observations) do _
+                forward_backend = observation_ad_backend === nothing ?
+                    _brm_nlme_forward_backend(ad_backend) : observation_ad_backend
+                (_rk_observation_query(backend),
+                 forward_backend === nothing ? nothing :
+                    _rk_observation_pushforward(backend, view, unit, forward_backend),
+                 _brm_nlme_observed(backend, attribution, length(view.levels))...)
+            end : (nothing, nothing, Vector{Vector{Float64}}(), Pair{Symbol,Vector{Int}}[])
+        theta = findall(r -> r === :population ||
+            (shared_point === nothing && r === :shared_latent), view.role)
+        sigma = findall(==(:scalar), view.role)
+        cells = _brm_nlme_subject_cells(backend, view, attribution)
+        cell_query, cell_gradient = cells === nothing ? (nothing, nothing) :
+            _brm_run_phase(phases.cells) do _
+                query = map(cells) do cell
+                    (; cell.names, cell.positions,
+                       query=_rk_nlme_cell_query(backend, cell.names))
+                end
+                _brm_nlme_ragged(view) && return query, nothing
+                selected = sort!(vcat(theta, sigma, first(view.subject_coordinates)))
+                query, (samplers=map(cell -> _rk_nlme_compact_cell_sampler(backend,
+                    cell.names, unit, selected), cells), lock=ReentrantLock())
+            end
+        population_prior = _brm_run_phase(phases.prior) do _
+            _rk_nlme_population_prior(backend, unit, ad_backend)
+        end
+        BRMNLMEModel(view, backend, sampler, pointwise, eta_hvp, attribution,
+            theta, sigma,
+            eta_blocks, unit, observations_query, observations_pushforward,
+            observed, observation_attribution, cell_query, cell_gradient,
+            population_prior)
     end
-    theta = findall(r -> r === :population ||
-        (shared_point === nothing && r === :shared_latent), view.role)
-    sigma = findall(==(:scalar), view.role)
-    cell_gradient = if cells === nothing || _brm_nlme_ragged(view)
-        nothing
-    else
-        selected = sort!(vcat(theta, sigma, first(view.subject_coordinates)))
-        (samplers=map(cell -> _rk_nlme_compact_cell_sampler(backend, cell.names,
-            unit, selected), cells), lock=ReentrantLock())
-    end
-    population_prior = _rk_nlme_population_prior(backend, unit, ad_backend)
-    BRMNLMEModel(view, backend, sampler, pointwise, eta_hvp, attribution,
-        theta, sigma,
-        eta_blocks, unit, observations_query, observations_pushforward,
-        observed, observation_attribution, cell_query, cell_gradient,
-        population_prior)
 end
 
 function _brm_nlme_cell_point(m::BRMNLMEModel, i::Integer, θ, σ, η)

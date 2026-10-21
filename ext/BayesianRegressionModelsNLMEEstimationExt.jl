@@ -43,7 +43,8 @@ NE.provides_eta_hessian(::BRM.BRMNLMEModel) = true
 # active and constant overlay reads.
 NE.ad_backend(::BRM.BRMNLMEModel) =
     AutoEnzyme(; mode=Enzyme.set_runtime_activity(Enzyme.Reverse))
-BRM._brm_nlme_forward_backend(::AutoEnzyme) = AutoEnzyme(; mode=Enzyme.Forward)
+BRM._brm_nlme_forward_backend(ad_backend::AutoEnzyme) =
+    AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad_backend))
 
 # An NLME covariance block is packed as the log diagonal and raw lower
 # triangle of its Cholesky factor C. BRM instead samples marginal scales τ and
@@ -451,22 +452,44 @@ BRM.brm_nlme_estimates(m::BRM.BRMNLMEModel,
         r::Union{NE.SAEMResult,NE.RaggedSAEMResult}, ebes=nothing) =
     BRM.brm_nlme_estimates(m, r.theta, r.sigma, r.omega_matrix, ebes)
 
-_fit_model(x::BRM.BRMI; kwargs...) = _fit_model(BRM.RKBRMI(x); kwargs...)
-_fit_model(x::BRM.RKBRMI; ad_backend, shared_point, subject_group, nested_groups) =
-    BRM.brm_nlme_model(x;
+# The estimator, refused before any preparation when it is not one of
+# NLMEEstimation's.
+_fit_estimator_name(::typeof(NE.saem)) = :saem
+_fit_estimator_name(::typeof(NE.focei)) = :focei
+_fit_estimator_name(::typeof(NE.empirical_bayes)) = :empirical_bayes
+_fit_estimator_name(estimator) = throw(ArgumentError(
+    "brm_nlme_fit: `$estimator` is not one of NLMEEstimation's estimators saem, " *
+    "focei or empirical_bayes (posthoc)"))
+
+# The phases of a fit's progress node; the EBE pass only follows saem.
+_fit_phases(name, ebe_kwargs) = merge(
+    (lower="Lower to ReactiveKernels", prepare="Prepare NLME model",
+     start="Starting point", fit="Estimate ($name)"),
+    ebe_kwargs === nothing ? (;) : (ebes="Posthoc EBEs",))
+
+# The model through its two preparation phases: lowering to RK and
+# `brm_nlme_model`. A stage `x` has already passed is reused.
+_fit_lowered(x::BRM.BRMI, phase) = BRM._brm_run_phase(_ -> BRM.RKBRMI(x), phase)
+_fit_lowered(x::Union{BRM.RKBRMI,BRM.BRMNLMEModel}, phase) =
+    (BRM._brm_reuse_phase!(phase); x)
+_fit_lowered(x, phase) = throw(ArgumentError(
+    "brm_nlme_fit: expected a @brm model (BRMI), an RKBRMI or a BRMNLMEModel, " *
+    "got $(typeof(x))"))
+_fit_model(x::BRM.RKBRMI, phase; ad_backend, shared_point, subject_group,
+        nested_groups) = BRM._brm_run_phase(phase) do node
+    BRM._brm_nlme_model(x, node;
         ad_backend=ad_backend === nothing ? AutoEnzyme(; mode=Enzyme.Reverse) : ad_backend,
-        shared_point, subject_group, nested_groups)
-function _fit_model(m::BRM.BRMNLMEModel; ad_backend, shared_point, subject_group,
-        nested_groups)
+        observation_ad_backend=nothing, shared_point, subject_group, nested_groups)
+end
+function _fit_model(m::BRM.BRMNLMEModel, phase; ad_backend, shared_point,
+        subject_group, nested_groups)
     ad_backend === nothing && shared_point === nothing && subject_group === nothing &&
         isempty(nested_groups) || throw(ArgumentError(
         "brm_nlme_fit: a prepared BRMNLMEModel already fixes its ad_backend, " *
         "shared_point and subject grouping; pass them to brm_nlme_model instead"))
+    BRM._brm_reuse_phase!(phase)
     m
 end
-_fit_model(x; kwargs...) = throw(ArgumentError(
-    "brm_nlme_fit: expected a @brm model (BRMI), an RKBRMI or a BRMNLMEModel, " *
-    "got $(typeof(x))"))
 
 _fit_start(m, ::Nothing, ::Nothing) = BRM.brm_nlme_start(m)
 # Addressed values over the prior-median start.
@@ -560,35 +583,56 @@ _ebe_keywords(estimator, ebes) = throw(ArgumentError(
     "takes its EBE settings as its own keywords (empirical_bayes's `options`, " *
     "focei's `FOCEOptions(ebe_options=…)`)"))
 
-function _fit_run(::typeof(NE.saem), m, start, ebe_kwargs; kwargs...)
-    result = NE.saem(m, start.theta, start.sigma, start.omega; _with_eta(m, start, kwargs)...)
-    # SAEM's `eta` are its final chain states; EBEs need a posthoc pass.
-    ebe = ebe_kwargs === nothing ? nothing : NE.empirical_bayes(m, result.theta,
-        result.sigma, result.omega; subjects=result.subjects, η0=result.eta, ebe_kwargs...)
+# Each estimator runs in `phases.fit` and builds its own node there; an
+# interrupt is the estimator's to honour (saem and focei return their last
+# point, the others raise Treebars' `ProgressInterrupted`).
+function _fit_run(::typeof(NE.saem), m, start, ebe_kwargs, phases; kwargs...)
+    result = BRM._brm_enter_phase(phases.fit) do node
+        NE.saem(m, start.theta, start.sigma, start.omega; progress=node,
+            _with_eta(m, start, kwargs)...)
+    end
+    # SAEM's `eta` are its final chain states; EBEs need a posthoc pass. After
+    # an interrupt the pass is skipped, keeping the SAEM result it would raise
+    # over.
+    ebe = ebe_kwargs === nothing || result.interrupted ||
+        BRM._brm_interrupt_requested(phases.ebes) ? nothing :
+        BRM._brm_enter_phase(phases.ebes) do node
+            NE.empirical_bayes(m, result.theta, result.sigma, result.omega;
+                subjects=result.subjects, η0=result.eta,
+                merge((; progress=node), ebe_kwargs)...)
+        end
     result, ebe, BRM.brm_nlme_estimates(m, result, ebe)
 end
-function _fit_run(::typeof(NE.focei), m, start, _ebes; kwargs...)
-    result = NE.focei(m, start.theta, start.sigma, start.omega; kwargs...)
+function _fit_run(::typeof(NE.focei), m, start, _ebes, phases; kwargs...)
+    result = BRM._brm_enter_phase(phases.fit) do node
+        NE.focei(m, start.theta, start.sigma, start.omega; progress=node, kwargs...)
+    end
     result, result.ebes, BRM.brm_nlme_estimates(m, result)
 end
-function _fit_run(::typeof(NE.empirical_bayes), m, start, _ebes; kwargs...)
-    result = NE.empirical_bayes(m, start.theta, start.sigma, start.omega;
-        _with_eta(m, start, kwargs)...)
+function _fit_run(::typeof(NE.empirical_bayes), m, start, _ebes, phases; kwargs...)
+    result = BRM._brm_enter_phase(phases.fit) do node
+        NE.empirical_bayes(m, start.theta, start.sigma, start.omega; progress=node,
+            _with_eta(m, start, kwargs)...)
+    end
     result, result, BRM.brm_nlme_estimates(m, start.theta, start.sigma,
         start.omega_matrix, result)
 end
-_fit_run(estimator, m, start, _ebes; kwargs...) = throw(ArgumentError(
-    "brm_nlme_fit: `$estimator` is not one of NLMEEstimation's estimators saem, " *
-    "focei or empirical_bayes (posthoc)"))
 
 function BRM.brm_nlme_fit(x, estimator; start=nothing, inits=nothing, ebes=true,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
-        nested_groups=NamedTuple(), kwargs...)
+        nested_groups=NamedTuple(), progress=nothing, kwargs...)
+    name = _fit_estimator_name(estimator)
     ebe_kwargs = _ebe_keywords(estimator, ebes) # refuse a bad `ebes` before fitting
-    model = _fit_model(x; ad_backend, shared_point, subject_group, nested_groups)
-    s = _fit_start(model, start, inits)
-    result, ebe, estimates = _fit_run(estimator, model, s, ebe_kwargs; kwargs...)
-    (; estimates, result, ebes=ebe, start=s, model)
+    BRM._brm_with_progress(progress; description="BRM NLME fit") do node
+        BRM._brm_with_phases(node, _fit_phases(name, ebe_kwargs)) do phases
+            model = _fit_model(_fit_lowered(x, phases.lower), phases.prepare;
+                ad_backend, shared_point, subject_group, nested_groups)
+            s = BRM._brm_run_phase(_ -> _fit_start(model, start, inits), phases.start)
+            result, ebe, estimates = _fit_run(estimator, model, s, ebe_kwargs, phases;
+                kwargs...)
+            (; estimates, result, ebes=ebe, start=s, model)
+        end
+    end
 end
 
 end
