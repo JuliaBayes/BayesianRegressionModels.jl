@@ -176,8 +176,16 @@ Base.@nospecializeinfer function _rk_model_predictor_geometry(@nospecialize(brmi
     _brm_prepare_predictor_geometry(brmi, geometry_context, target; kwargs...,
         population_columns,
         random_effect_columns=(term; cellmeans=false) ->
-            _rk_model_random_effect_columns(term; cellmeans, context=geometry_context))
+            _rk_model_random_effect_columns(term; cellmeans, context=geometry_context),
+        prepare_term=_rk_prepare_term)
 end
+
+# RK evaluates every HSGP basis in its graph (`brm_hsgp_basis_graph`,
+# `brm_hsgp_periodic_basis`); its planner reads a term's fits, floor and
+# options, so it prepares the term without evaluating a basis.
+_rk_prepare_term(term, target, context) = _brm_prepare_term(term, target, context)
+_rk_prepare_term(term::ExprColumn{typeof(hsgp)}, target, context) =
+    _brm_prepare_term(term, target, context; basis=_brm_hsgp_basis_geometry)
 
 function _rk_mi_downstream(program, key, source)
     any(operation -> operation.name !== key &&
