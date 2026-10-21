@@ -32,7 +32,9 @@ preprocessing, reusing its executable graph (`rk.model`; no rebuild) and its
 translated program: a replay only binds its own data. The
 returned backend evaluates the same draws on the new rows: densities through
 [`rk_logdensity_problem`](@ref), authored values through
-`ReactiveKernels.prepare(rk2.model.spec; have, want, bound=rk_bound_data(rk2))`.
+`ReactiveKernels.prepare(rk2.model.spec; have, want, bound=rk_bound_data(rk2))`,
+and RKPPL's queries over a binding, posterior-predictive draws included,
+through [`rk_bound_plan`](@ref).
 
 - `freeze_constants=true` (default; prediction and replay): `center` /
   `zscale` / `standardize` anchors, completed-covariate anchors, factor,
@@ -228,7 +230,32 @@ end
 The bound inputs of `rk`'s executable graph for its own data: pass them as
 `bound=` to `ReactiveKernels.prepare(rk.model.spec; have=(:unconstrained,
 keys(bound)...), want, bound)`. For [`reprocess`](@ref)'d backends these are
-the new data's inputs with the training preprocessing frozen. Implemented by
-the ReactiveKernels package extension.
+the new data's inputs with the training preprocessing frozen. They are the
+columns of [`rk_bound_plan`](@ref)`(rk)`. Implemented by the ReactiveKernels
+package extension.
 """
 function rk_bound_data end
+
+"""
+    rk_bound_plan(rk::RKBRMI) -> ReactiveKernelsPPL.StructuralPlan
+
+The RKPPL binding of `rk`'s program to its own data: the bound plan every query
+of `rk` evaluates on `rk.model`. For a [`reprocess`](@ref)'d backend it binds the
+new data, with the training preprocessing frozen and the responses the data
+omit left absent. `(rk.model, rk_bound_plan(rk))` is the `(built, plan)` pair
+RKPPL's queries take (rkppl-use §14), so each of them applies to `rk` as
+documented there. Posterior-predictive draws on a new design, for example:
+
+```julia
+replay = reprocess(rk, design; resample_groups=[:subject])
+targets = predictive_targets(replay.model, rk_bound_plan(replay))
+# WANT predictive_node(replay.model) in a cut over replay.model.spec, then
+draws = predictive_draws(value, targets, rng)
+```
+
+Without `resample_groups`, `prepare_predictive(replay.model, rk_bound_plan(replay))`
+draws the whole model at a draw `u` of the fit. Every query of `rk` reads this
+one plan: read it, never mutate it. Implemented by the ReactiveKernels package
+extension.
+"""
+function rk_bound_plan end

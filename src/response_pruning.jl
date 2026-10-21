@@ -9,7 +9,7 @@
 #
 # The kept model is the dependency closure of the kept responses' operations
 # over BRM's prepared program, plus the prior statements addressing what
-# survives. Kernel cells (`@plate for`, `kernel(...) do`) first lose the
+# survives and the model values they read. Kernel cells (`@plate for`, `kernel(...) do`) first lose the
 # observations of pruned responses and the cell statements only they reached,
 # so a cell shared between kept and pruned responses stays. A shared `|ID|`
 # block that keeps `a` of its `K` margins keeps its per-margin scale priors.
@@ -232,7 +232,8 @@ end
 
 The model `brmi` restricted to the responses `keep`: their observation
 statements, every statement and term their likelihoods depend on, and the prior
-statements addressing what remains. Everything else — the other responses, the
+statements addressing what remains, with the model values those read (a
+`name = constant(...)` prior centre, a scale parameter). Everything else — the other responses, the
 predictors, parameters and random-effect margins only they read — is not in the
 returned model at all, so its emitted programs, `brm_descriptor` and
 `brm_description` show only the kept model. Without pruning, omitting a
@@ -327,9 +328,12 @@ Base.@nospecializeinfer function _brm_prune_responses(@nospecialize(brmi::BRMI),
     end
 
     # Close over dependencies; kernel cells and kept priors add the names they
-    # read, which the prepared program does not record.
+    # read, which the prepared program does not record. A kept prior can be
+    # the only reader of a model value (a `constant(...)` centre, a scale
+    # parameter). Which priors stay depends on the kept predictors, so they are
+    # selected once the cells are closed over; a prior reads only parameters,
+    # assignments and data (`_brm_prior_value_dependencies`), which add none.
     priors = [op for op in program.operations if op.role === :prior_modifier]
-    reachable = Set{Symbol}()
     while true
         reachable = _brm_reachable_operations(program, roots)
         before = length(roots)
@@ -337,18 +341,28 @@ Base.@nospecializeinfer function _brm_prune_responses(@nospecialize(brmi::BRMI),
             key in cells && union!(roots,
                 _brm_prune_kernel_globals(byname[key].expression, names))
         end
-        length(roots) == before && break
+        length(roots) == before || continue
+        kept = Set(op.name for op in program.operations if op.name in reachable)
+        selected = _brm_prune_priors(program, kept, priors; marginalize)
+        reads = _brm_prune_prior_reads(selected.statements, names)
+        issubset(reads, kept) && return _brm_prune_assemble(brmi, kept, selected; marginalize)
+        union!(roots, reads)
     end
-
-    kept = Set(op.name for op in program.operations if op.name in reachable)
-    _brm_prune_assemble(brmi, program, kept, priors; marginalize)
 end
 
-# The pruned BRMI: kept operations in formula order, prior statements whose
-# addresses survive, and the exact marginal correlation prior of every shared
-# `|ID|` block that lost margins.
-Base.@nospecializeinfer function _brm_prune_assemble(@nospecialize(brmi::BRMI), program, kept, priors;
-                                                    marginalize::Bool)
+# The model values the kept prior statements read: the names in their laws.
+function _brm_prune_prior_reads(statements, names)
+    refs = Set{Symbol}()
+    for statement in values(statements)
+        _brm_operation_references!(refs, last(getargs(statement, 2)))
+    end
+    intersect(refs, names)
+end
+
+# The prior statements whose addresses survive in `kept`, keyed by operation
+# name (a shared block's correlation prior restricted to its kept margins), and
+# the shared `|ID|` blocks that lose margins.
+Base.@nospecializeinfer function _brm_prune_priors(program, kept, priors; marginalize::Bool)
     predictors = Set(op.name for op in program.operations
                      if op.role === :predictor && op.name in kept)
     declarations = program.context.group_declarations
@@ -417,19 +431,26 @@ Base.@nospecializeinfer function _brm_prune_assemble(@nospecialize(brmi::BRMI), 
             end
         end
     end
+    (; statements=keep_prior, narrowed, cor_seen)
+end
 
+# The pruned BRMI: kept operations in formula order, prior statements whose
+# addresses survive, and the exact marginal correlation prior of every shared
+# `|ID|` block that lost margins.
+Base.@nospecializeinfer function _brm_prune_assemble(@nospecialize(brmi::BRMI), kept, priors;
+                                                    marginalize::Bool)
     operations = Pair{Symbol,Any}[]
     for (key, raw) in _brm_operation_entries(brmi)
         if key in kept
             push!(operations, key => raw)
-        elseif haskey(keep_prior, key)
-            push!(operations, key => NamedColumn(key, keep_prior[key]))
+        elseif haskey(priors.statements, key)
+            push!(operations, key => NamedColumn(key, priors.statements[key]))
         end
     end
     # A narrowed block with no authored `cor` statement had the default LKJ(K, 1);
     # its marginal is spelled out, the default at width `a` needs no statement.
-    for (id, w) in sort!(collect(narrowed); by=first)
-        (marginalize && w.a >= 2 && !(id in cor_seen)) || continue
+    for (id, w) in sort!(collect(priors.narrowed); by=first)
+        (marginalize && w.a >= 2 && !(id in priors.cor_seen)) || continue
         key = Symbol("__effect__cor__", id)
         push!(operations, key => NamedColumn(key, ExprColumn(~, ExprColumn(effect, :cor, id),
             ExprColumn(LKJCholesky, w.a, 1.0 + (w.K - w.a) / 2))))

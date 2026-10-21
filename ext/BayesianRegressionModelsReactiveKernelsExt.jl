@@ -197,8 +197,10 @@ function LogDensityProblems.logdensity_and_gradient(
     value, gradient
 end
 
+BRM.rk_bound_plan(backend::BRM.RKBRMI) = _rk_translated(backend)
+
 function BRM.rk_bound_data(backend::BRM.RKBRMI)
-    columns = _rk_translated(backend).columns
+    columns = BRM.rk_bound_plan(backend).columns
     names = Tuple(keys(columns))
     NamedTuple{names}(Tuple(columns[name] for name in names))
 end
