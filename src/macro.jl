@@ -856,18 +856,20 @@ parse!(x::Expr; info) = if x.head == :block
 elseif _is_brm_plate(x)
     groupings = hasproperty(info, :groupings) ? info.groupings : Dict{Symbol,_BRMPlateGrouping}()
     grouped_reads = hasproperty(info, :grouped_reads) ? info.grouped_reads : Set{Symbol}()
-    # `y[p] ~ ar_errors(...)` is the `@scan` it states (`ar_errors.jl`); its
-    # time checks run when the model is built.
-    x, ar_errors_checks = _brm_expand_cell_ar_errors(x)
-    kernel, inbody_ragged = _brm_plate_kernel(x; groupings, grouped_reads)
+    # `y[p] ~ AR1Normal(...)` is evaluated as the `@scan` it states
+    # (`ar1_normal.jl`); `show` prints the cell as written, and the time checks
+    # run when the model is built.
+    authored = x
+    x, ar1_normal_checks = _brm_expand_cell_ar1_normal(x)
+    kernel, inbody_ragged = _brm_plate_kernel(x; groupings, grouped_reads, authored)
     parsed = parse!(kernel; info)
-    isempty(ar_errors_checks) || (parsed = Expr(:block, parsed, ar_errors_checks...))
+    isempty(ar1_normal_checks) || (parsed = Expr(:block, parsed, ar1_normal_checks...))
     inbody_ragged ? Expr(:block, :($_brm_depwarn_plate_inbody_ragged()), parsed) : parsed
-elseif _is_brm_ar_errors(x)
+elseif _is_brm_ar1_normal(x)
     # The series and its grouping are the plate's (decision `1pnob5t`).
-    error("@brm: `ar_errors(...)` observes one series per `@plate` cell: write " *
+    error("@brm: `AR1Normal(...)` observes one series per `@plate` cell: write " *
         "`@plate for p in groups(g; order = t)` with " *
-        "`y[p] ~ ar_errors(Normal(mu[p], sigma), phi; time = t[p])` in its cell; got " *
+        "`y[p] ~ AR1Normal(mu[p], sigma, phi; time = t[p])` in its cell; got " *
         "`$(sprint(Base.show_unquoted, x))`")
 elseif _is_brm_plate_grouping(x)
     # Collected by `_brm_plate_groupings` before parsing and consumed by the
@@ -1255,7 +1257,7 @@ function _brm_cell_without_result(statements)
 end
 
 function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
-                           grouped_reads=Set{Symbol}())
+                           grouped_reads=Set{Symbol}(), authored=x)
     i, range, body = _brm_plate_loop(x)
     stmts, outputs = _brm_plate_outputs(body, i)
     output_set = Set(outputs)
@@ -1438,7 +1440,8 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
         end
     end
     lambda = Expr(:->, Expr(:tuple, params...), Expr(:block, rewritten...),
-                  _brm_plate_source(i, range, stmts, cell_groupings, groupings))
+                  _brm_plate_source(i, range, first(_brm_plate_outputs(_brm_plate_loop(authored)[3], i)),
+                      cell_groupings, groupings))
     call = Expr(:call, :kernel, lambda, positionals...)
     Expr(:call, :~, target, call), inbody_ragged
 end

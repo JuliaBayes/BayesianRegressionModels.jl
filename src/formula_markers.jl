@@ -167,14 +167,13 @@ observations (`dv[i] ~ Normal(cp, sigma)` after a bare `cp = ...`), it has no
 collected result: `cp` stays a cell local and nothing is stored at model scope.
 Both backends build such a cell.
 
-A plate over long-format rows names its grouping in the header:
-`@plate for p in groups(g)` has one cell per distinct label of the data column
-`g`, in sorted order, and each read `x[p]` is `x`'s values on group `p`'s rows
-(a response, a data column, or a predictor with one value per row);
-`groups(g; order = t)` takes each group's rows in ascending `t`. Values shared
-by every row are read bare. Such a cell observes, and collects no result
-(`loc[p] = …`): nothing outside it could tell which group a collected value
-belongs to.
+A plate over long-format rows iterates [`groups`](@ref), an ordinary function:
+in `@plate for p in groups(g; order = t)`, `p` is one group's indices (one
+cell per distinct label of the data vector `g`, in sorted order, its indices in
+ascending `t`), so a read `x[p]` is `x` at those indices (a response, a data
+vector, or a predictor indexed like `g`), as the same Julia loop reads it. Values shared by every row are read bare. Such a cell observes, and
+collects no result (`loc[p] = …`): nothing outside it could tell which group a
+collected value belongs to.
 
 A cell may hold a `@scan begin … end` recurrence, one per cell: seeds by literal
 index, then one `for` loop of steps reading earlier entries at a fixed lag. A
@@ -182,7 +181,7 @@ carried array the scan writes (`h[t] ~ Normal(phi * h[t - 1], s)`) is a latent
 state per cell; observing the cell's own response entry by entry
 (`y[i][1] ~ …`, `y[i][t] ~ Normal(… y[i][t - 1] …)`) gives each entry's
 conditional density, and with `y` omitted the block draws whole trajectories.
-[`ar_errors`](@ref) is shorthand for one such recurrence.
+[`AR1Normal`](@ref) observes a group's series under one such recurrence.
 
 Indexed inputs split by kind. A raw data column on the plate's own
 one-row-per-subject frame is gathered into a per-group slice. A column or
@@ -285,8 +284,8 @@ grouping, so `cells` may be named only as that same column.
 A plate with no random-effect predictor and no `cells` is refused: matching rows
 to cells by position cannot be checked against a per-cell column, which would
 then bind to the wrong cells silently. A plate over long-format rows with
-nothing per cell names its grouping in its header instead,
-`@plate for p in groups(group; order = time)` (see [`kernel`](@ref)): one cell
+nothing per cell iterates its groups instead,
+`@plate for p in groups(group; order = time)` (see [`groups`](@ref)): one cell
 per distinct label of `group`, each read `x[p]` the group's rows in `time`
 order.
 
@@ -333,58 +332,6 @@ _check_term_kwargs(::typeof(ragged), kwargs) =
     "`ragged(x, group => cells)` with a cell label column `cells`, or ",
     "`ragged(<index column>, <grouping column>; into=<grouping column of the ",
     "indexed axis>)`.")
-
-"""
-    @plate for p in groups(g; order = t)
-        y[p] ~ ar_errors(Normal(mu[p], sigma), phi; time = t[p])
-    end
-
-Gaussian observations whose residuals follow an AR(1) process along each cell's
-series, in the order of the integer time column `t`:
-`y[s] - mu[s] = phi^k * (y[s-k] - mu[s-k]) + e[s]`, where `k` is the number of
-time steps since the previous entry. The plate is the grouping: over
-long-format rows, `groups(g; order = t)` gives one cell per group with its rows
-in `t` order (see [`kernel`](@ref)); over pre-grouped data, `eachindex(...)`
-gives one cell per stored series.
-
-`ar_errors` is shorthand for the recurrence it states. `@brm` replaces the
-statement by this `@scan` before building the model, and `show` and the
-descriptor print that expansion:
-
-```julia
-@plate for p in groups(g; order = t)
-    @scan begin
-        y[p][1] ~ Normal(mu[p][1], sigma / sqrt(1 - phi ^ 2))
-        for s in 2:length(t[p])
-            k = t[p][s] - t[p][s - 1]
-            y[p][s] ~ Normal(mu[p][s] + phi ^ k * (y[p][s - 1] - mu[p][s - 1]),
-                             sigma * sqrt((1 - phi ^ (2 * k)) / (1 - phi ^ 2)))
-        end
-    end
-end
-```
-
-- `sigma` is the innovation SD. The first entry comes from the stationary law
-  `Normal(mu, sigma / sqrt(1 - phi^2))`, so `|phi| < 1` is required. This is
-  the exact AR(1) likelihood (brms' `ar(cov = TRUE)`).
-- A gap of `k` steps uses `phi^k` and innovation variance
-  `sigma^2 (1 - phi^(2k)) / (1 - phi^2)`: the exact density of the process
-  observed only on the recorded steps. Without gaps this is the plain recursion.
-- Each series' times must be whole numbers, each at most once; the model
-  refuses others when it is built, naming the group and value.
-- The cell's spelling says what varies along the series: `mu[p]` (a predictor
-  with one value per row, a data column) is read entry by entry, a bare name or
-  a number is shared. `atanh(phi) ~ 1 + (1 | g)` read as `phi[p]` lets the
-  persistence vary by group.
-- `ar_errors` takes no `by=`: the grouping is the plate's (decision `1pnob5t`).
-  Only `Normal` innovations and order 1. For another family, a higher order or
-  a different start or gap rule, write the `@scan` above yourself.
-
-Each entry's pointwise log likelihood is its conditional density given the
-series' earlier entries. With `y` omitted, the same cell draws whole AR(1)
-trajectories.
-"""
-function ar_errors end
 
 # Reject the retired keyword surface at CONSTRUCTION — i.e. at the `@brm` /
 # `kernel(...)` call the consumer actually wrote — not merely when the model is

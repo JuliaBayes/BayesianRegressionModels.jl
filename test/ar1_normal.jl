@@ -1,12 +1,13 @@
-# test/ar_errors.jl — per-group AR(1) residuals: in a
+# test/ar1_normal.jl — per-group AR(1) residuals: in a
 # `@plate for p in groups(probe; order = day)` cell,
-# `y[p] ~ ar_errors(Normal(mu[p], sigma), phi; time = day[p])`.
+# `y[p] ~ AR1Normal(mu[p], sigma, phi; time = day[p])`.
 #
-# Run: julia --startup-file=no --project=test test/ar_errors.jl
+# Run: julia --startup-file=no --project=test test/ar1_normal.jl
 #
-# The shorthand is a source rewrite into the cell's observed `@scan`
-# (decisions `0det9mo` and `1pnob5t`: the plate is the grouping). Checked here: the printed expansion,
-# its refusals, the RK log density and gradient against independent oracles —
+# `groups` is an ordinary function (the indices of each group), and
+# `AR1Normal` is evaluated, for now, as the cell's observed `@scan` (decisions
+# `0det9mo` and `1pnob5t`: the plate is the grouping). Checked here: `groups`
+# itself, the statement as printed and its expansion, its refusals, the RK log density and gradient against independent oracles —
 # a multivariate normal per group with covariance
 # `sigma^2 / (1 - phi^2) * phi^|t_i - t_j|` for shared `sigma` and `phi`, and
 # the time-ordered conditional recursion when both vary by row — on rows in
@@ -30,7 +31,7 @@ shared_ar(data) = @brm data begin
     sigma ~ Exponential(1)
     mu ~ 1 + x + (1 | probe)
     @plate for p in groups(probe; order = day)
-        y[p] ~ ar_errors(Normal(mu[p], sigma), phi; time = day[p])
+        y[p] ~ AR1Normal(mu[p], sigma, phi; time = day[p])
     end
 end
 
@@ -39,21 +40,29 @@ varying_ar(data) = @brm data begin
     log(sigma) ~ 1 + (1 | probe)
     mu ~ 1 + x
     @plate for p in groups(probe; order = day)
-        y[p] ~ ar_errors(Normal(mu[p], sigma[p]), phi[p]; time = day[p])
+        y[p] ~ AR1Normal(mu[p], sigma[p], phi[p]; time = day[p])
     end
 end
 
-# Each group's rows in time order.
-function group_rows(data)
-    labels = sort(unique(data.probe))
-    [sort(findall(==(g), data.probe); by=r -> data.day[r]) for g in labels]
+# Without `time`, consecutive rows of a group are one step apart.
+stepped_ar(data) = @brm data begin
+    phi ~ Uniform(-1, 1)
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 | probe)
+    @plate for p in groups(probe; order = day)
+        y[p] ~ AR1Normal(mu[p], sigma, phi)
+    end
 end
+
+# Each group's rows in time order: the cells' `p`, computed by the same
+# exported function outside the model.
+group_rows(data) = groups(data.probe; order=data.day)
 
 # Shared `sigma` and `phi`: one multivariate normal per group, the stationary
 # AR(1) covariance at the group's observed times.
-function ar_mvnormal_loglik(y, mu, sigma, phi, data)
+function ar_mvnormal_loglik(y, mu, sigma, phi, data; steps=false)
     sum(group_rows(data)) do rows
-        t = data.day[rows]
+        t = steps ? eachindex(rows) : data.day[rows]
         cov = Symmetric(sigma^2 / (1 - phi^2) .* phi .^ abs.(t .- t'))
         logpdf(MvNormal(mu[rows], cov), y[rows])
     end
@@ -86,36 +95,62 @@ rows_of(data, rows) = map(column -> column[rows], data)
 rk_density(backend, u) = LogDensityProblems.logdensity(
     rk_logdensity_problem(backend; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse)), u)
 
-@testset "ar_errors" begin
-    @testset "expands to the plate + scan it states" begin
+# The cell `@brm` evaluates for an `AR1Normal` statement, printed as `show`
+# prints a cell.
+function expansion(statements; range="groups(probe; order = day)")
+    plate = first(BRM._brm_expand_cell_ar1_normal(Meta.parse("""
+        @plate for p in $range
+            $statements
+        end""")))
+    i, range, body = BRM._brm_plate_loop(plate)
+    sprint(io -> BRM._brm_print_plate(io, i, range, body.args))
+end
+
+@testset "AR1Normal" begin
+    @testset "groups: the indices of each group" begin
+        @test groups(["b", "a", "b", "a"]; order=[4, 9, 1, 2]) == [[4, 2], [3, 1]]
+        @test groups(["b", "a", "b", "a"]) == [[2, 4], [1, 3]]
+        # Ties keep row order.
+        @test groups([1, 1, 1]; order=[2, 1, 2]) == [[2, 1, 3]]
+        @test groups(PANEL.probe; order=PANEL.day) ==
+            [[5, 2, 10], [4, 7, 1, 12, 9], [3, 8, 6, 11]]
+        @test_throws ArgumentError groups(["a", missing])
+        @test_throws DimensionMismatch groups(["a", "b"]; order=[1])
+    end
+
+    @testset "prints as written, evaluated as the scan it states" begin
         @test occursin("""
             @plate for p in groups(probe; order=day)
-                @scan begin
-                    y[p][1] ~ Normal(mu[p][1], sigma / sqrt(1 - phi ^ 2))
-                    for t in 2:length(day[p])
-                        k = day[p][t] - day[p][t - 1]
-                        y[p][t] ~ Normal(mu[p][t] + phi ^ k * (y[p][t - 1] - mu[p][t - 1]), sigma * sqrt((1 - phi ^ (2 * k)) / (1 - phi ^ 2)))
-                    end
-                end
+                y[p] ~ AR1Normal(mu[p], sigma, phi; time=day[p])
             end""", sprint(show, shared_ar(PANEL)))
+        shared = expansion("y[p] ~ AR1Normal(mu[p], sigma, phi; time = day[p])")
+        @test occursin("y[p][1] ~ Normal(mu[p][1], sigma / sqrt(1 - phi ^ 2))", shared)
+        @test occursin("for t in 2:length(day[p])", shared)
+        @test occursin("k = day[p][t] - day[p][t - 1]", shared)
+        @test occursin("y[p][t] ~ Normal(mu[p][t] + phi ^ k * (y[p][t - 1] - mu[p][t - 1]), " *
+            "sigma * sqrt((1 - phi ^ (2 * k)) / (1 - phi ^ 2)))", shared)
         # Values read as `x[p]` vary along the series, bare ones are shared.
-        varying = sprint(show, varying_ar(PANEL))
+        varying = expansion("""
+            y[p] ~ AR1Normal(mu[p], sigma[p], phi[p]; time = day[p])""")
         @test occursin("y[p][1] ~ Normal(mu[p][1], sigma[p][1] / sqrt(1 - phi[p][1] ^ 2))", varying)
         @test occursin("phi[p][t] ^ k", varying)
         # Any argument that reads the group's rows is indexed entry by entry,
         # directly or through a cell local; anything else is shared.
-        exprs = sprint(show, @brm PANEL begin
-            phi ~ Uniform(-1, 1)
-            log_s ~ Normal(0, 1)
-            mu ~ 1 + x + (1 | probe)
-            @plate for p in groups(probe; order = day)
-                m = mu[p] .+ 0.5
-                y[p] ~ ar_errors(Normal(m, exp(log_s)), phi; time = day[p])
-            end
-        end)
+        exprs = expansion("""
+            m = mu[p] .+ 0.5
+            y[p] ~ AR1Normal(m, exp(log_s), phi; time = day[p])""")
         @test occursin("y[p][1] ~ Normal(m[1], exp(log_s) / sqrt(1 - phi ^ 2))", exprs)
         @test occursin("y[p][t] ~ Normal(m[t] + phi ^ k * (y[p][t - 1] - m[t - 1])", exprs)
-        # The shorthand and its expansion are one model.
+        # Without `time`, every step is one. The length comes from data, so
+        # the cell still draws the series with `y` omitted: the header's
+        # `order` column, else an argument read along the series.
+        stepped = expansion("""
+            y[p] ~ AR1Normal(mu[p], sigma, phi)""")
+        @test occursin("for t in 2:length(day[p])", stepped)
+        @test occursin("for t in 2:length(mu[p])", expansion("""
+            y[p] ~ AR1Normal(mu[p], sigma, phi)"""; range="groups(probe)"))
+        @test occursin("y[p][t] ~ Normal(mu[p][t] + phi * (y[p][t - 1] - mu[p][t - 1]), sigma)", stepped)
+        # The statement and its expansion are one model.
         written = @brm PANEL begin
             phi ~ Uniform(-1, 1)
             sigma ~ Exponential(1)
@@ -137,24 +172,31 @@ rk_density(backend, u) = LogDensityProblems.logdensity(
     end
 
     @testset "refusals at the formula boundary" begin
-        @test_throws "Gaussian innovations" @eval @brm PANEL begin
+        @test_throws "AR1Normal(mu, sigma, phi)" @eval @brm PANEL begin
             phi ~ Uniform(-1, 1)
             @plate for p in groups(probe; order = day)
-                y[p] ~ ar_errors(StudentT(3, 0, 1), phi; time = day[p])
+                y[p] ~ AR1Normal(0, phi; time = day[p])
             end
         end
-        # refused: the shorthand is the per-group recurrence over long-format
-        # rows (decision 0det9mo); a cell over pre-grouped data writes its @scan.
+        @test_throws "AR1Normal(mu, sigma, phi)" @eval @brm PANEL begin
+            phi ~ Uniform(-1, 1)
+            @plate for p in groups(probe; order = day)
+                y[p] ~ AR1Normal(0, 1, phi; times = day[p])
+            end
+        end
+        # refused: every read of a `groups(...)` cell is a group's rows, which
+        # is what tells a series argument from a shared one; a cell over
+        # pre-grouped data writes its @scan.
         @test_throws "write the `@scan` it stands for" @eval @brm SCAN_PANEL begin
             phi ~ Uniform(-1, 1)
             @plate for i in eachindex(y)
-                y[i] ~ ar_errors(Normal(0, 1), phi; time = day[i])
+                y[i] ~ AR1Normal(0, 1, phi; time = day[i])
             end
         end
-        @test_throws "time = t[p]" @eval @brm PANEL begin
+        @test_throws "reads the cell's time column" @eval @brm PANEL begin
             phi ~ Uniform(-1, 1)
             @plate for p in groups(probe; order = day)
-                y[p] ~ ar_errors(Normal(0, 1), phi)
+                y[p] ~ AR1Normal(0, 1, phi; time = day)
             end
         end
         # refused: the grouping is the plate's, not a keyword (decision
@@ -162,12 +204,12 @@ rk_density(backend, u) = LogDensityProblems.logdensity(
         @test_throws "takes no `by=`" @eval @brm PANEL begin
             phi ~ Uniform(-1, 1)
             @plate for p in groups(probe; order = day)
-                y[p] ~ ar_errors(Normal(0, 1), phi; time = day[p], by = probe)
+                y[p] ~ AR1Normal(0, 1, phi; time = day[p], by = probe)
             end
         end
         @test_throws "one series per `@plate` cell" @eval @brm PANEL begin
             phi ~ Uniform(-1, 1)
-            y ~ ar_errors(Normal(0, 1), phi; time = day, by = probe)
+            y ~ AR1Normal(0, 1, phi; time = day, by = probe)
         end
         # A repeated time has no AR(1) step; the gap rule needs whole steps.
         @test_throws "repeats time 3 in group \"p2\"" shared_ar(
@@ -184,9 +226,10 @@ rk_density(backend, u) = LogDensityProblems.logdensity(
         end
     end
 
-    @testset "RK, shared sigma and phi: density and gradient" begin
+    @testset "RK, shared sigma and phi: density and gradient ($model)" for (model, steps) in
+            ((shared_ar, false), (stepped_ar, true))
         saved = deepcopy(PANEL)
-        backend, problem = consumer_problem(shared_ar(PANEL))
+        backend, problem = consumer_problem(model(PANEL))
         names = coordinate_names(backend.model.layout)
         at(name) = coordinate(names, Symbol(name))
         tau = at("b_probe.tau.1")
@@ -198,7 +241,7 @@ rk_density(backend, u) = LogDensityProblems.logdensity(
             sigma, scale = exp(u[at(:sigma)]), exp(u[tau])
             mu = u[at("pop_mu.beta_pop.1")] .+ u[at("pop_mu.beta_pop.2")] .* PANEL.x .+
                 scale .* u[z][groups]
-            ar_mvnormal_loglik(PANEL.y, mu, sigma, phi, PANEL) + logpdf(Uniform(-1, 1), phi) + uniform_logjac(u[at(:phi)], -1, 1) +
+            ar_mvnormal_loglik(PANEL.y, mu, sigma, phi, PANEL; steps) + logpdf(Uniform(-1, 1), phi) + uniform_logjac(u[at(:phi)], -1, 1) +
                 logpdf(Exponential(), sigma) + u[at(:sigma)] +
                 logpdf(LogNormal(0, 1), scale) + u[tau] + sum(logpdf.(Normal(), u[z])) +
                 logpdf(Normal(), u[at("pop_mu.beta_pop.1")]) +
@@ -217,7 +260,7 @@ rk_density(backend, u) = LogDensityProblems.logdensity(
             log(sigma) ~ 1 + (1 | sg | probe)
             mu ~ 1 + x
             @plate for p in groups(probe; order = day)
-                y[p] ~ ar_errors(Normal(mu[p], sigma[p]), phi[p]; time = day[p])
+                y[p] ~ AR1Normal(mu[p], sigma[p], phi[p]; time = day[p])
             end
         end
         backend, problem = consumer_problem(model(PANEL))
@@ -323,9 +366,11 @@ rk_density(backend, u) = LogDensityProblems.logdensity(
         @test stanc_ok(BRM.stan_code(SBBRMI(shared_ar(PANEL); mod=@__MODULE__)))
         # With `y` omitted the same block draws whole trajectories.
         omitted = (; probe=PANEL.probe, day=PANEL.day, x=PANEL.x)
-        prior_code = BRM.stan_code(SBBRMI(shared_ar(omitted); mod=@__MODULE__))
-        @test occursin("normal_rng", prior_code)
-        @test stanc_ok(prior_code)
+        for model in (shared_ar, stepped_ar)
+            prior_code = BRM.stan_code(SBBRMI(model(omitted); mod=@__MODULE__))
+            @test occursin("normal_rng", prior_code)
+            @test stanc_ok(prior_code)
+        end
         # One scientific description of the expansion.
         d = brm_descriptor(SBBRMI(shared_ar(PANEL); mod=@__MODULE__))
         @test d isa BRMDescriptor
