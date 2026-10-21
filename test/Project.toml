@@ -98,8 +98,11 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # 6c7e18af adds c4008d62 (a per-cell `@rkppl` submodel may hold a `@scan`,
 # its returned carried array observed in place), and contains ce48fc77
 # (`rk_ode_rk45_tol`), 9bef9c04 (per-row provider-law subject cells) and
-# fef26022 (queries skip unread plate outputs).
+# fef26022 (queries skip unread plate outputs). d92d6677 adds ac01d1f1d +
+# 2512d6b1c (posterior-predictive draws: `prepare_predictive`, and
+# `predictive_node` / `predictive_targets` for a caller's own vectorized cut;
+# test/rk_predictive.jl).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "6c7e18af9b824792f6a1a3861320df94d62bb33a"
+rev = "d92d667752b842f215d71b7efc893441b14d3c05"
