@@ -3245,24 +3245,31 @@ sbbrmi = SBBRMI(brmi)
 src   = stan_code(sbbrmi)
 ```
 """
-struct SBBRMI{P<:BRMI, M, D<:AbstractDict, PP<:AbstractDict, HO<:AbstractSet{Symbol}, B<:AbstractDict}
+struct SBBRMI{P<:BRMI, M, D<:AbstractDict, PP<:AbstractDict, HO<:AbstractSet{Symbol}, B<:AbstractDict, S<:BRMI}
     parent::P
     model::M
     data::D
     preproc::PP
     held_out::HO
     bindings::B
+    # The BRMI the caller passed, before prior-address resolution
+    # (`brm_source`). A rebuild around the same model forwards it.
+    source::S
 end
 
 # Preserve the historical positional constructor used by downstream code that
 # rebuilds an SBBRMI around the same emitted body/data. Public hold-out state is
 # attached by the keyword constructor below; an explicit four-argument rebuild
-# retains the historical unmarked metadata contract.
+# retains the historical unmarked metadata contract. Without a source, the
+# parent is its own source.
 SBBRMI(parent::BRMI, model, data::AbstractDict, preproc::AbstractDict) =
     SBBRMI(parent, model, data, preproc, Set{Symbol}())
 SBBRMI(parent::BRMI, model, data::AbstractDict, preproc::AbstractDict,
         held_out::AbstractSet{Symbol}) =
     SBBRMI(parent, model, data, preproc, held_out, Dict{Symbol,NamedTuple}())
+SBBRMI(parent::BRMI, model, data::AbstractDict, preproc::AbstractDict,
+        held_out::AbstractSet{Symbol}, bindings::AbstractDict) =
+    SBBRMI(parent, model, data, preproc, held_out, bindings, parent)
 
 # Bind semantic meaning at emission time. These records are removed from the
 # Stan data dictionary and carried with the emitted artifact through replay.
@@ -3282,15 +3289,19 @@ end
 """
     parent(sb::SBBRMI) -> BRMI
 
-Return the parsed [`BRMI`](@ref) that `sb` wraps. This is the public, stable
+Return the [`BRMI`](@ref) model that `sb` lowered. This is the public, stable
 accessor for an `SBBRMI`'s underlying model; prefer it over the `sb.parent`
 field, which is an implementation detail. Mirrors [`parent(::TuringBRMI)`](@ref).
+It is the BRMI `sb` was built from after prior-address resolution
+(`optional(...)` priors, grouping-column addresses); [`brm_source`](@ref)
+returns that BRMI exactly as passed.
 
 The introspection accessors [`structure_of`](@ref) and [`priors_of`](@ref) also
 accept an `SBBRMI` directly (unwrapping through this accessor), so a consumer
 holding only the emitted model never has to reach for the wrapped `BRMI`.
 """
 Base.parent(sb::SBBRMI) = sb.parent
+brm_source(sb::SBBRMI) = sb.source
 
 # Accept the emitted `SBBRMI` wrapper directly, so a consumer holding only the
 # emitted model (and not the bare `BRMI`) can split it into prior / model views
@@ -3781,7 +3792,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
        centered_groups=Set{Symbol}(), total_groups=:auto,
        s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts, held_out=(),
        resample_covariates=(), _frozen_preproc=nothing, _marginal_id_targets=nothing,
-       _s2z_generated=nothing)
+       _s2z_generated=nothing, _source::BRMI=brmi)
     brmi = _brm_resolve_prior_addresses(brmi)
     # A frozen re-emission codes releveled factors over their fitted levels.
     isnothing(_frozen_preproc) || (brmi = _sb_fit_factor_levels(brmi, _frozen_preproc))
@@ -4048,7 +4059,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
         "`y_lower`/`y_upper` for interval-censored endpoints.")
     body = Expr(:block, stmts...)
     model = StanBlocks.SlicModel(body, data, mod, _sb_declared_observations(body, data, brmi, mod))
-    sb = SBBRMI(source_parent, model, data, preproc, Set{Symbol}(), bindings)
+    sb = SBBRMI(source_parent, model, data, preproc, Set{Symbol}(), bindings, _source)
     triage = _sb_observation_triage(sb)
     # The activity probe's own build: no warnings, no held-out marks.
     _marginal_id_targets isa _SBMarginalProbe && return sb
@@ -4063,7 +4074,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
         build(; cv_groups, held_out, _marginal_id_targets) = SBBRMI(source_parent;
             mod, cv_groups, centered_groups, total_groups, s2z_groups, s2z_rho,
             s2z_coordinates, held_out, resample_covariates, _frozen_preproc,
-            _marginal_id_targets, _s2z_generated)
+            _marginal_id_targets, _s2z_generated, _source)
         probe = isempty(cv_groups) ? sb :
             build(; cv_groups=Set{Symbol}(), held_out=(),
                   _marginal_id_targets=_SBMarginalProbe())
@@ -4940,7 +4951,8 @@ Base.@nospecializeinfer function _sb_mark_held_out(@nospecialize(sb::SBBRMI), se
         marked[source] = StanBlocks.stan.maybecv(source, marked[source])
     end
     model = StanBlocks.SlicModel(sb.model.model, marked, sb.model.mod, sb.model.observations)
-    SBBRMI(sb.parent, model, marked, sb.preproc, union(sb.held_out, selected), sb.bindings)
+    SBBRMI(sb.parent, model, marked, sb.preproc, union(sb.held_out, selected), sb.bindings,
+           sb.source)
 end
 
 """
@@ -5165,7 +5177,7 @@ function _sb_mark_resample_groups(sb::SBBRMI, groups)
         "sbimpl: resample replay: failed to mark group index provenance for " *
         "$(sort!(collect(setdiff(groups, seen))))")
     model = StanBlocks.SlicModel(sb.model.model, marked, sb.model.mod, sb.model.observations)
-    SBBRMI(sb.parent, model, marked, sb.preproc, copy(sb.held_out), sb.bindings)
+    SBBRMI(sb.parent, model, marked, sb.preproc, copy(sb.held_out), sb.bindings, sb.source)
 end
 
 function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool, held_out)
@@ -5894,7 +5906,8 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     end
     new_model = StanBlocks.SlicModel(sb.model.model, new_data, sb.model.mod, sb.model.observations)
     _sb_apply_held_out(
-        SBBRMI(sb.parent, new_model, new_data, new_preproc, Set{Symbol}(), sb.bindings),
+        SBBRMI(sb.parent, new_model, new_data, new_preproc, Set{Symbol}(), sb.bindings,
+               sb.source),
         held_out; cover_all=true, prefix="sbimpl: reprocess")
 end
 

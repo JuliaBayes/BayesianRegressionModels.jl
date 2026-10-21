@@ -62,6 +62,7 @@ include("rk_submodel_values.jl")
 include("rk_structured.jl")
 include("rk_observations.jl")
 include("rk_reprocess.jl")
+include("rk_design_binder.jl")
 include("vimpl.jl")
 
 # SBBRMI — StanBlocks backend. Lowers a BRMI into a StanBlocks SlicModel
@@ -170,7 +171,7 @@ export truncated, censored, interval_censored
 # Fusion append API (cross-package: the RK reporter resolves this by name).
 export rk_translate_artifact
 export rk_artifact_inputs
-export rk_bound_data, rk_bound_plan
+export rk_bound_data, rk_bound_plan, rk_design_binder, RKDesignBinder
 export rkppl_model, rk_model
 # Re-export every Distributions.jl family BRM lowers so
 # `using BayesianRegressionModels` is the only import a model file needs — no
@@ -275,7 +276,7 @@ export outcomes, linear_predictor_op, linear_predictors, predictors,
        hierarchical_outcomes,
        linear_predictor_args, data_args, primary_lp, popcoefnames, effect_priors,
        ranef_effect_priors, r2d2_priors, term_priors, ranefcoefnames,
-       priors_of, structure_of
+       priors_of, structure_of, brm_source
 
 # Extension API. Downstream packages add their own formula terms
 # by defining methods on `vmeta_sampling_rhs` + `_sb_submodel_rhs!` and
