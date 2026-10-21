@@ -15,11 +15,12 @@ const CENSORED_CELL = @brm begin
     sigma_add ~ Exponential(1)
     sigma_prop ~ Exponential(1)
     location ~ 1 + (1 | panel | subject)
+    rows = groups(row_subject => subject)
     @plate for i in eachindex(location)
-        mean[i] = location[i] .+ ragged(time, row_subject)[i]
-        ragged(y, row_subject)[i] ~ censored(
+        mean[i] = location[i] .+ time[rows[i]]
+        y[rows[i]] ~ censored(
             Normal(mean[i], addprop(mean[i], sigma_add, sigma_prop));
-            lower=ragged(limit, row_subject)[i])
+            lower=limit[rows[i]])
     end
 end
 
@@ -76,11 +77,12 @@ const WEIGHTED_CENSORED_CELL = @brm begin
     sigma_add ~ Exponential(1)
     sigma_prop ~ Exponential(1)
     location ~ 1 + (1 | panel | subject)
+    rows = groups(row_subject => subject)
     @plate for i in eachindex(location)
-        mean[i] = location[i] .+ ragged(time, row_subject)[i]
-        ragged(y, row_subject)[i] ~ weighted(censored(
+        mean[i] = location[i] .+ time[rows[i]]
+        y[rows[i]] ~ weighted(censored(
             Normal(mean[i], addprop(mean[i], sigma_add, sigma_prop));
-            lower=ragged(limit, row_subject)[i]), ragged(w, row_subject)[i])
+            lower=limit[rows[i]]), w[rows[i]])
     end
 end
 

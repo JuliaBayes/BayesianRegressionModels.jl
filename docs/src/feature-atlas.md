@@ -174,18 +174,17 @@ title="Shared mean and precision group covariance")
 
 ## Multi-axis population PK kernel
 
-The subject frame has one row per person, while the observation frame has one
-row per concentration measurement. Those axes deliberately have different
-lengths and the observation rows are interleaved. The indexed `@plate for`
-cell evaluates the structural model once per subject: `CL[i]` and `V[i]` read
-subject `i`'s values of the linked formulas, `dose[i]` reads the subject frame,
-and `time[i]` selects that subject's observation times from the flat
-observation frame, grouped once outside the cell by the model-scope statement
-`ragged(time, obs_subject)`. The cell body is ordinary Julia, so `.*` and
-`exp.` act elementwise on those times. The cell names its result
-`predicted_concentration[i]`; the top-level `ragged(concentration, obs_subject)`
-response joins the flat concentrations to it. In the generated StanBlocks pane,
-the cell lowers to a `plate`.
+The subject vectors have one entry per person, while the observation vectors
+have one entry per concentration measurement. They deliberately have different
+lengths and the observations are interleaved. The indexed `@plate for` cell
+evaluates the structural model once per subject: `CL[i]` and `V[i]` read
+subject `i`'s values of the linked formulas and `dose[i]` its dose.
+`samples = groups(obs_subject => subject)` binds, for each subject, the indices
+of its observations, so `time[samples[i]]` is that subject's observation times
+and `concentration[samples[i]] ~ …` observes its concentrations, exactly as the
+same Julia loop would read them. The cell body is ordinary Julia, so `.*` and
+`exp.` act elementwise on those times. In the generated StanBlocks pane, the
+cell lowers to a `plate`.
 
 This is a deliberately small one-compartment IV-bolus model,
 `C(t) = dose / V * exp(-(CL / V)t)`. The shared `pk` ID gives `CL` and `V` one
@@ -197,15 +196,13 @@ population_pk = (@brm begin
     sigma ~ Exponential(1)
     log(CL) ~ 1 + (1 | pk | subject)
     log(V)  ~ 1 + (1 | pk | subject)
-    ragged(time, obs_subject)
+    samples = groups(obs_subject => subject)
 
     @plate for i in eachindex(CL)
         predicted_concentration[i] = dose[i] / V[i] .*
-            exp.((-CL[i] / V[i]) .* time[i])
+            exp.((-CL[i] / V[i]) .* time[samples[i]])
+        concentration[samples[i]] ~ Normal(predicted_concentration[i], sigma)
     end
-
-    ragged(concentration, obs_subject) ~
-        Normal(predicted_concentration, sigma)
 end)((;
     # Subject axis: one row per subject.
     subject=["alice", "bob"],

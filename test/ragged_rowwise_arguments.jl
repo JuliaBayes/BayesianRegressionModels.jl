@@ -58,24 +58,28 @@ const qt_only = @brm begin
     qt ~ Normal(log_k, 1.0)
 end
 
+# A flat response observed per subject in the cell through a `groups`
+# binding, with a row-wise scale and bound read through it too.
 const joined = @brm begin
     sigma_add ~ Exponential(1)
     sigma_prop ~ Exponential(1)
     log_k ~ 1 + (1 | p | subject)
-    loc ~ kernel(ragged(t, obs_subject), log_k) do ts, lk
-        exp.(-exp(lk) .* ts)
+    obs = groups(obs_subject => subject)
+    @plate for i in eachindex(log_k)
+        loc[i] = exp.(-exp(log_k[i]) .* t[obs[i]])
+        y[obs[i]] ~ censored(Normal(loc[i], addprop(loc[i], sigma_add, sigma_prop));
+            lower=lloq[obs[i]])
     end
-    ragged(y, obs_subject) ~ censored(
-        Normal(loc, addprop(loc, sigma_add, sigma_prop)); lower=lloq)
 end
 
 const joined_scaled = @brm begin
     sigma ~ Exponential(1)
     log_k ~ 1 + (1 | p | subject)
-    loc ~ kernel(ragged(t, obs_subject), log_k) do ts, lk
-        exp.(-exp(lk) .* ts)
+    obs = groups(obs_subject => subject)
+    @plate for i in eachindex(log_k)
+        loc[i] = exp.(-exp(log_k[i]) .* t[obs[i]])
+        y[obs[i]] ~ Normal(2 * loc[i], sigma)
     end
-    ragged(y, obs_subject) ~ Normal(2 * loc, sigma)
 end
 
 const grouped_data = (;
@@ -130,24 +134,21 @@ whole_memory_addprop(code) = occursin(r"addprop\(\w+__pl_mem_\d+,", code)
     end
 end
 
-@testset "an omitted ragged join reads the same grouped argument" begin
+@testset "an omitted grouped response reads the same grouped argument" begin
     replay_data = drop_response(merge(joined_data, (;
         obs_subject=["b", "a", "b", "a", "b"], t=[0.5, 0.5, 1.0, 2.0, 2.0],
         lloq=fill(0.1, 5))))
+    @test groups(joined_data.obs_subject => joined_data.subject) == [[2, 4, 5, 7], [1, 3, 6]]
     for builder in (joined, joined_scaled)
         bound = SBBRMI(builder(joined_data); mod=@__MODULE__)
         omitted = @test_logs (:warn, r"`y` bind\(s\) no data column") SBBRMI(
             builder(drop_response(joined_data)); mod=@__MODULE__)
-        @test observation(omitted) == observation(bound)
-        @test length(argument_plates(bound)) == 1
-        @test length(argument_plates(omitted)) == 1
-        # Without values, the argument plate iterates the join's row
-        # partition: kernel subject order, flat row numbers.
-        @test !haskey(bound.data, :y_rows)
-        @test omitted.data[:y_rows] == [[2, 4, 5, 7], [1, 3, 6]]
-        @test omitted.preproc[:y_rows].kind === :ragged_rows
+        # Omitted, the cell observes under its own name; bound, it reads the
+        # response gathered per subject.
+        @test omitted.model.observations == (:loc_y,)
+        @test bound.model.observations == (:kernel_loc_y_ragged,)
+        @test !haskey(omitted.data, :y)
         replayed = reprocess(omitted, replay_data)
-        @test replayed.data[:y_rows] == [[1, 3, 5], [2, 4]]
         for (model, segments) in ((bound, nothing), (omitted, [4, 7]),
                                   (replayed, [3, 5]))
             code = BayesianRegressionModels.stan_code(model)

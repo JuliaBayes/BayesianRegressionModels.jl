@@ -145,22 +145,17 @@ const data = (;
     obs_limit=[0.05, 0.05, 0.1, 0.4, 0.05, 0.05],
     y=[0.81, 0.76, 0.52, 0.4, 0.21, 0.33],
 )
-const by_assay_add = "a1 .+ (a2 - a1) .* obs_assay[i]"
-const by_assay_prop = "b1 .+ (b2 - b1) .* obs_assay[i]"
+const by_assay_add = "a1 .+ (a2 - a1) .* obs_assay[obs[i]]"
+const by_assay_prop = "b1 .+ (b2 - b1) .* obs_assay[obs[i]]"
 
 function build(route, add, prop)
-    observation = route === :cell ? """
+    route === :cell || error("the only route is the in-cell observation")
+    observation = """
         @plate for i in eachindex(log_k)
-            loc[i] = exp.(-exp(log_k[i]) .* obs_time[i])
-            y[i] ~ censored(Normal(loc[i], addprop(loc[i], $add, $prop));
-                lower=obs_limit[i])
+            loc[i] = exp.(-exp(log_k[i]) .* obs_time[obs[i]])
+            y[obs[i]] ~ censored(Normal(loc[i], addprop(loc[i], $add, $prop));
+                lower=obs_limit[obs[i]])
         end
-        """ : """
-        @plate for i in eachindex(log_k)
-            loc[i] = exp.(-exp(log_k[i]) .* obs_time[i])
-        end
-        ragged(y, obs_subject) ~ censored(Normal(loc, addprop(loc, $add, $prop));
-            lower=obs_limit)
         """
     Core.eval(@__MODULE__, BayesianRegressionModels._brm("""
         a1 ~ Exponential(1.0)
@@ -170,12 +165,7 @@ function build(route, add, prop)
         log_k ~ 1 + (1 | p | subject)
         effect(log_k, Intercept) ~ Normal(0.0, 1.0)
         sd(:, p) ~ Exponential(1.0)
-        ragged(obs_time, obs_subject)
-        $(route === :cell ? """
-        ragged(obs_assay, obs_subject)
-        ragged(obs_limit, obs_subject)
-        ragged(y, obs_subject)
-        """ : "")
+        obs = groups(obs_subject => subject)
         $observation
         """; df=data))
 end
@@ -191,10 +181,10 @@ end
         (:cell, P.by_assay_add, P.by_assay_prop, assay_add, assay_prop),
         (:cell, P.by_assay_add, "b1", assay_add, (s, j) -> s.b1),
         (:cell, "a1", P.by_assay_prop, (s, j) -> s.a1, assay_prop),
-        # A ragged join groups a per-row data scale with its rows, and so a
-        # scale computed from parameters and per-row data.
-        (:join, "obs_sd", "b1", (s, j) -> data.obs_sd[j], (s, j) -> s.b1),
-        (:join, "a1 + (a2 - a1) * obs_assay", "b1", assay_add, (s, j) -> s.b1),
+        # A per-row data scale read through the binding, and a scale computed
+        # from parameters and per-row data.
+        (:cell, "obs_sd[obs[i]]", "b1", (s, j) -> data.obs_sd[j], (s, j) -> s.b1),
+        (:cell, "a1 .+ (a2 - a1) .* obs_assay[obs[i]]", "b1", assay_add, (s, j) -> s.b1),
     )
     rows = [findall(==(s), data.obs_subject) for s in data.subject]
     order = [findfirst(==(s), sort(unique(data.subject))) for s in data.subject]

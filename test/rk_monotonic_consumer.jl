@@ -12,10 +12,12 @@ function build(data)
         score ~ 1 + mo(rank) + hsgp(x; k=3)
         effect(score, Intercept) ~ Normal(0, 0.4)
         simplex(score, mo(rank)) ~ Dirichlet(1, 2)
-        pred ~ kernel(t, theta, ragged(score, row_group)) do ts, a, scores
-            a .+ ts .* sum(scores)
+        rows = groups(row_group => subject)
+        events = groups(event_subject => subject)
+        @plate for i in eachindex(theta)
+            pred[i] = theta[i] .+ t[i] .* sum(score[rows[i]])
+            y[events[i]] ~ Normal(pred[i], 0.8)
         end
-        ragged(y, event_subject) ~ Normal(pred, 0.8)
     end
 end
 end

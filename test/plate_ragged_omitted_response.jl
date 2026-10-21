@@ -16,10 +16,11 @@ const PANEL = (;
 const RAGGED_CELL = @brm begin
     sigma ~ Exponential(1)
     log_rate ~ 1 + x + (1 | panel | subject)
+    events = groups(event_subject => subject)
     @plate for i in eachindex(log_rate)
-        location[i] = exp(log_rate[i]) .* ragged(event_time, event_subject)[i]
-        ragged(y, event_subject)[i] ~ censored(
-            Normal(location[i], sigma); lower=ragged(limit, event_subject)[i])
+        location[i] = exp(log_rate[i]) .* event_time[events[i]]
+        y[events[i]] ~ censored(
+            Normal(location[i], sigma); lower=limit[events[i]])
     end
 end
 

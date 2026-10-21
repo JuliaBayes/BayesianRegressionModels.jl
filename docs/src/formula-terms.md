@@ -688,13 +688,14 @@ different thing from `weighted(...)`, which scales the likelihood.
 | Term | What it does |
 | --- | --- |
 | `kernel(args…) do …` | a per-subject model cell — the PMX/PKPD surface |
-| `ragged(x, group)` | a model-scope statement grouping a flat secondary row axis into the ragged per-subject view an `@plate for` cell reads as `x[i]` |
+| `rows = groups(group => subjects)` | a model-scope binding: for each entry of `subjects`, the indices of `group` that hold it; an `@plate for i in …` cell reads a vector at them, `x[rows[i]]` |
 
-`ragged`'s `x` may be a linear predictor declared in the same `@brm` block or a
-raw flat data column; `group` names, for every row of that frame, which subject
-the row belongs to. Declare it once, outside the cell; inside the cell, read
-`x[i]`. See the [multi-axis population PK kernel](@ref) for a runnable example
-whose subject and observation columns have different lengths.
+`x` may be a linear predictor declared in the same `@brm` block or a data
+vector, indexed like `group`; `group` names, for every entry, which subject it
+belongs to. Bind the indices once, outside the cell; inside the cell, read
+`x[rows[i]]` and observe `y[rows[i]] ~ …`, as the same Julia loop would (see
+[`groups`](@ref)). See the [multi-axis population PK kernel](@ref) for a
+runnable example whose subject and observation vectors have different lengths.
 
 ### Per-group recurrences over long-format rows
 
@@ -1656,8 +1657,8 @@ by name anywhere later in the formula block, `kernel(...)` cells included. It is
 implemented by both `SBBRMI` and `TuringBRMI`.
 
 The [multi-axis population PK kernel](@ref) shows the executable base shape:
-ordinary formula parameters feed a `kernel(...)` cell, while `ragged(...)`
-attaches a secondary observation frame to the subject axis.
+ordinary formula parameters feed a `@plate for` cell, which reads each
+subject's observations through a `groups(obs_subject => subject)` binding.
 
 The inciting shape is a per-**event** multiplier: `diet` scales dose
 bioavailability inside the cell, so what the model needs is a `K`-simplex

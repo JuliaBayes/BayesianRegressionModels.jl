@@ -124,7 +124,7 @@ plate_pk_oracle_gradients(m, θ, σ, H) =
 plate_pk_oracle_hessians(m, θ, σ, H) =
     [term.hessian for term in _plate_pk_oracle_terms(m, θ, σ, H)]
 
-# A flat observation axis joined to the subject cells by `ragged(y, group)`:
+# Observations joined to the subject cells by `obs = groups(obs_subject => subject)`:
 # rows interleave subjects, counts differ, and the subject column is not in
 # level order, so the joined (cell-by-cell) density order differs from both.
 const NLME_RAGGED_DATA = (; subject=["s2", "s1", "s3"], dose=[80.0, 100.0, 120.0],
@@ -137,10 +137,11 @@ function nlme_ragged_pk(data)
         sigma ~ Exponential(1)
         log(CL) ~ 1 + (1 | pk | subject)
         log(V) ~ 1 + (1 | pk | subject)
+        obs = groups(obs_subject => subject)
         @plate for i in eachindex(CL)
-            conc[i] = dose[i] / V[i] .* exp.((-CL[i] / V[i]) .* ragged(t, obs_subject)[i])
+            conc[i] = dose[i] / V[i] .* exp.((-CL[i] / V[i]) .* t[obs[i]])
+            y[obs[i]] ~ Normal(conc[i], sigma)
         end
-        ragged(y, obs_subject) ~ Normal(conc, sigma)
     end
 end
 
@@ -194,12 +195,13 @@ function nlme_censored_join(data)
         marker_scale ~ Exponential(1)
         log(CL) ~ 1 + (1 | pk | subject)
         log(V) ~ 1 + (1 | pk | subject)
+        obs = groups(obs_subject => subject)
         @plate for i in eachindex(CL)
-            pred[i] = dose[i] / V[i] .* exp.((-CL[i] / V[i]) .* ragged(t, obs_subject)[i])
+            pred[i] = dose[i] / V[i] .* exp.((-CL[i] / V[i]) .* t[obs[i]])
             marker[i] ~ normal(fill(CL[i] / 10, length(marker[i])), marker_scale)
+            conc[obs[i]] ~ censored(
+                Normal(pred[i], addprop(pred[i], sigma_add, sigma_prop)); lower=lloq[obs[i]])
         end
-        ragged(conc, obs_subject) ~ censored(
-            Normal(pred, addprop(pred, sigma_add, sigma_prop)); lower=lloq)
     end
 end
 
@@ -222,11 +224,12 @@ function nlme_imputed_join(data)
         marker_scale ~ Exponential(1)
         log(CL) ~ 1 + w + (1 | pk | subject)
         log(V) ~ 1 + (1 | pk | subject)
+        obs = groups(obs_subject => subject)
         @plate for i in eachindex(CL)
-            pred[i] = dose[i] / V[i] .* exp.((-CL[i] / V[i]) .* ragged(t, obs_subject)[i])
+            pred[i] = dose[i] / V[i] .* exp.((-CL[i] / V[i]) .* t[obs[i]])
             marker[i] ~ normal(fill(CL[i] / 10, length(marker[i])), marker_scale)
+            conc[obs[i]] ~ Normal(pred[i], sigma)
         end
-        ragged(conc, obs_subject) ~ Normal(pred, sigma)
     end
 end
 
@@ -264,10 +267,11 @@ function nested_model(data)
         sigma ~ Exponential(1)
         mu ~ 1 + (1 | p | subject)
         unit_shift ~ 0 + (1 | u | unit)
+        obs = groups(obs_subject => subject)
         @plate for i in eachindex(mu)
-            pred[i] = mu[i] .+ ragged(unit_shift, obs_subject)[i]
+            pred[i] = mu[i] .+ unit_shift[obs[i]]
+            y[obs[i]] ~ Normal(pred[i], sigma)
         end
-        ragged(y, obs_subject) ~ Normal(pred, sigma)
     end
 end
 
@@ -279,9 +283,10 @@ function nested_mixed_observations(data)
         mu ~ 1 + (1 | p | subject)
         unit_shift ~ 0 + (1 | u | unit)
         subject_y ~ Normal(mu, sigma)
+        obs = groups(obs_subject => subject)
         @plate for i in eachindex(mu)
-            pred[i] = mu[i] .+ ragged(unit_shift, obs_subject)[i]
+            pred[i] = mu[i] .+ unit_shift[obs[i]]
+            y[obs[i]] ~ Normal(pred[i], sigma)
         end
-        ragged(y, obs_subject) ~ Normal(pred, sigma)
     end
 end

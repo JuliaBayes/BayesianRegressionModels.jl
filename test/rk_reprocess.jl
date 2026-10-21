@@ -150,33 +150,19 @@ pk_censored(d) = @brm d begin
         y[i] ~ censored(normal(conc[i], sigma); lower=lo[i])
     end
 end
-# Long-format reads joined to their subject, observed in a `@plate` cell or
-# as the joined rows, censored below a per-read limit.
+# Long-format reads joined to their subject through a `groups` binding and
+# observed in a `@plate` cell, censored below a per-read limit.
 reads_in_cell(d) = @brm d begin
     sigma ~ Exponential(1.0)
     log_k ~ 1 + (1 | p | subject)
     effect(log_k, Intercept) ~ Normal(0.0, 1.0)
     sd(:, p) ~ Exponential(1.0)
-    ragged(obs_time, obs_subject)
-    ragged(obs_limit, obs_subject)
-    ragged(y, obs_subject)
+    obs = groups(obs_subject => subject)
     @plate for i in eachindex(log_k)
-        loc[i] = exp.(-exp(log_k[i]) .* obs_time[i])
-        y[i] ~ censored(Normal(loc[i], sigma); lower=obs_limit[i])
+        loc[i] = exp.(-exp(log_k[i]) .* obs_time[obs[i]])
+        y[obs[i]] ~ censored(Normal(loc[i], sigma); lower=obs_limit[obs[i]])
     end
 end
-reads_joined(d) = @brm d begin
-    sigma ~ Exponential(1.0)
-    log_k ~ 1 + (1 | p | subject)
-    effect(log_k, Intercept) ~ Normal(0.0, 1.0)
-    sd(:, p) ~ Exponential(1.0)
-    ragged(obs_time, obs_subject)
-    @plate for i in eachindex(log_k)
-        loc[i] = exp.(-exp(log_k[i]) .* obs_time[i])
-    end
-    ragged(y, obs_subject) ~ censored(Normal(loc, sigma); lower=obs_limit)
-end
-
 # A cell whose curve a callable-source provider claims as an RK graph (a scan
 # over the doses and a plate over the read times), counting its emissions.
 import BayesianRegressionModels: _rk_callable_source!
@@ -487,7 +473,7 @@ end
         end
     end
     # Long-format reads: the rows follow each subject's `obs_subject` reads.
-    for build in (RM.reads_in_cell, RM.reads_joined), keep in (["c"], ["c", "a"])
+    for build in (RM.reads_in_cell,), keep in (["c"], ["c", "a"])
         rk = RKBRMI(build(READS))
         u = point(rk)
         design = reads_of(keep)

@@ -15,11 +15,12 @@ const plate_builder = @brm begin
     sigma_add ~ Exponential(1)
     sigma_prop ~ Exponential(1)
     eta ~ 1 + (1 | p | subject)
+    obs = groups(obs_subject => subject)
     @plate for i in eachindex(subject)
-        pk_loc[i] = exp(eta[i]) .+ ragged(time, obs_subject)[i]
+        pk_loc[i] = exp(eta[i]) .+ time[obs[i]]
         pk_conc[i] ~ censored(Normal(pk_loc[i],
             addprop(pk_loc[i], sigma_add, sigma_prop));
-            lower=ragged(lloq, obs_subject)[i])
+            lower=lloq[obs[i]])
         qt_y[i] ~ Normal(eta[i], 1.0)
     end
 end

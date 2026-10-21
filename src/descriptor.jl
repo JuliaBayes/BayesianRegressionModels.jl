@@ -62,6 +62,9 @@ The last two are BRM's addition — the **schema link** back to the dataframe:
 
 `column`/`transform` are read from the plan's `preproc` record and the BRMI's
 own data columns — they are never inferred from the input's *name*.
+The fitted constants of a `center`/`zscale`/`standardize` input are
+[`brm_transform_constants`](@ref)'s, which also covers `mi(...)` inputs whose
+transformed value is computed inside the model.
 """
 struct BRMInput
     name::Symbol

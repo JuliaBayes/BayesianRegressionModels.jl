@@ -26,10 +26,11 @@ const call_censored = @brm begin
     sigma_add ~ Exponential(1)
     sigma_prop ~ Exponential(1)
     eta ~ 1 + (1 | p | subject)
+    obs = groups(obs_subject => subject)
     @plate for i in eachindex(subject)
-        loc[i] = exp(eta[i]) .+ ragged(time, obs_subject)[i]
+        loc[i] = exp(eta[i]) .+ time[obs[i]]
         y[i] ~ censored(Normal(loc[i], addprop(loc[i], sigma_add, sigma_prop));
-            lower=ragged(lloq, obs_subject)[i])
+            lower=lloq[obs[i]])
     end
 end
 
@@ -51,17 +52,18 @@ end
 end
 
 @testset "in-cell censoring shares the formula wrapper's law" begin
+    # The formula wrapper over the collected plate result and per-subject data.
     formula = @brm begin
         sigma_add ~ Exponential(1)
         sigma_prop ~ Exponential(1)
         eta ~ 1 + (1 | p | subject)
-        loc ~ kernel(ragged(time, obs_subject), eta) do t, e
-            exp(e) .+ t
+        obs = groups(obs_subject => subject)
+        @plate for i in eachindex(subject)
+            loc[i] = exp(eta[i]) .+ time[obs[i]]
         end
-        ragged(y, obs_subject) ~ censored(Normal(loc, addprop(loc, sigma_add, sigma_prop));
-            lower=lloq)
+        y ~ censored(Normal(loc, addprop(loc, sigma_add, sigma_prop)); lower=lloq)
     end
-    data = merge(combinator_data, (; y=[0.4, 0.6, 1.2]))
+    data = merge(combinator_data, (; lloq=[[0.1, 0.1], [0.1]]))
     top = describe(formula, data)
     cell = describe(call_censored)
     @test top.complete && cell.complete
@@ -72,9 +74,10 @@ end
 @testset "token-form combinators describe their family as a child" begin
     censored_token = @brm begin
         eta ~ 1 + (1 | p | subject)
+        obs = groups(obs_subject => subject)
         @plate for i in eachindex(subject)
-            loc[i] = exp(eta[i]) .+ ragged(time, obs_subject)[i]
-            y[i] ~ censored(normal, loc[i], 0.3; lower=ragged(lloq, obs_subject)[i])
+            loc[i] = exp(eta[i]) .+ time[obs[i]]
+            y[i] ~ censored(normal, loc[i], 0.3; lower=lloq[obs[i]])
         end
     end
     r = describe(censored_token)
@@ -100,24 +103,27 @@ end
 @testset "in-cell truncated, weighted and interval_censored" begin
     truncated_call = @brm begin
         eta ~ 1 + (1 | p | subject)
+        obs = groups(obs_subject => subject)
         @plate for i in eachindex(subject)
-            loc[i] = exp(eta[i]) .+ ragged(time, obs_subject)[i]
+            loc[i] = exp(eta[i]) .+ time[obs[i]]
             y[i] ~ truncated(Normal(loc[i], 0.3); lower=0.0)
         end
     end
     weighted_token = @brm begin
         eta ~ 1 + (1 | p | subject)
+        obs = groups(obs_subject => subject)
         @plate for i in eachindex(subject)
-            loc[i] = exp(eta[i]) .+ ragged(time, obs_subject)[i]
-            y[i] ~ weighted(normal, ragged(weight, obs_subject)[i], loc[i], 0.3)
+            loc[i] = exp(eta[i]) .+ time[obs[i]]
+            y[i] ~ weighted(normal, weight[obs[i]], loc[i], 0.3)
         end
     end
     interval_token = @brm begin
         eta ~ 1 + (1 | p | subject)
+        obs = groups(obs_subject => subject)
         @plate for i in eachindex(subject)
-            loc[i] = exp(eta[i]) .+ ragged(time, obs_subject)[i]
-            y[i] ~ interval_censored(normal, ragged(lo, obs_subject)[i],
-                ragged(hi, obs_subject)[i], loc[i], 0.3)
+            loc[i] = exp(eta[i]) .+ time[obs[i]]
+            y[i] ~ interval_censored(normal, lo[obs[i]],
+                hi[obs[i]], loc[i], 0.3)
         end
     end
     r = describe(truncated_call)
@@ -142,18 +148,20 @@ end
 @testset "weighted over an in-cell censored law keeps its bounds in both spellings" begin
     weighted_call = @brm begin
         eta ~ 1 + (1 | p | subject)
+        obs = groups(obs_subject => subject)
         @plate for i in eachindex(subject)
-            loc[i] = exp(eta[i]) .+ ragged(time, obs_subject)[i]
-            y[i] ~ weighted(censored(Normal(loc[i], 0.3); lower=ragged(lloq, obs_subject)[i]),
-                ragged(weight, obs_subject)[i])
+            loc[i] = exp(eta[i]) .+ time[obs[i]]
+            y[i] ~ weighted(censored(Normal(loc[i], 0.3); lower=lloq[obs[i]]),
+                weight[obs[i]])
         end
     end
     weighted_token = @brm begin
         eta ~ 1 + (1 | p | subject)
+        obs = groups(obs_subject => subject)
         @plate for i in eachindex(subject)
-            loc[i] = exp(eta[i]) .+ ragged(time, obs_subject)[i]
-            y[i] ~ weighted(censored, ragged(weight, obs_subject)[i], normal, loc[i], 0.3;
-                lower=ragged(lloq, obs_subject)[i])
+            loc[i] = exp(eta[i]) .+ time[obs[i]]
+            y[i] ~ weighted(censored, weight[obs[i]], normal, loc[i], 0.3;
+                lower=lloq[obs[i]])
         end
     end
     cases(r) = only(filter(e -> startswith(e, "p(y)=\\begin{cases}"), r.equations))

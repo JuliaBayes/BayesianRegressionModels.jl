@@ -6,8 +6,8 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 
 module PublicShapeReuse
 using BayesianRegressionModels, Distributions
-# A monotonic predictor on a secondary row axis, read per subject through
-# `ragged(...)`, and a ragged response observed through the kernel cell.
+# A monotonic predictor on another grouping vector's entries, read per subject
+# through a `groups` binding, and a response observed in the cell through one.
 secondary_axis(data) = @brm data begin
     theta ~ 1 + (1 | p | subject)
     effect(theta, Intercept) ~ Normal(0, 0.7)
@@ -15,22 +15,25 @@ secondary_axis(data) = @brm data begin
     score ~ 1 + mo(rank)
     effect(score, Intercept) ~ Normal(0, 0.4)
     simplex(score, mo(rank)) ~ Dirichlet(1, 2)
-    pred ~ kernel(t, theta, ragged(score, row_group)) do ts, a, scores
-        a .+ ts .* sum(scores)
+    rows = groups(row_group => subject)
+    events = groups(event_subject => subject)
+    @plate for i in eachindex(theta)
+        pred[i] = theta[i] .+ t[i] .* sum(score[rows[i]])
+        y[events[i]] ~ Normal(pred[i], 0.8)
     end
-    ragged(y, event_subject) ~ Normal(pred, 0.8)
 end
-# Event rows joined to the kernel's subjects, with a per-row argument: the
-# join's row partition orders both the response and the argument.
+# Event entries read per subject through a binding, with a per-entry argument
+# read through the same binding.
 joined(data) = @brm data begin
     alpha ~ 1 + (1 | p | subject)
     effect(alpha, Intercept) ~ Normal(0, 0.7)
     sd(:, p) ~ Exponential(0.9)
     sigma ~ Exponential(0.9)
-    loc ~ kernel(x, alpha) do xs, a
-        xs * a
+    events = groups(event_subject => subject)
+    @plate for i in eachindex(alpha)
+        loc[i] = x[i] * alpha[i]
+        y[events[i]] ~ Normal(loc[i] .- reference[events[i]], sigma)
     end
-    ragged(y, event_subject) ~ Normal(loc - reference, sigma)
 end
 # Per-subject response cells with a per-subject singleton argument, which
 # each subject's cell length broadcasts.
@@ -83,9 +86,10 @@ in_cell(data) = @brm data begin
     effect(rate, Intercept) ~ Normal(0, 0.5)
     effect(rate, x) ~ Normal(0, 0.5)
     sd(:, p) ~ Exponential(0.9)
+    events = groups(event_subject => subject)
     @plate for i in eachindex(rate)
-        loc[i] = pulse_sum(t[i], ragged(event_time, event_subject)[i],
-            ragged(height, event_subject)[i], exp(rate[i]))
+        loc[i] = pulse_sum(t[i], event_time[events[i]],
+            height[events[i]], exp(rate[i]))
         y[i] ~ normal(loc[i], sigma)
     end
 end
@@ -208,16 +212,14 @@ joined_data(event_subject) = begin
         reference=[0.01 * mod1(3i, 5) for i in eachindex(event_subject)])
 end
 
-@stestset "a ragged join's row partition is bound data, not source" begin
+@stestset "a grouped observation's indices are bound data, not source" begin
     trained = joined_data(["a", "b", "b", "a", "b", "a", "a"])
     definitions, main, _ = emitted_source(PublicShapeReuse.joined(trained))
-    # The join is observed per subject: its response and per-row reference are
-    # bound as subject cells grouped by the partition, so no argument kernel
-    # gathers rows and no partition appears in source. The computed location
-    # is written by the kernel's plate from that subject's reference cell.
-    @test occursin("loc_argument_y_1[i] = loc_value .- y_cells_reference[i]", main)
-    @test occursin("y[i] .~ Normal.(loc_argument_y_1[i], sigma)", main)
+    # The response and its per-entry reference are read in the cell through
+    # the `groups` binding: no argument kernel gathers rows and no index
+    # partition appears in source.
     @test !occursin("y_observation_argument", definitions * main)
+    @test !occursin("[2, 3, 5", definitions * main)
     @test !occursin("y_rows", definitions * main)
     # The same row count in another subject order: a stale partition would
     # pair rows with the wrong subjects and reference values.

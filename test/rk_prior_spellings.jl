@@ -169,9 +169,10 @@ const SPELLING_CELL = @brm begin
     amp ~ 1 + (1 | am | subject)
     sd(:, lv) ~ truncated(Normal(0.0, 1.0), 0.0, Inf)
     sd(:, am) ~ Normal(0.0, 1.0; lower=0.0)
+    rows = groups(row_subject => subject)
     @plate for i in eachindex(base)
-        m[i] = base[i] .+ amp[i] .* ragged(t, row_subject)[i] .+ p .+ d
-        ragged(y, row_subject)[i] ~ Normal(m[i], rho)
+        m[i] = base[i] .+ amp[i] .* t[rows[i]] .+ p .+ d
+        y[rows[i]] ~ Normal(m[i], rho)
     end
 end
 

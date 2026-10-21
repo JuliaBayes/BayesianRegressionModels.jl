@@ -13,36 +13,26 @@ const PANEL = (;
 const INCELL = @brm begin
     sigma ~ Exponential(1)
     log_rate ~ 1 + x + (1 | panel | subject)
+    events = groups(event_subject => subject)
     @plate for i in eachindex(log_rate)
-        location[i] = exp(log_rate[i]) .* ragged(event_time, event_subject)[i]
-        ragged(y, event_subject)[i] ~ censored(
-            Normal(location[i], sigma); lower=ragged(limit, event_subject)[i])
+        location[i] = exp(log_rate[i]) .* event_time[events[i]]
+        y[events[i]] ~ censored(
+            Normal(location[i], sigma); lower=limit[events[i]])
     end
 end
 
-const TOPLEVEL = @brm begin
-    sigma ~ Exponential(1)
-    log_rate ~ 1 + x + (1 | panel | subject)
-    @plate for i in eachindex(log_rate)
-        location[i] = exp(log_rate[i]) .* ragged(event_time, event_subject)[i]
-    end
-    ragged(y, event_subject) ~ censored(Normal(location, sigma); lower=limit)
-end
 
 without_y(data) = NamedTuple(k => v for (k, v) in pairs(data) if k !== :y)
 
-@testset "ragged plate observation source resolves to flat response" begin
+@testset "grouped plate observation source resolves to flat response" begin
     inside = brm_descriptor(SBBRMI(INCELL(PANEL); mod=@__MODULE__))
-    outside = brm_descriptor(SBBRMI(TOPLEVEL(PANEL); mod=@__MODULE__))
     omitted = @test_logs (:warn, r"`y` bind\(s\) no data column") brm_descriptor(
-        SBBRMI(TOPLEVEL(without_y(PANEL)); mod=@__MODULE__))
+        SBBRMI(INCELL(without_y(PANEL)); mod=@__MODULE__))
 
     for role in (:posterior_predictive, :pointwise_loglik)
         nested = brm_output(inside, :y; role)
-        flat = brm_output(outside, :y; role)
-        @test nested.logical === :y && flat.logical === :y
+        @test nested.logical === :y
         @test nested.segments == [2, 4, 5]
-        @test flat.segments == nested.segments
         n = role === :posterior_predictive ? 5 : 3
         @test brm_output_coordinates(nested, ["$(nested.name).$i" for i in 1:n]) ==
               collect(1:n)
