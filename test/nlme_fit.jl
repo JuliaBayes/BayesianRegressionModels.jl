@@ -1,9 +1,9 @@
 # Prior-median starting values, NLME estimates in the model's own names and
 # natural units, and the one-call fit through NLMEEstimation's estimators.
-# RUN: julia --threads=2 --project=<env with NLMEEstimation> test/nlme_fit.jl
-# (the second thread interrupts a running saem fit)
+# RUN: julia --project=<env with NLMEEstimation> test/nlme_fit.jl
 using NLMEEstimation, Random, LinearAlgebra
-using Treebars: with_progress, render_text, request_interrupt!, ProgressInterrupted
+using Treebars: with_progress, with_prepared_phases, render_text, request_interrupt!,
+    ProgressInterrupted
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 
 # The plate population-PK fixture with an authored prior on every estimated
@@ -425,28 +425,27 @@ end
     @test rows["Lower to ReactiveKernels"] == '✗' && rows["Prepare NLME model"] == '⊘'
     @test rows["Estimate (saem)"] == '⊘' && rows["Posthoc EBEs"] == '⊘'
 
-    # During saem: its last completed iteration is the result, and the EBE pass,
-    # which would raise, is skipped.
-    if Threads.nthreads() < 2
-        @info "skipped: interrupting a running saem needs a second thread (julia --threads=2)"
-    else
-        m = brm_nlme_model(RKBRMI(brmi); ad_backend=NLME_AD)
-        iterations = 20_000
-        f = with_progress(:state; description="interrupted") do p
-            tree[] = p
-            task = Threads.@spawn brm_nlme_fit(m, saem; progress=p, rng=Xoshiro(1),
-                options=SAEMOptions(; iterations, burnin=5))
-            deadline = time() + 600
-            while get(progress_states(p), "Stochastic approximation", nothing) != '▶' &&
-                    !istaskdone(task) && time() < deadline
-                sleep(0.05)
-            end
+    # Once saem runs it honours the interrupt: an interrupt it sees at its
+    # first iteration boundary returns the start with `interrupted = true`, and
+    # the EBE pass, which would raise over that result, is skipped. The fit's
+    # own estimator step runs here with the request already made, so the test
+    # needs no second thread (a native Enzyme gradient beside an allocating
+    # thread is unsafe, reactivekernels-use §7ao).
+    m = brm_nlme_model(RKBRMI(brmi); ad_backend=NLME_AD)
+    start = brm_nlme_start(m)
+    fit_ext = Base.get_extension(BRM, :BayesianRegressionModelsNLMEEstimationExt)
+    result, ebe, estimates = with_progress(:state; description="interrupted") do p
+        tree[] = p
+        with_prepared_phases(p, fit_ext._fit_phases(:saem, (;))) do phases
             request_interrupt!(p)
-            fetch(task)
+            fit_ext._fit_run(saem, m, start, (;), phases; rng=Xoshiro(1),
+                options=SAEMOptions(iterations=10, burnin=5))
         end
-        @test f.result.interrupted && 0 < f.result.iterations < iterations
-        @test f.ebes === nothing && f.estimates.eta === nothing
-        rows = progress_states(tree[])
-        @test rows["Estimate (saem)"] == '✓' && rows["Posthoc EBEs"] == '⊘'
     end
+    @test result.interrupted && result.iterations == 0
+    @test result.theta == start.theta && result.sigma == start.sigma
+    @test ebe === nothing && estimates.eta === nothing
+    rows = progress_states(tree[])
+    @test rows["Estimate (saem)"] == '✓' && rows["SAEM"] == '✓'
+    @test rows["Posthoc EBEs"] == '⊘'
 end

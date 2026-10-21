@@ -28,7 +28,8 @@
               held_out=<the fit's hold-outs>) -> RKBRMI
 
 Bind `new_data` to the fitted RK model `rk` with the TRAINING fit's
-preprocessing, reusing its executable graph (`rk.model`; no rebuild). The
+preprocessing, reusing its executable graph (`rk.model`; no rebuild) and its
+translated program: a replay only binds its own data. The
 returned backend evaluates the same draws on the new rows: densities through
 [`rk_logdensity_problem`](@ref), authored values through
 `ReactiveKernels.prepare(rk2.model.spec; have, want, bound=rk_bound_data(rk2))`.
@@ -74,14 +75,20 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
         _brm_rk_plan(rebound; held_out,
             fitted_constants=(name, _source) -> get(constants, name, nothing))
     end
-    _rk_check_replay_program(rk.plan, plan; prefix)
+    retained = _rk_retained_program(rk)
+    replayed = _rk_emit_ast(plan)
+    _rk_check_replay_program(retained, replayed; prefix)
     _rk_check_replay_terms(plan; prefix)
     _rk_check_replay_groupings(plan, groups; prefix)
+    # The fit's program, translated once, binds the replay's data too, unless
+    # a callable differs under the same name.
+    program = _rk_same_callables(retained, replayed) ? rk.program : _RKOnce()
+    replay = RKBRMI(parent(rk), plan, rk.model; program)
     # Same coordinates, so the fit's draws mean the same thing on the replay.
     # Resampled groups size their effects by the new data's levels.
     if isempty(groups)
         fitted_names = _rk_layout_coordinate_names(rk)
-        replay_names = _rk_plan_coordinate_names(plan)
+        replay_names = _rk_bound_coordinate_names(replay)
         fitted_names == replay_names || error(
             "$prefix: the new data changes the fitted coordinates " *
             "($(length(fitted_names)) fitted, $(length(replay_names)) on the " *
@@ -89,11 +96,18 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
             "levels the replay does not freeze must be named in " *
             "`resample_groups`.")
     end
-    RKBRMI(parent(rk), plan, rk.model)
+    replay
 end
 
-# The coordinate names `plan` binds (ReactiveKernels package extension).
-function _rk_plan_coordinate_names end
+# The emitted program a backend's queries read, and the coordinate names its
+# binding packs (ReactiveKernels package extension).
+function _rk_retained_program end
+function _rk_bound_coordinate_names end
+
+_rk_same_callables(a::_RKEmittedProgram, b::_RKEmittedProgram) =
+    length(a.bindings) == length(b.bindings) &&
+    all(((x, y),) -> first(x) === first(y) && last(x) === last(y),
+        zip(a.bindings, b.bindings))
 
 _rk_replay_predictors(plan::_RKStructuralPlan) = plan.predictors
 _rk_replay_predictors(plan::_RKValuePlan) = plan.regression.predictors
@@ -193,9 +207,10 @@ function _rk_program_statements(emitted::_RKEmittedProgram)
         ["binding: " * string(first(b)) for b in emitted.bindings])
 end
 
-function _rk_check_replay_program(retained, replayed; prefix)
-    fitted = _rk_program_statements(_rk_emit_ast(retained))
-    replay = _rk_program_statements(_rk_emit_ast(replayed))
+function _rk_check_replay_program(retained::_RKEmittedProgram,
+        replayed::_RKEmittedProgram; prefix)
+    fitted = _rk_program_statements(retained)
+    replay = _rk_program_statements(replayed)
     fitted == replay && return nothing
     k = something(findfirst(i -> i > length(replay) || fitted[i] != replay[i],
         eachindex(fitted)), length(fitted) + 1)

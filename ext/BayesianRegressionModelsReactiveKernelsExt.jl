@@ -9,6 +9,30 @@ const BRM = BayesianRegressionModels
 
 include("rk_statistical_gp.jl")
 
+# Stan builtins a kernel cell calls, bound to their Julia equivalents. Stan's
+# conversions between vectors and one-dimensional arrays flatten column-major,
+# as `vec` does. Its ODE solvers run RK's native bridges, which return the
+# solution with one row per output time and one column per state, so
+# `sol[i, k]` and `sol[:, k]` read as in Stan. The untolerated forms take
+# Stan's defaults. Each bridge needs its solver package loaded with SciMLBase
+# and SciMLSensitivity (reactivekernels-use §4g).
+const _STAN_BUILTIN = BRM.StanBlocks.stan.builtin
+BRM._rk_kernel_stan_builtin(::typeof(_STAN_BUILTIN.to_vector)) = vec
+BRM._rk_kernel_stan_builtin(::typeof(_STAN_BUILTIN.to_array_1d)) = vec
+BRM._rk_kernel_stan_builtin(::typeof(_STAN_BUILTIN.ode_rk45_tol)) =
+    ReactiveKernels.rk_ode_rk45_tol
+BRM._rk_kernel_stan_builtin(::typeof(_STAN_BUILTIN.ode_bdf_tol)) =
+    ReactiveKernels.rk_ode_bdf_tol
+BRM._rk_kernel_stan_builtin(::typeof(_STAN_BUILTIN.ode_rk45)) = _rk_ode_rk45
+BRM._rk_kernel_stan_builtin(::typeof(_STAN_BUILTIN.ode_bdf)) = _rk_ode_bdf
+BRM._rk_kernel_function_arguments(::Union{typeof(_STAN_BUILTIN.ode_rk45),
+    typeof(_STAN_BUILTIN.ode_rk45_tol), typeof(_STAN_BUILTIN.ode_bdf),
+    typeof(_STAN_BUILTIN.ode_bdf_tol)}) = (1,)
+_rk_ode_rk45(f::F, y0, t0, ts, args::Vararg{Any,N}) where {F,N} =
+    ReactiveKernels.rk_ode_rk45_tol(f, y0, t0, ts, 1e-6, 1e-6, 10^6, args...)
+_rk_ode_bdf(f::F, y0, t0, ts, args::Vararg{Any,N}) where {F,N} =
+    ReactiveKernels.rk_ode_bdf_tol(f, y0, t0, ts, 1e-6, 1e-6, 10^6, args...)
+
 # The emitted source is the executable contract. Every statistical prior and
 # observation role lowers through the public RKPPL surface; binding supplies
 # the data, with no ordinal or missing-response plan mutations.
@@ -43,18 +67,40 @@ function _rk_emit_module(emitted::BRM._RKEmittedProgram)
     mod
 end
 
-function _rk_translate_from_emitted(plan::_RK_PLAN_TYPES,
-        emitted::BRM._RKEmittedProgram)
-    columns = BRM._rk_source_data_columns(plan, emitted)
-    unbound = lower_rkppl(emitted.main,
-        columns; mod=_rk_emit_module(emitted),
+# A translated program: its emitted source and the module its definitions
+# are evaluated in. One program serves every binding of it.
+struct _RKProgram
+    emitted::BRM._RKEmittedProgram
+    mod::Module
+end
+_RKProgram(emitted::BRM._RKEmittedProgram) = _RKProgram(emitted, _rk_emit_module(emitted))
+
+# Lowering reads the data values' shapes (rkppl-use §1), so each binding
+# lowers; the definitions are evaluated once per program.
+function _rk_bind_program(program::_RKProgram, plan::_RK_PLAN_TYPES)
+    columns = BRM._rk_source_data_columns(plan, program.emitted)
+    unbound = lower_rkppl(program.emitted.main,
+        columns; mod=program.mod,
         conditioned=BRM._rk_observed_names(plan))
     bind_data(unbound, columns)
 end
 
+_rk_translate_from_emitted(plan::_RK_PLAN_TYPES, emitted::BRM._RKEmittedProgram) =
+    _rk_bind_program(_RKProgram(emitted), plan)
+
 function _rk_translated_plan(plan::_RK_PLAN_TYPES)
     _rk_translate_from_emitted(plan, BRM._rk_emit_ast(plan))
 end
+
+# A backend's program, translated once and shared with its replays.
+_rk_program(backend::BRM.RKBRMI) =
+    BRM._rk_once!(() -> _RKProgram(BRM._rk_emit_ast(backend.plan)), backend.program)
+# A backend's binding of that program to its own data, bound once. Every
+# query of the backend reads it.
+_rk_translated(backend::BRM.RKBRMI) =
+    BRM._rk_once!(() -> _rk_bind_program(_rk_program(backend), backend.plan),
+        backend.bound)
+BRM._rk_retained_program(backend::BRM.RKBRMI) = _rk_program(backend).emitted
 
 const _RK_STATISTICAL_MODEL_MODULE = Ref{Union{Nothing,Module}}(nothing)
 const _RK_STATISTICAL_MODEL_LOCK = ReentrantLock()
@@ -113,7 +159,10 @@ end
 Base.@nospecializeinfer function BRM.RKBRMI(@nospecialize(brmi::BRM.BRMI); held_out=())
     brmi = BRM._brm_resolve_optional_priors(brmi)
     plan = BRM._brm_rk_plan(brmi; held_out)
-    BRM.RKBRMI(brmi, plan, BRM._brm_rk_model(plan))
+    program = _RKProgram(BRM._rk_emit_ast(plan))
+    bound = _rk_bind_program(program, plan)
+    BRM.RKBRMI(brmi, plan, build_kernel(bound);
+        program=BRM._RKOnce(program), bound=BRM._RKOnce(bound))
 end
 
 # LogDensityProblems shim over the thin-layer sampler query: the packed
@@ -129,7 +178,7 @@ end
 function BRM.rk_logdensity_problem(backend::BRM.RKBRMI;
         ad_backend,
         u0=zeros(Float64, backend.model.layout.total))
-    translated = _rk_translated_plan(backend.plan)
+    translated = _rk_translated(backend)
     query = prepare_sampler(backend.model, translated, u0; backend=ad_backend)
     RKLogDensityProblem(query)
 end
@@ -149,7 +198,7 @@ function LogDensityProblems.logdensity_and_gradient(
 end
 
 function BRM.rk_bound_data(backend::BRM.RKBRMI)
-    columns = _rk_translated_plan(backend.plan).columns
+    columns = _rk_translated(backend).columns
     names = Tuple(keys(columns))
     NamedTuple{names}(Tuple(columns[name] for name in names))
 end
@@ -173,8 +222,8 @@ function BRM._rk_layout_coordinate_transforms(backend::BRM.RKBRMI)
         "without an entry")
     transforms
 end
-BRM._rk_plan_coordinate_names(plan::_RK_PLAN_TYPES) =
-    coordinate_names(assign_layout(_rk_translated_plan(plan)))
+BRM._rk_bound_coordinate_names(backend::BRM.RKBRMI) =
+    coordinate_names(assign_layout(_rk_translated(backend)))
 # Each packed coordinate's constrained lower bound under a `:floored`
 # transform (`lo + exp(u)`); `NaN` for other transforms or an unresolved bound.
 function BRM._rk_layout_coordinate_floors(backend::BRM.RKBRMI)
@@ -196,15 +245,15 @@ BRM._rk_unconstrained_point(backend::BRM.RKBRMI, values::NamedTuple) =
 # reverse sweep also retains those pointwise densities (reverse-mode Enzyme
 # only; RK refuses other backends when preparing it).
 BRM._rk_pointwise_query(backend::BRM.RKBRMI) =
-    prepare_query(backend.model, _rk_translated_plan(backend.plan), :pointwise)
+    prepare_query(backend.model, _rk_translated(backend), :pointwise)
 BRM._rk_pointwise_values(query, u::AbstractVector) = Base.invokelatest(query, u)
 BRM._rk_nlme_cell_query(backend::BRM.RKBRMI, observations::Tuple) =
-    prepare_cell_query(backend.model, _rk_translated_plan(backend.plan), observations)
+    prepare_cell_query(backend.model, _rk_translated(backend), observations)
 BRM._rk_nlme_cell_value(query::CellQuery, point::BRM._BRMNLMEPoint, row::Int) =
     query(point, row)
 BRM._rk_retained_pointwise_sampler(backend::BRM.RKBRMI; ad_backend,
         u0=zeros(Float64, backend.model.layout.total)) =
-    prepare_sampler(backend.model, _rk_translated_plan(backend.plan), u0;
+    prepare_sampler(backend.model, _rk_translated(backend), u0;
         backend=ad_backend, retain=(:pointwise,))
 function BRM._rk_value_gradient_and_pointwise!(query::SamplerQuery,
         gradient::Vector{Float64}, u::Vector{Float64})
@@ -225,7 +274,7 @@ function _nlme_population_prior_bundle(state)
     lock(state.lock) do
         state.cached[] === nothing || return state.cached[]
         backend, unit, ad_backend = state.backend, state.unit, state.ad_backend
-        plan = _rk_translated_plan(backend.plan)
+        plan = _rk_translated(backend)
         built = backend.model
         value = prepare_query(built, plan, :prior)
         jacobian = prepare_query(built, plan, :log_jacobian)
@@ -253,7 +302,7 @@ end
 # responses are conditionally independent, so each output sees only its own
 # subject's component of that direction.
 BRM._rk_observation_query(backend::BRM.RKBRMI) =
-    prepare_query(backend.model, _rk_translated_plan(backend.plan), :observations)
+    prepare_query(backend.model, _rk_translated(backend), :observations)
 BRM._rk_observation_values(query, u::AbstractVector) = Base.invokelatest(query, u)
 function BRM._rk_observation_pushforward(backend::BRM.RKBRMI,
         view::BRM.BRMNLMEView, unit::Vector{Float64}, ad_backend)
@@ -266,7 +315,7 @@ function BRM._rk_observation_pushforward(backend::BRM.RKBRMI,
         direction
     end
     query = prepare_query_ad(prepare_ad_pushforward, backend.model,
-        _rk_translated_plan(backend.plan), :observations, ad_backend,
+        _rk_translated(backend), :observations, ad_backend,
         directions, unit)
     (; query, directions)
 end
