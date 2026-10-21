@@ -3219,18 +3219,9 @@ function _rk_design_addressee_groups(design, target::Symbol;
     groups, order
 end
 
-# A population-effect prior argument is a number: a numeric literal, or a
-# scalar field of the data (including a resolved `name = constant(expr)`),
-# whose value the graph holds. A model value stays refused.
-function _rk_effect_number(x)
-    x isa NamedColumn && parent(x) isa DataColumn || return _brm_numeric_constant(x)
-    value = parent(parent(x))
-    value isa Real && !(value isa Bool) ? Float64(value) : nothing
-end
-
 # Per-addressee population-effect families (prior-vocab v1, peer contract):
 # real-line Normal/Cauchy/Laplace/Logistic/StudentT + Flat, every arg a
-# number (`_rk_effect_number`). StudentT unwraps from `LocationScale(mu, s, TDist(nu))`
+# number (`_brm_effect_number`). StudentT unwraps from `LocationScale(mu, s, TDist(nu))`
 # into Stan `(nu, mu, sigma)` order (a bare `TDist` stays rejected);
 # `Flat()` takes no args. `Normal`/`Cauchy` keep the historical (0, 1)
 # defaulting (SB mirrors it); Laplace/Logistic need both args (SB has no
@@ -3272,8 +3263,8 @@ function _rk_materialize_effect_prior(expression, target::Symbol, label::Symbol;
         "$prefix: predictor `$target` population-effect prior for " *
         "`$label` needs scalar location and scale; index or reduce an " *
         "array-valued argument explicitly")
-    location = _rk_effect_number(raw[1])
-    scale = _rk_effect_number(raw[2])
+    location = _brm_effect_number(raw[1])
+    scale = _brm_effect_number(raw[2])
     isnothing(location) && error(
         "$prefix: predictor `$target` population-effect `$head` " *
         "location for `$label` must be a numeric constant or a scalar data field")
@@ -3310,9 +3301,9 @@ function _rk_effect_studentt_args(expression::ExprColumn, target::Symbol,
     length(bargs) == 1 || error(
         "$prefix: predictor `$target` population-effect prior for " *
         "`$label` `TDist` base needs one argument; write `TDist(nu)`")
-    nu = _rk_effect_number(only(bargs))
-    mu = _rk_effect_number(mu_raw)
-    s = _rk_effect_number(s_raw)
+    nu = _brm_effect_number(only(bargs))
+    mu = _brm_effect_number(mu_raw)
+    s = _brm_effect_number(s_raw)
     (isnothing(nu) || isnothing(mu) || isnothing(s)) && error(
         "$prefix: predictor `$target` population-effect StudentT " *
         "arguments for `$label` must be numeric constants or scalar data fields")

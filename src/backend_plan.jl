@@ -2578,6 +2578,15 @@ function _brm_numeric_constant(x::ExprColumn)
 end
 _brm_numeric_constant(_x) = nothing
 
+# A population-effect prior argument as a number: a numeric literal, or a
+# scalar field of the data (including a resolved `name = constant(expr)`) at
+# its value. A model value stays refused (`nothing`).
+function _brm_effect_number(x)
+    x isa NamedColumn && parent(x) isa DataColumn || return _brm_numeric_constant(x)
+    value = parent(parent(x))
+    value isa Real && !(value isa Bool) ? Float64(value) : nothing
+end
+
 # ---- shared random-effect prior resolution ---------------------------------
 
 function _brm_ranef_sd_prior(spec, spelling::AbstractString;
@@ -3023,12 +3032,14 @@ function _brm_materialize_normal_effect_priors(overrides, n::Integer;
     for i in eachindex(overrides)
         isnothing(overrides[i]) && continue
         raw_location, raw_scale = _brm_normal_effect_args(overrides[i]; prefix)
-        loc = _brm_numeric_constant(raw_location)
-        sd = _brm_numeric_constant(raw_scale)
+        loc = _brm_effect_number(raw_location)
+        sd = _brm_effect_number(raw_scale)
         isnothing(loc) && error(
-            "$prefix: population-effect Normal location must be a numeric constant")
+            "$prefix: population-effect Normal location must be a numeric " *
+            "constant or a scalar data field")
         isnothing(sd) && error(
-            "$prefix: population-effect Normal scale must be a numeric constant")
+            "$prefix: population-effect Normal scale must be a numeric " *
+            "constant or a scalar data field")
         isfinite(loc) || error(
             "$prefix: population-effect Normal location must be finite")
         isfinite(sd) && sd > 0 || error(
