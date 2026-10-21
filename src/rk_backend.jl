@@ -6320,6 +6320,9 @@ function _rk_gate_acyclic!(parameters::AbstractVector,
     nothing
 end
 
+# An absent replay response has no values to gate; it stays unbound.
+_rk_gate_response_values!(family::Symbol, values::_BRMAbsentResponse, response::Symbol,
+    interval::Union{Nothing,Tuple{Float64,Float64}} = nothing) = values
 function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
         response::Symbol,
         interval::Union{Nothing,Tuple{Float64,Float64}} = nothing)
@@ -7102,12 +7105,31 @@ function _rk_split_multinomial_counts!(columns::Dict{Symbol,AbstractVector},
     nothing
 end
 
+# A response's rows; `nothing` for an absent replay response.
+_rk_response_rows(values) = length(values)
+_rk_response_rows(::_BRMAbsentResponse) = nothing
+
+# The observation axis of a replay design whose responses are all absent: its
+# row-aligned columns, which `_rk_gate_crossed_columns!` checks against each
+# other.
+function _rk_design_rows(columns, mi_packed, statistical_inputs)
+    for key in sort!(collect(keys(columns)))
+        (key in mi_packed || key in statistical_inputs) && continue
+        rows = _rk_response_rows(columns[key])
+        rows === nothing || return rows
+    end
+    error("RK reprocess: `new_data` omits every response and holds no row " *
+        "data to evaluate the model at")
+end
+
 function _rk_gate_crossed_columns!(columns::Dict{Symbol,AbstractVector},
         n_obs::Int, mi_packed::Set{Symbol}=Set{Symbol}();
         statistical_inputs::Set{Symbol}=Set{Symbol}())
     prefix = "RK backend"
     for key in sort!(collect(keys(columns)))
         values = columns[key]
+        # An absent replay response holds no values to gate.
+        _rk_response_rows(values) === nothing && continue
         # Packed `mi()` columns (observed values + `Jobs` indices) are
         # shorter than `n_obs` by construction (the thin-layer managed
         # exemption); everything else keeps the uniform axis. Pair
@@ -8112,15 +8134,17 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
     # whole response table, so it runs after the loop).
     _rk_gate_ordinal_scale_slots!(response_specs, predictor_specs)
     # Phase 6: one observation axis, no missing, finite data, evidence
-    # values, and name hygiene (mirrors thin-side validation, R8).
-    n_obs = length(first(peeled).raw_response)
-    n_obs > 0 || error(
-        "$prefix: plan needs at least one observation, got none")
-    for entry in Iterators.drop(peeled, 1)
-        length(entry.raw_response) == n_obs || error(
-            "$prefix: response `$(entry.key)` has " *
-            "$(length(entry.raw_response)) rows, expected $n_obs (one " *
-            "observation axis in slice 1)")
+    # values, and name hygiene (mirrors thin-side validation, R8). The axis
+    # is the bound responses' rows; a replay design without its responses
+    # takes it from its row columns once the whole-input columns are known.
+    n_obs = nothing
+    for entry in peeled
+        rows = _rk_response_rows(entry.raw_response)
+        rows === nothing && continue
+        n_obs === nothing && (n_obs = rows)
+        rows == n_obs || error(
+            "$prefix: response `$(entry.key)` has $rows rows, expected " *
+            "$n_obs (one observation axis in slice 1)")
     end
     # Packed `mi()` columns ride the managed exemption (uniform-axis rule
     # does not apply); each packed pair must still agree in length.
@@ -8132,13 +8156,13 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
             error("$prefix: internal: `mi()` packed columns for " *
                   "response `$(spec.response)` disagree on observed rows")
     end
+    mi_sources = Symbol[]
     for spec in derived
         spec.expression.head === :_rk_data_preparation &&
             first(spec.expression.args) === :brm_covariate_observed_rows || continue
         raw = spec.expression.args[2]
         push!(mi_packed, raw)
-        length(columns[raw]) == n_obs || error(
-            "$prefix: internal: `mi()` source `$raw` does not retain the full row axis")
+        push!(mi_sources, raw)
     end
     statistical_inputs = Set{Symbol}(t.options.metadata for p in predictor_specs
         for t in p.terms if t.kind === :structured)
@@ -8151,6 +8175,13 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
     # training rows.
     union!(statistical_inputs, (spec.name for spec in derived
         if spec.expression.head === :_rk_fit_input))
+    n_obs = something(n_obs, _rk_design_rows(columns, mi_packed, statistical_inputs))
+    n_obs > 0 || error(
+        "$prefix: plan needs at least one observation, got none")
+    for raw in mi_sources
+        length(columns[raw]) == n_obs || error(
+            "$prefix: internal: `mi()` source `$raw` does not retain the full row axis")
+    end
     _rk_gate_crossed_columns!(columns, n_obs, mi_packed; statistical_inputs)
     _rk_gate_trials_values!(response_specs, columns, n_obs)
     _rk_gate_multinomial_trials!(response_specs, columns, n_obs)

@@ -157,6 +157,11 @@ function _brm_kernel_check_cell_labels(ragged_cols, group::Symbol;
     end
 end
 
+# A raw column's rows, checked against its ragged group column. An absent
+# replay response (`_BRMAbsentResponse`) lies on the group column's rows.
+_brm_ragged_column_length!(lens, name, values) = push!(lens, (name, length(values)))
+_brm_ragged_column_length!(lens, name, ::_BRMAbsentResponse) = lens
+
 function _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals;
                                  prefix="BRM kernel preparation",
                                  allow_unbound_observation=false)
@@ -186,7 +191,7 @@ function _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals;
             "$prefix: kernel(...) `ragged($a_name, $grp_name)`: `$a_name` is ALREADY a ",
             "ragged per-subject column, so there is nothing to group. Pass it directly, ",
             "without `ragged(...)`.")
-        push!(lens, (a_name, length(v)))
+        _brm_ragged_column_length!(lens, a_name, v)
     end
     for (nm, L) in lens
         L == n_ev || error(

@@ -340,6 +340,20 @@ This explicit PDF mode requires Quarto and a working LuaLaTeX installation;
 render failures propagate. Outputs use a temporary directory, or the directory
 specified by `BRM_DESCRIPTION_TEX_OUTPUT`.
 
+## Exact totals beside offsets
+
+`total_effects_offset.jl` checks that `offset(...)` terms, of data and of a
+model value, leave an otherwise eligible block on exact totals under `:auto`.
+Its BridgeStan density equals the conventional program's marginal over the
+integrated intercept at random points. It also checks that `reprocess` rebinds
+the offset column, that `population_model` keeps the offset, and that the
+description stays complete. An explicit `total_groups=[:g]` must raise an error
+naming every predictor whose block on `g` would stay conventional:
+
+```sh
+julia --project=test test/total_effects_offset.jl
+```
+
 ## Exact-total descriptions
 
 `description_totals.jl` describes each synthetic model under the default

@@ -2,7 +2,7 @@
 #
 #     julia --project=test test/setup_env.jl
 #
-# The test env has four external UNREGISTERED dependencies plus the unregistered
+# The test env has five external UNREGISTERED dependencies plus the unregistered
 # BRM root itself. Each external package is materialized at a specific GitHub
 # COMMIT under the ignored `test/.bootstrap/` cache; there is NO dependence on
 # any shared `~/github/nsiccha/<pkg>` checkout. A full-SHA revision is
@@ -15,7 +15,7 @@
 # `ReactiveKernelsPPL`, and `ReactiveKernelsPPLExamples` packages, which have
 # no standalone repos).
 #
-# All eight paths enter ONE `Pkg.develop` call on EVERY Julia version we run.
+# All nine paths enter ONE `Pkg.develop` call on EVERY Julia version we run.
 # On 1.11+ the `[sources]` blocks in `test/Project.toml` (which mirror these
 # revisions) would also resolve them; on **1.10, which is what this suite runs
 # on, `[sources]` is IGNORED**, so a bare `Pkg.resolve()` fails with
@@ -85,7 +85,16 @@ const PINS = [
     # reverse.
     # 609c7a9d composes authored plate cells; a2268e47 adds compact
     # selected-coordinate cell gradients used by BRM's NLME adapter.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "a2268e47b3a800df356ae6961c2caf863922a102"),  # main
+    # 68a77b03 binds a design without its conditioned response values to the
+    # same program (snag rkppl-bind-a-des-e6cfca75), which `reprocess` uses
+    # for prediction-only designs; dad59972 extends that to censored,
+    # truncated and interval-censored responses (snag
+    # rkppl-absent-cen-9af487f3). Both contain f13e68d4 (location-alias
+    # elision renames cell parameters).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "dad59972b3d6b38c610201484de509adc0eed144"),  # main
+    # ReactiveKernels' own `[sources]` revision of its unregistered
+    # OutputSignatures dependency (RK compat 0.1.5); move it with the RK pin.
+    ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "d16c4efb72b963f45de9d6f632c38d46706c23e1"),  # main
 ]
 
 function main()
