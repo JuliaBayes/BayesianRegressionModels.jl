@@ -3,6 +3,30 @@ struct _BRMPreprocessResult{V,E<:_BRMPreprocEntry}
     entry::E
 end
 
+# `f(x)[i]` for a fitted transform `f` (`standardize(age)[subject]`): `x` holds
+# one value per group on its own axis, `f` is fitted over those values, and each
+# row reads its group's value at the integer position `i`. It is the record's
+# `raw_ref`, and replay re-materialises both column trees.
+struct _BRMIndexedSource{V,I}
+    value::V
+    index::I
+end
+
+# The replay input of an indexed transform: the field on its own axis and the
+# row positions reading it.
+struct _BRMIndexedValues
+    field::Vector{Float64}
+    positions::Vector{Int}
+end
+
+# A transform fits over its input's own axis and its values are read back at
+# the rows: the same vector for a row-level input, the field and its positions
+# for an indexed one.
+_brm_fit_axis(raw::AbstractVector) = collect(Float64, raw)
+_brm_fit_axis(raw::_BRMIndexedValues) = raw.field
+_brm_read_rows(values, ::AbstractVector) = values
+_brm_read_rows(values, raw::_BRMIndexedValues) = values[raw.positions]
+
 function _brm_apply_fitted_levels(levels, raw::AbstractVector; prefix="BRM replay")
     values = raw isa CA.CategoricalVector ? CA.unwrap.(raw) : raw
     lookup = Dict(level => index for (index, level) in enumerate(levels))
@@ -24,16 +48,16 @@ _brm_replay_preprocess(entry::_BRMPreprocEntry, input; freeze::Bool=true,
 
 function _brm_replay_preprocess(::Union{Val{:zscale},Val{:standardize}},
                                 entry, raw, freeze, _prefix)
-    values = collect(Float64, raw)
+    values = _brm_fit_axis(raw)
     fit = freeze ? entry.const_ : _brm_fit_zscale(values)
-    _BRMPreprocessResult((primary=_brm_apply_zscale(fit, values),),
+    _BRMPreprocessResult((primary=_brm_read_rows(_brm_apply_zscale(fit, values), raw),),
         _BRMPreprocEntry(entry.kind, fit, entry.raw_ref, false))
 end
 
 function _brm_replay_preprocess(::Val{:center}, entry, raw, freeze, _prefix)
-    values = collect(Float64, raw)
+    values = _brm_fit_axis(raw)
     fit = freeze ? entry.const_ : _brm_fit_center(values)
-    _BRMPreprocessResult((primary=_brm_apply_center(fit, values),),
+    _BRMPreprocessResult((primary=_brm_read_rows(_brm_apply_center(fit, values), raw),),
         _BRMPreprocEntry(:center, fit, entry.raw_ref, false))
 end
 

@@ -3089,7 +3089,7 @@ _sb_record_static!(data, key::Symbol) =
 # for zscale/center/standardize inners and the protect/implicit-fn fallback.
 _sb_rematerialize_vec(x::Number, _df) = x
 _sb_rematerialize_vec(x::NamedColumn, df) = _sb_df_column(df, name(x))
-_sb_rematerialize_vec(x::ExprColumn, df) =
+_sb_rematerialize_vec(x::Union{ExprColumn,_BRMIndexedSource}, df) =
     _brm_replay_expression(x, key -> _brm_df_column(df, key))
 _sb_rematerialize_vec(x, _df) = error(
     "sbimpl: reprocess: cannot re-materialise $(typeof(x)) against the new DataFrame")
@@ -5075,6 +5075,8 @@ _sb_same_raw_ref(a::NamedColumn, b::NamedColumn) =
 _sb_same_raw_ref(a::ExprColumn, b::ExprColumn) =
     getf(a) === getf(b) && _sb_same_raw_ref(getargs(a), getargs(b)) &&
     _sb_same_raw_ref(getkwargs(a), getkwargs(b))
+_sb_same_raw_ref(a::_BRMIndexedSource, b::_BRMIndexedSource) =
+    _sb_same_raw_ref(a.value, b.value) && _sb_same_raw_ref(a.index, b.index)
 _sb_same_raw_ref(a::Tuple, b::Tuple) =
     length(a) == length(b) && all(ab -> _sb_same_raw_ref(ab...), zip(a, b))
 _sb_same_raw_ref(a::AbstractArray, b::AbstractArray) =
@@ -13491,7 +13493,9 @@ for (fn, kind, fitf, applyf) in (
     # inner column-node tree, re-materialised on the new df at reprocess time.
     # A frozen re-emission reuses the recorded constant instead of refitting.
     @eval function _sb_predictor_term!(stmts, data, ::typeof($fn), t; kwargs...)
-        inner = only(getargs(t))
+        inner = _brm_transform_input(t; prefix="sbimpl")
+        isnothing(inner) && error(
+            "sbimpl: `$($(QuoteNode(fn)))(x)` takes exactly one argument")
         if _sb_term_refs_mi(inner)
             cn = _sb_wrapper_col_name($(QuoteNode(fn)), inner)
             return _sb_emit_mi_transform!(stmts, data,
@@ -13506,6 +13510,15 @@ for (fn, kind, fitf, applyf) in (
         _sb_record_preproc!(data, cn, PreprocEntry($(QuoteNode(kind)), c, inner, false))
         cn
     end
+end
+
+# `standardize(x)[g]` / `x[g]` outside the population design (a random-effect
+# slope): the shared indexed column (`_brm_population_column`), whose fit a
+# frozen re-emission reuses. Other indexing shapes stay data expressions.
+function _sb_predictor_term!(stmts, data, ::typeof(getindex), t; kwargs...)
+    column = _sb_population_columns(data)(t)
+    isnothing(column) && return _sb_materialize_protect_term!(stmts, data, getindex, t)
+    _sb_shared_population_column!(data, only(column))
 end
 
 # Fallback: a "plain" expression like `log(exposure)` or `a^2` reaching this
@@ -13685,7 +13698,7 @@ function _materialize_named(x, declaration::ExprColumn)
 end
 _materialize_named(x, _) = error(
     "sbimpl: cannot materialize NamedColumn `$(name(x))` -- only raw data columns supported inside `protect` / `zscale` / `center` / `standardize`")
-_sb_materialize_vec(x::ExprColumn) = _brm_broadcast_data_call(
+_sb_materialize_vec(x::ExprColumn) = _brm_data_call(
     getf(x), map(_sb_materialize_vec, getargs(x)), map(_sb_materialize_vec, getkwargs(x)))
 _sb_materialize_vec(x) = error("sbimpl: cannot materialize $(typeof(x)) inside wrapper predictor")
 
@@ -13778,6 +13791,10 @@ _n_obs_name_deep(t::ExprColumn, data) = begin
     end
     nothing
 end
+# An indexed read `x[i]` has its index's row axis; `x` holds one value per group.
+_n_obs_name_deep(t::ExprColumn{typeof(getindex)}, data) =
+    length(getargs(t)) == 2 ? _n_obs_name_deep(last(getargs(t)), data) :
+        invoke(_n_obs_name_deep, Tuple{ExprColumn,Any}, t, data)
 
 # Tier 1c of the intercept length probe (see `_sb_predictor_col(::Int, …)`):
 # a `(… | g)` term names this formula's row axis outright. The grouping factor

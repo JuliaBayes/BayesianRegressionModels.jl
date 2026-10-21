@@ -143,15 +143,26 @@ vbroadcasted(x::ExprColumn{typeof(protect)}; meta) = vbroadcasted(only(getargs(x
 # the transform, and pass the resulting plain vector back up to the predictor
 # pipeline. Because this fires inside `vbroadcasted`, they compose with every
 # downstream consumer (pop predictor, ranefs, link transforms, ...).
-vbroadcasted(x::ExprColumn{typeof(center)}; meta) = let raw = Base.materialize(vbroadcasted(only(getargs(x)); meta))
+# A keyword is refused (`_brm_transform_input`), never dropped.
+_vtransform_input(x) = (_brm_transform_input(x; prefix="VBRMI"); only(getargs(x)))
+vbroadcasted(x::ExprColumn{typeof(center)}; meta) = let raw = Base.materialize(vbroadcasted(_vtransform_input(x); meta))
     raw .- _mean(raw)
 end
-vbroadcasted(x::ExprColumn{typeof(zscale)}; meta) = let raw = Base.materialize(vbroadcasted(only(getargs(x)); meta))
+vbroadcasted(x::ExprColumn{typeof(zscale)}; meta) = let raw = Base.materialize(vbroadcasted(_vtransform_input(x); meta))
     mu = _mean(raw); sd = _std(raw, mu)
     sd > 0 || error("zscale: zero variance in `$(only(getargs(x)))`")
     (raw .- mu) ./ sd
 end
-vbroadcasted(x::ExprColumn{typeof(standardize)}; meta) = vbroadcasted(ExprColumn(zscale, getargs(x)...); meta)
+vbroadcasted(x::ExprColumn{typeof(standardize)}; meta) =
+    vbroadcasted(ExprColumn(zscale, _vtransform_input(x)); meta)
+# `x[i]` reads `x` (one value per group) at each row's integer position `i`
+# (`_brm_data_call`); in `standardize(x)[i]` the transform runs on `x`'s axis.
+vbroadcasted(x::ExprColumn{typeof(getindex)}; meta) = let args = getargs(x)
+    length(args) == 2 && isempty(getkwargs(x)) ||
+        return Base.broadcasted(getindex, map(vbroadcasted(;meta), args)...)
+    values, index = map(a -> Base.materialize(vbroadcasted(a; meta)), args)
+    _brm_data_call(getindex, (values, index), (;))
+end
 
 _mean(xs) = sum(xs) / length(xs)
 _std(xs, mu=_mean(xs)) = sqrt(sum(abs2, xs .- mu) / (length(xs) - 1))

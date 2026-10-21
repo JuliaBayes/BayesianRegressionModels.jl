@@ -4968,14 +4968,15 @@ end
             y ~ Normal(mu, s)
         end)
     end
-    # Transformed slopes are deferred.
-    rk_throws_admission("draws regime") do
-        BRM._brm_rk_plan(@brm df begin
-            mu ~ 1 + x + (1 + zscale(x) | g)
-            s ~ Exponential(1)
-            y ~ Normal(mu, s)
-        end)
-    end
+    # A transformed slope gathers the population design's derived column
+    # (`_rk_derived_column`); `test/indexed_transforms.jl` checks its density.
+    transformed = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + (1 + zscale(x) | g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test [(m.predictor, m.coefficient) for m in only(transformed.ranef_buckets).margins] ==
+        [(:mu, :Intercept), (:mu, :zscale_x)]
     # Explicit shared-block priors are resolved by the same address checks
     # as the Stan backend, then emitted as ordinary declarations.
     explicit_prior_plan = BRM._brm_rk_plan(@brm df begin

@@ -11,6 +11,9 @@ _brmd_snapshot(x::Tuple) = map(_brmd_snapshot,x)
 _brmd_snapshot(x::NamedColumn) = BRMDescriptionReference(name(x), :observation)
 _brmd_snapshot(x::ExprColumn) = (; callable=getf(x),
     arguments=map(_brmd_snapshot,getargs(x)), keywords=map(_brmd_snapshot,getkwargs(x)))
+# A transform fitted on a field's axis reads it at the row positions: `x[i]`.
+_brmd_snapshot(x::_BRMIndexedSource) = (; callable=getindex,
+    arguments=map(_brmd_snapshot,(x.value,x.index)), keywords=(;))
 _brmd_snapshot(x::AbstractArray{T,N}) where {T,N} = N==1 ?
     Tuple(_brmd_snapshot(v) for v in x) : (;size=size(x),values=Tuple(_brmd_snapshot(v) for v in x))
 _brmd_snapshot(x::NamedTuple) = map(_brmd_snapshot, x)

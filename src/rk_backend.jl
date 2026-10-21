@@ -2506,6 +2506,11 @@ function _rk_eval_dotted(value, data::AbstractDict,
             value.args[2:end])
         return _rk_eval_data_preparation(Val(first(value.args)), args...)
     end
+    if value.head === :ref && length(value.args) == 2
+        values, index = map(a -> _rk_eval_dotted(a, data, derived, memo),
+            value.args)
+        return _brm_gather(values, index; prefix="RK backend")
+    end
     if value.head === :call && !isempty(value.args)
         fn = value.args[1]
         if fn isa _RKDataCall
@@ -2582,6 +2587,8 @@ function _rk_lower_data_expr(node, target::Symbol, origin::String,
     f = getf(node)
     kwargs = getkwargs(node)
     args = getargs(node)
+    f === getindex && length(args) == 2 && isempty(kwargs) && return _rk_lower_indexed(
+        args..., target, origin, data, columns, derived, taken), true
     if _brm_is_term_head(f) || f === (&) || f === (|) || f === factor ||
             f === offset || f === (~) || f === zscale || f === center ||
             f === standardize
@@ -2648,6 +2655,56 @@ function _rk_lower_data_expr(node, target::Symbol, origin::String,
     vector_inputs = Tuple(last(value) for value in lowered)
     call = _RKDataCall(f, length(args), keys(kwargs), vector_inputs)
     Expr(:call, call, (first(value) for value in lowered)...), any(vector_inputs)
+end
+
+# `x[i]` / `f(x)[i]`: `x` stays on its own axis (a fitted transform `f` is
+# staged there with its fit-role anchors, `_rk_staged_transform`) and the graph
+# reads it at each row's integer position `i` (`_brm_data_call`).
+function _rk_lower_indexed(source, index, target::Symbol, origin::String,
+        data::AbstractDict, columns::Dict{Symbol,AbstractVector},
+        derived::Vector{_RKDerivedSpec}, taken::Set{Symbol})
+    prefix = "RK backend"
+    f = source isa ExprColumn ? getf(source) : nothing
+    value = if isnothing(_brm_transform_kind(f))
+        first(_rk_lower_data_expr(source, target, origin,
+            data, columns, derived, taken))
+    else
+        inner = _brm_transform_input(source; prefix)
+        isnothing(inner) && error(
+            "$prefix: predictor `$target` $origin `$(nameof(f))()` needs " *
+            "exactly one argument")
+        _rk_staged_transform(f, inner, target, origin,
+            data, columns, derived, taken)
+    end
+    position, isvec = _rk_lower_data_expr(index, target, origin,
+        data, columns, derived, taken)
+    isvec || error(
+        "$prefix: predictor `$target` $origin indexes by a scalar; `x[i]` " *
+        "reads `x` at a vector of row positions")
+    Expr(:ref, value, position)
+end
+
+# The raw columns indexed reads (`_rk_lower_indexed`) read on their own axis:
+# every column an indexed source depends on through staged definitions. A
+# fit-role input is exempt by its own rule.
+function _rk_indexed_axis_inputs(derived::AbstractVector, columns::AbstractDict)
+    inputs = Set{Symbol}()
+    function source!(value)
+        value isa Expr && return foreach(source!, value.args)
+        value isa Symbol || return
+        haskey(columns, value) && return push!(inputs, value)
+        for spec in derived
+            spec.name === value && spec.expression.head !== :_rk_fit_input &&
+                source!(spec.expression)
+        end
+    end
+    function visit(value)
+        value isa Expr || return
+        value.head === :ref && source!(first(value.args))
+        foreach(visit, value.args)
+    end
+    foreach(spec -> visit(spec.expression), derived)
+    inputs
 end
 
 # Comparison atoms for one categorical operand: `(group .== value)` per
@@ -3153,39 +3210,30 @@ function _rk_term_specs(term, target::Symbol, data::AbstractDict,
             :continuous, [dname], (;), dlabel, dlabel)
             for (dname, _, dlabel) in specs]
     end
-    if term isa ExprColumn &&
-            (getf(term) === zscale || getf(term) === center ||
-             getf(term) === standardize)
-        f = getf(term)
-        args = getargs(term)
-        length(args) == 1 || error(
-            "$prefix: predictor `$target` `$(nameof(f))()` needs exactly " *
-            "one argument")
-        isempty(getkwargs(term)) || error(
-            "$prefix: predictor `$target` `$(nameof(f))()` takes no keywords")
-        # Validate the inner form before consulting shared: nested
-        # specials fail closed here, where shared would crash undecorated.
-        vname = _rk_transform_inner_name(f, only(args), target,
-            "`$(nameof(f))()` term", data, columns, derived, taken)
-        shared = _brm_population_columns(term; cellmeans=false)
-        (!isnothing(shared) && length(shared) == 1) || error(
-            "$prefix: predictor `$target` `$(nameof(f))()` cannot be " *
-            "coded by shared lowering")
-        scol = only(shared)
-        defexpr = _rk_transform_defexpr(f, vname,
-            _rk_fit_twin!(derived, columns, taken, data, vname))
-        _rk_verify_derived_values!(defexpr, scol.values, scol.label,
-            target, data, derived)
-        dname = _rk_push_derived!(
-            derived, scol.label, defexpr, scol.label, target)
-        _rk_cross_derived_refs!(defexpr, data, columns)
-        return _RKTermSpec[_RKTermSpec(
-            :continuous, [dname], (;), scol.label, scol.label)]
-    end
     if term isa ExprColumn
-        _brm_is_term_head(getf(term)) && error(
-            "$prefix: predictor `$target` term `$(nameof(getf(term)))` " *
-            "is out of slice 1")
+        dname, label = _rk_derived_column(term, target,
+            data, columns, derived, taken)
+        return _RKTermSpec[_RKTermSpec(:continuous, [dname], (;), label, label)]
+    end
+    error("$prefix: predictor `$target` term `$term` is not supported in " *
+          "slice 1 (admitted: `1`, continuous columns, integer/string/" *
+          "categorical columns, `factor()`, `offset()`, `&` interactions, " *
+          "`center`/`zscale`/`standardize`, pure numeric data expressions)")
+end
+
+# A fitted transform (`center`/`zscale`/`standardize`), an indexed read
+# (`x[g]`, `standardize(x)[g]`) or a pure numeric data expression as one derived
+# row column: its in-graph definition, verified against the shared column. The
+# population design and random-effect slopes read it alike. Returns the derived
+# name and the column label.
+function _rk_derived_column(term::ExprColumn, target::Symbol,
+        data::AbstractDict, columns::Dict{Symbol,AbstractVector},
+        derived::Vector{_RKDerivedSpec}, taken::Set{Symbol})
+    prefix = "RK backend"
+    f = getf(term)
+    definition = if isnothing(_brm_transform_kind(f))
+        _brm_is_term_head(f) && error(
+            "$prefix: predictor `$target` term `$(nameof(f))` is out of slice 1")
         # Lower before consulting shared: nested specials fail closed
         # here, where shared materialization would crash undecorated.
         lowered, isvec = _rk_lower_data_expr(term, target,
@@ -3196,23 +3244,29 @@ function _rk_term_specs(term, target::Symbol, data::AbstractDict,
         lowered isa Expr || error(
             "$prefix: internal: term `$term` lowered to " *
             "`$(repr(lowered))`")
-        shared = _brm_population_columns(term; cellmeans=false)
-        (!isnothing(shared) && length(shared) == 1) || error(
-            "$prefix: predictor `$target` term `$term` cannot be coded " *
-            "by shared lowering")
-        scol = only(shared)
-        _rk_verify_derived_values!(lowered, scol.values, scol.label,
-            target, data, derived)
-        dname = _rk_push_derived!(
-            derived, scol.label, lowered, scol.label, target)
-        _rk_cross_derived_refs!(lowered, data, columns)
-        return _RKTermSpec[_RKTermSpec(
-            :continuous, [dname], (;), scol.label, scol.label)]
+        lowered
+    else
+        inner = _brm_transform_input(term; prefix)
+        isnothing(inner) && error(
+            "$prefix: predictor `$target` `$(nameof(f))()` needs exactly " *
+            "one argument")
+        # Validate the inner form before consulting shared: nested
+        # specials fail closed here, where shared would crash undecorated.
+        vname = _rk_transform_inner_name(f, inner, target,
+            "`$(nameof(f))()` term", data, columns, derived, taken)
+        _rk_transform_defexpr(f, vname,
+            _rk_fit_twin!(derived, columns, taken, data, vname))
     end
-    error("$prefix: predictor `$target` term `$term` is not supported in " *
-          "slice 1 (admitted: `1`, continuous columns, integer/string/" *
-          "categorical columns, `factor()`, `offset()`, `&` interactions, " *
-          "`center`/`zscale`/`standardize`, pure numeric data expressions)")
+    shared = _brm_population_columns(term; cellmeans=false)
+    (!isnothing(shared) && length(shared) == 1) || error(
+        "$prefix: predictor `$target` term `$term` cannot be coded " *
+        "by shared lowering")
+    scol = only(shared)
+    _rk_verify_derived_values!(definition, scol.values, scol.label,
+        target, data, derived)
+    dname = _rk_push_derived!(derived, scol.label, definition, scol.label, target)
+    _rk_cross_derived_refs!(definition, data, columns)
+    dname, scol.label
 end
 
 # Design columns grouped by prior addressee (derived columns by label —
@@ -3629,6 +3683,9 @@ function _rk_gate_norm_inner(node, data::AbstractDict,
         all(p -> p === _RK_GATE_CONST, parts) && return _RK_GATE_CONST
         return (:math, node.args[1], parts...)
     end
+    # An indexed read (`_rk_lower_indexed`) has no affine simplification.
+    node.head === :ref && return (:ref, Any[_rk_gate_norm_inner(
+        a, data, derived, affine, visited) for a in node.args]...)
     node.head === :call || error(
         "$prefix: internal: cannot normalize `$(repr(node))`")
     fn, args = node.args[1], node.args[2:end]
@@ -3892,11 +3949,20 @@ function _rk_ranef_recipes!(margins::Vector{_RKRanefMargin}, lowered::Vector{Any
                 push!(margins, _RKRanefMargin(target, source,
                     _RKRanefZRecipe(:column, source, nothing)))
             end
+        elseif t isa ExprColumn && !_brm_is_term_head(getf(t)) &&
+                getf(t) !== offset && getf(t) !== factor
+            # A transformed, indexed or computed slope gathers the population
+            # design's derived row column.
+            dname, label = _rk_derived_column(t, target,
+                data, columns, derived, taken)
+            push!(margins, _RKRanefMargin(target, label,
+                _RKRanefZRecipe(:column, dname, nothing)))
         else
             head = t isa ExprColumn ? "`$(nameof(getf(t)))`" : "`$t`"
             error("$prefix: $what term $head is not in the draws regime " *
-                "(admitted: $admitted; categorical `&` operands, " *
-                "`offset()`, and transformed slopes are deferred)")
+                "(admitted: $admitted, `center`/`zscale`/`standardize`, " *
+                "indexed reads, numeric data expressions; categorical `&` " *
+                "operands and `offset()` are deferred)")
         end
     end
     margins
@@ -8238,6 +8304,8 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
     # training rows.
     union!(statistical_inputs, (spec.name for spec in derived
         if spec.expression.head === :_rk_fit_input))
+    # An indexed read (`x[i]`) reads `x` on its own axis, one value per group.
+    union!(statistical_inputs, _rk_indexed_axis_inputs(derived, columns))
     n_obs = something(n_obs, _rk_design_rows(columns, mi_packed, statistical_inputs))
     n_obs > 0 || error(
         "$prefix: plan needs at least one observation, got none")
