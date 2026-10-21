@@ -82,7 +82,7 @@ function check_bound_cell(brmi, data, case_id)
     array_cache = isdefined(ReactiveKernels, :_partial_plate_cacheable)
     if array_cache
         @test fixture.calls[] == length(data.subject)
-        @test !occursin("counted_positions", string(ReactiveKernels.readable_code(sampler.kernel)))
+        @test !occursin("counted_positions", string(ReactiveKernels.code_expr(sampler.kernel)))
     end
     for point in (u, fill(0.13, n), collect(range(-0.2, 0.3; length=n)))
         gradient = similar(point)

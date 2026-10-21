@@ -11,6 +11,7 @@ LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 LogDensityProblems = "6fdf6af0-433a-55f7-b3ed-c6c6e0b8df7c"
 MCMCDiagnosticTools = "be115224-59cd-429b-ad48-344e309966f0"
 LogExpFunctions = "2ab3a3ac-af41-5b50-aa03-7779005ae688"
+OutputSignatures = "86cfaae4-1704-4c69-ba62-d919d81ae5f8"
 PSIS = "ce719bf2-d5d0-4fb9-925d-10a81b42ad04"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 ReactiveKernels = "78e9f072-d36b-4c73-b7a3-751b0eb26cf9"
@@ -56,6 +57,11 @@ url = "https://github.com/nsiccha/WarmupHMC.jl"
 # (active-position preservation, nonfinite-transport rejection).
 rev = "0194dce08e986ff17fd5a788bb315c6431b7858e"
 
+[sources.OutputSignatures]
+url = "https://github.com/nsiccha/OutputSignatures.jl"
+# ReactiveKernels' own `[sources]` revision (RK compat 0.1.5).
+rev = "d16c4efb72b963f45de9d6f632c38d46706c23e1"
+
 [sources.ReactiveKernels]
 url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # RK main: contains db4f16aa (lower Cholesky, graph allocation bounds,
@@ -78,8 +84,10 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # `@plate for` cells), d702209e (shared cell work evaluated once), ddb68802
 # (Gaussian observation arguments), fa23fe7f (in-place column reads of a
 # row-gathered joint monotonic output), 609c7a9d (one composed plate cell
-# query per subject), and a2268e47 (compact selected-coordinate cell gradients).
+# query per subject), a2268e47 (compact selected-coordinate cell gradients),
+# 68a77b03 (a design binds without its conditioned response values) and
+# dad59972 (censored and truncated responses bind absent too).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "a2268e47b3a800df356ae6961c2caf863922a102"
+rev = "dad59972b3d6b38c610201484de509adc0eed144"
