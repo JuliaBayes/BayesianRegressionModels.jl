@@ -1775,18 +1775,18 @@ end
     artifact = BRM.emit_rk_artifact(brmi; case_id="parity-kernel-vector-cells")
     inputs = BRM.rk_artifact_inputs(artifact)
     # The reader's subject plate iterates the per-subject inputs themselves,
-    # each through its own data column. The observed cell response keeps one
-    # nested port, which is also its raw likelihood source (snag
-    # rk-emission-grou-9dac9bc6).
+    # each through its own data column. The observed cell response enters the
+    # graph once, as its own nested column, which its observation reads (snag
+    # rk-emission-grou-9dac9bc6); an unread port is no input.
     @test !haskey(inputs, :pred_subject_count)
     for name in (:t, :intercept, :slope)
         @test inputs[name] == getproperty(_kernel_vector_cols, name)
         @test !haskey(inputs, Symbol(:pred_input_, name))
     end
-    @test inputs[:pred_input_y] == _kernel_vector_cols.y
-    @test !haskey(inputs, :y_raw_response)
+    @test inputs[:y] == _kernel_vector_cols.y
+    @test !haskey(inputs, :pred_input_y) && !haskey(inputs, :y_raw_response)
     @test all(length(cell) == 4 for cell in inputs[:t])
-    @test all(length(cell) == 4 for cell in inputs[:pred_input_y])
+    @test all(length(cell) == 4 for cell in inputs[:y])
     @test all(cell isa Real for cell in inputs[:intercept])
     @test all(cell isa Real for cell in inputs[:slope])
     @test occursin("Normal", sprint(Base.show_unquoted,
