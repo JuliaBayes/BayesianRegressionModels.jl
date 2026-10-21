@@ -146,7 +146,7 @@ above are model-port scope rather than this former authoring limitation.
 The count likelihood is not tied to a column called `hosp` or to one row per day.
 The fixture carries one row per observed interval:
 
-- `count_start`, `count_stop`, and `count_stream_idx` define the record axis;
+- `count_start`, `count_stop`, and `count_obs_stream` define the record axis;
 - `count_subpop_weights[:, stream]` maps the latent subpopulation matrix into that
   stream's catchment;
 - `count_delay[:, stream]` supplies its infection-to-observation delay; and
