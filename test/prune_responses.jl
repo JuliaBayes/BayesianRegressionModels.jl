@@ -12,6 +12,7 @@ using Test
 using BayesianRegressionModels
 using Random
 using Distributions: Exponential, Normal, LKJCholesky
+using Statistics: mean
 
 const BRM = BayesianRegressionModels
 
@@ -372,4 +373,47 @@ end
     pruned = prune_responses(observed(plate_data); keep = :a)
     @test rk_source(pruned) == rk_source(observed_a(plate_a_data))
     @test !any(in(keys(pruned.operations)), (:base, :sigma_b))
+end
+
+@testset "a model value only a kept prior statement reads stays with it" begin
+    # `mu_loc` (a constant prior centre) and `tau` (a sampled scale) are read
+    # only by prior statements; `nu_loc` only by a prior of the pruned `nu`.
+    priored = @brm begin
+        mu_loc = constant(mean(x))
+        nu_loc = constant(mean(x) + 1)
+        tau ~ Exponential(1)
+        sigma  ~ Exponential(1)
+        sigma2 ~ Exponential(1)
+        mu ~ 1 + x + (1 | p | subject)
+        nu ~ 1 + x
+        effect(mu, Intercept) ~ Normal(mu_loc, 1.0)
+        effect(nu, Intercept) ~ Normal(nu_loc, 1.0)
+        sd(:, p) ~ Exponential(tau)
+        y ~ Normal(mu, sigma)
+        z ~ Normal(nu, sigma2)
+    end
+    priored_y = @brm begin
+        mu_loc = constant(mean(x))
+        tau ~ Exponential(1)
+        sigma  ~ Exponential(1)
+        mu ~ 1 + x + (1 | p | subject)
+        effect(mu, Intercept) ~ Normal(mu_loc, 1.0)
+        sd(:, p) ~ Exponential(tau)
+        y ~ Normal(mu, sigma)
+    end
+    priored_z = @brm begin
+        nu_loc = constant(mean(x) + 1)
+        sigma2 ~ Exponential(1)
+        nu ~ 1 + x
+        effect(nu, Intercept) ~ Normal(nu_loc, 1.0)
+        z ~ Normal(nu, sigma2)
+    end
+    pruned = prune_responses(priored(observed))
+    @test stan(pruned) == stan(priored_y(observed))
+    @test rk_source(pruned) == rk_source(priored_y(observed))
+    @test !(:nu_loc in keys(pruned.operations))
+    pruned_z = prune_responses(priored(observed); keep = :z)
+    @test stan(pruned_z) == stan(priored_z(covariates))
+    @test rk_source(pruned_z) == rk_source(priored_z(covariates))
+    @test !any(in(keys(pruned_z.operations)), (:mu_loc, :tau))
 end
