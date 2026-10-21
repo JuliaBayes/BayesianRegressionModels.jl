@@ -46,8 +46,10 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # as the sorted iid draw. 82a954da adds observed scans (a carried array that is bound data)
 # and per-cell scan lengths in plate cells; 4ee6e0e8 also through a do-cell parameter that
 # shadows its data name; 2f5b6203 stores integer step locals of nested scans; e67bc314 lets
-# a called `@slic` submodel hold a latent or observed `@scan` (snag scan-inside-call-2ea17cef).
-rev = "e67bc314e07120510dc05c620b65dc5108daddcd"
+# a called `@slic` submodel hold a latent or observed `@scan` (snag scan-inside-call-2ea17cef);
+# d3483f11 lets a plate cell's group be that scan's observed keyword (snag
+# submodel-scan-ob-50a09edb).
+rev = "d3483f11f60da28865d74992370d9db10073197f"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
