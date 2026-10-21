@@ -669,6 +669,7 @@ pair order. Neither can yet be combined with `cdar` cells.
 | `mi(y)` | brms-style observed/imputed split — missing rows become parameters drawn from the same family |
 | [`weighted(y, w)`](@ref) | typed observation weights on the likelihood |
 | `truncated`, `censored`, [`interval_censored`](@ref) | truncation and censoring — see [Likelihoods](@ref) |
+| [`ar_errors`](@ref)`(Normal(mu, sigma), phi; time, by)` | AR(1) residuals within each `by` group, in `time` order — shorthand for a `@plate` + `@scan` recurrence (below) |
 
 `mm`'s membership weights are part of the random-effect contribution and are a
 different thing from `weighted(...)`, which scales the likelihood.
@@ -685,6 +686,37 @@ raw flat data column; `group` names, for every row of that frame, which subject
 the row belongs to. Declare it once, outside the cell; inside the cell, read
 `x[i]`. See the [multi-axis population PK kernel](@ref) for a runnable example
 whose subject and observation columns have different lengths.
+
+### Per-group recurrences over long-format rows
+
+With one row per observation and a grouping column, a plate names its grouping
+in its header, and a `@scan` block in the cell states a recurrence per group:
+
+```julia
+@brm df begin                                   # one row per probe and day
+    mu ~ 1 + c1 + s1 + trend + (1 | probe)
+    sigma ~ Exponential(1)
+    phi ~ Uniform(-1, 1)
+    @plate for p in groups(probe; order = day)  # one cell per probe, rows in day order
+        @scan begin
+            y[p][1] ~ Normal(mu[p][1], sigma / sqrt(1 - phi ^ 2))
+            for t in 2:length(day[p])
+                k = day[p][t] - day[p][t - 1]
+                y[p][t] ~ Normal(mu[p][t] + phi ^ k * (y[p][t - 1] - mu[p][t - 1]),
+                                 sigma * sqrt((1 - phi ^ (2 * k)) / (1 - phi ^ 2)))
+            end
+        end
+    end
+end
+```
+
+`x[p]` is `x`'s values on group `p`'s rows, in `day` order; shared values are
+read bare. Observing the response entry by entry gives each row its
+conditional density given the group's earlier rows, so this block is the exact
+likelihood of AR(1) residuals observed on the recorded days, and with `y`
+omitted it draws whole trajectories. `y ~ ar_errors(Normal(mu, sigma), phi;
+time = day, by = probe)` is shorthand for exactly this block; write the block
+when you need another family, a higher order or another start or gap rule.
 
 ### Downstream grouped terms: the reusable-term pattern
 

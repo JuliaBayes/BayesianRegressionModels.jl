@@ -579,14 +579,16 @@ Base.@nospecializeinfer function _rk_predictor_link(@nospecialize(brmi::BRMI), t
     link_fn === identity && return :identity
     link_fn isa Function || error(
         "$prefix: predictor `$target` has an uninterpretable link; " *
-        "admitted links are identity, logit, log, probit, and cloglog")
+        "admitted links are identity, logit, log, probit, cloglog, and atanh")
     name = nameof(link_fn)
     name === :logit && return :logit
     name === :log && return :log
     name === :probit && return :probit
     name === :cloglog && return :cloglog
+    # A correlation-like coefficient in (-1, 1), such as an AR(1) `phi`.
+    name === :atanh && return :atanh
     error("$prefix: predictor `$target` uses link `$name`; admitted links " *
-          "are identity, logit, log, probit, and cloglog")
+          "are identity, logit, log, probit, cloglog, and atanh")
 end
 
 _rk_is_predictor_ref(arg, candidates::AbstractVector{Symbol}) =

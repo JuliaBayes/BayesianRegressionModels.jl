@@ -12,7 +12,6 @@
 
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using LinearAlgebra: Symmetric
-using LogExpFunctions: logistic, log1pexp
 
 const SCAN_PANEL = (;
     y=[[0.12, 0.31, 0.2], [-0.05, 0.1, 0.42], [0.3, -0.2, 0.05]],
@@ -146,15 +145,11 @@ stanc_ok(code) = StanBlocks.stanc_check(code; warn_pedantic=false).ok
         @test occursin(r"y\[1, \w+\] = normal_rng\(level\[\w+\], \(sigma / sqrt\(\(1 - \(phi \^ 2\)\)\)\)\);", prior_code)
         @test occursin(r"y\[t, \w+\] = normal_rng\(\s*\(level\[\w+\] \+ \(phi \* \(y\[\(t - 1\), \w+\] - level\[\w+\]\)\)\),\s*sigma\s*\);", prior_code)
         @test stanc_ok(prior_code)
-        # Bound: StanBlocks `82a954da` observes a data-bound carried array, but
-        # not through a do-cell parameter that shadows its data name, which is
-        # how BRM spells every cell (`@scan: unsupported statement LHS
-        # (y[plate_i__pl_1])[t]`), snag StanBlocks `observed-scan-in-63843c19`.
-        @test_broken try
-            stanc_ok(BRM.stan_code(SBBRMI(ar_errors_cell(data); mod=@__MODULE__)))
-        catch
-            false
-        end
+        # Bound: each entry's conditional density, observed in the cell.
+        bound_code = BRM.stan_code(SBBRMI(ar_errors_cell(data); mod=@__MODULE__))
+        @test occursin(r"for\(t in 2:T\) \{\s+y\.1\[[^\n]*\] ~ normal\(", bound_code)
+        @test occursin("y_likelihood", bound_code)
+        @test stanc_ok(bound_code)
     end
 
     # Without `y` the random-effect level still counts the cells.
@@ -166,10 +161,6 @@ stanc_ok(code) = StanBlocks.stanc_check(code; warn_pedantic=false).ok
     end
 end
 
-# RK: a bounded `Uniform(lo, hi)` scalar is `lo + (hi - lo) * logistic(u)`, a
-# positive one `exp(u)`; each adds its log Jacobian.
-uniform_value(u, lo, hi) = lo + (hi - lo) * logistic(u)
-uniform_logjac(u, lo, hi) = log(hi - lo) - log1pexp(-u) - log1pexp(u)
 
 @testset "plate scan on RK" begin
     @testset "latent recurrence: density and gradient" begin
@@ -224,9 +215,19 @@ uniform_logjac(u, lo, hi) = log(hi - lo) - log1pexp(-u) - log1pexp(u)
                 sum(logpdf(MvNormal(fill(level[j], data.T), cov), data.y[j])
                     for j in eachindex(data.y))
         end
+        # The Stan program has the same density and gradient under the same
+        # parameterisation.
+        stan = consumer_stan(ar_errors_cell(data), "plate-scan-ar-errors")
+        # Stan's unnamed intercept block samples its log scale and
+        # standardized effects directly: the same coordinates.
+        mapping = [names[at(:level_Intercept)] => "pop_level_beta_pop.1";
+            names[at(:phi)] => "phi"; names[at(:sigma)] => "sigma";
+            names[tau] => "r_level_subject_log_scale";
+            [names[z[j]] => "r_level_subject_xi.$j" for j in eachindex(z)]]
         n = length(names)
         for u in (zeros(n), fill(0.1, n), collect(range(-0.4, 0.4; length=n)))
             check_consumer_point(problem, u, oracle)
+            check_consumer_stan(problem, stan, mapping, backend, u)
         end
         @test isequal(data, saved)
     end

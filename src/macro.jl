@@ -713,6 +713,8 @@ _brm(x::Expr; df=nothing) = begin
     lhs, x = named ? x.args : (:($(gensym("model"))(__df__)), x)
     source = Base.remove_linenums!(Meta.isexpr(x, :block) ?
         deepcopy(x) : Expr(:block, deepcopy(x)))
+    # `y ~ ar_errors(...)` is the plate + scan it expands to (`ar_errors.jl`).
+    x, ar_errors_checks = _brm_expand_ar_errors(x)
     alllocals = OrderedDict{Symbol,Symbol}()
     jointkeys = Set{Symbol}()
     captures = Set{Symbol}()
@@ -750,6 +752,7 @@ _brm(x::Expr; df=nothing) = begin
         [:($nonlocal = @getproperty __ddf__.$nonlocal) for nonlocal in nonlocals]...,
         :((;$(maybelocals...)) = $maybedata(__df__)),
         x,
+        ar_errors_checks...,
         :(__caps__ = $capturedata(__df__, ($(map(QuoteNode, real_captures)...),))),
         finalize,
     )
@@ -990,7 +993,14 @@ function _brm_plate_groupings(x)
                 "grouping data column `group` and a cell label column `cells`, or " *
                 "`ragged(idx, group; into=target)` for an index column into the " *
                 "flat axis `target` labels; got `$(repr(stmt))`")
-            (; name, spec, into) = decl
+            (; name, spec, into, order) = decl
+            # Row order belongs to the plate that reads the rows (decision
+            # `1pnob5t`), not to another model-scope statement.
+            order === nothing || error(
+                "@brm: `$(sprint(Base.show_unquoted, stmt))`: a model-scope grouping " *
+                "takes no `order=`; " *
+                "state a per-group plate's grouping and row order in its header, " *
+                "`@plate for p in groups($(spec[1]); order = $order)`")
             name in spec && error(
                 "@brm: `$(repr(stmt))` groups `$name` by itself")
             length(spec) == 2 && spec[1] === spec[2] && error(
@@ -1010,28 +1020,31 @@ function _brm_plate_groupings(x)
     groupings
 end
 
-# The positional arguments and `into=` target of a `ragged(...)` call, or
-# `nothing` when it carries any other keyword.
+# The positional arguments, `into=` target and `order=` column of a
+# `ragged(...)` call, or `nothing` when it carries any other keyword.
 function _brm_plate_grouping_args(stmt)
     positional, keywords = Any[], Any[]
     for arg in stmt.args[2:end]
         Meta.isexpr(arg, :parameters) ? append!(keywords, arg.args) :
         Meta.isexpr(arg, :kw) ? push!(keywords, arg) : push!(positional, arg)
     end
-    isempty(keywords) && return (; positional, into=nothing)
-    length(keywords) == 1 && Meta.isexpr(only(keywords), :kw, 2) &&
-        only(keywords).args[1] === :into && only(keywords).args[2] isa Symbol ||
-        return nothing
-    (; positional, into=only(keywords).args[2])
+    options = Dict{Symbol,Symbol}()
+    for keyword in keywords
+        Meta.isexpr(keyword, :kw, 2) && keyword.args[1] in (:into, :order) &&
+            keyword.args[2] isa Symbol && !haskey(options, keyword.args[1]) ||
+            return nothing
+        options[keyword.args[1]] = keyword.args[2]
+    end
+    (; positional, into=get(options, :into, nothing), order=get(options, :order, nothing))
 end
 
 function _brm_plate_grouping_decl(stmt)
     args = _brm_plate_grouping_args(stmt)
     args === nothing && return nothing
-    (; positional, into) = args
+    (; positional, into, order) = args
     length(positional) == 2 && positional[1] isa Symbol || return nothing
     spec = _brm_plate_grouping_spec(positional[2])
-    spec === nothing ? nothing : (; name=positional[1], spec, into)
+    spec === nothing ? nothing : (; name=positional[1], spec, into, order)
 end
 
 _brm_plate_grouping_spec(group::Symbol) = (group,)
@@ -1078,26 +1091,48 @@ function _brm_plate_loop(x::Expr)
     binding.args[1], binding.args[2], loop.args[2]
 end
 
+# `@plate for p in groups(g; order = t)`: one cell per distinct label of the
+# data column `g`, and each read `x[p]` is `x`'s values on group `p`'s rows,
+# ascending in `t` when `order` is given (decision `1pnob5t`). It lowers to the
+# kernel positional `ragged(x, g, g; order = t)` for every name the cell reads.
+# Returns `(; group, order)`, or `nothing` for an `eachindex`/`axes` range.
+function _brm_plate_header_grouping(range)
+    isxcall(range, :groups) || return nothing
+    args = _brm_plate_grouping_args(range)
+    args !== nothing && length(args.positional) == 1 && only(args.positional) isa Symbol &&
+        args.into === nothing || error(
+        "@brm: a grouped `@plate` range is `groups(g)` or `groups(g; order = t)` with a " *
+        "grouping data column `g` and a time column `t`; got " *
+        "`$(sprint(Base.show_unquoted, range))`")
+    (; group=only(args.positional), args.order)
+end
+# Each read joins the header's grouping, which is also its own cell label
+# column (`_brm_kernel_plate_cells`).
+_brm_plate_header_input(name, (; group, order)) = order === nothing ?
+    Expr(:call, :ragged, name, group, group) :
+    Expr(:call, :ragged, Expr(:parameters, Expr(:kw, :order, order)), name, group, group)
+
 function _brm_plate_range_input(range)
     Meta.isexpr(range, :call) || error(
-        "@brm: a kernel `@plate` range must be `eachindex(x)` or `axes(x, 1)`")
+        "@brm: a kernel `@plate` range must be `eachindex(x)`, `axes(x, 1)` or `groups(g)`")
     head = range.args[1]
     if head === :eachindex && length(range.args) == 2
         return range.args[2]
     elseif head === :axes && length(range.args) == 3 && range.args[3] == 1
         return range.args[2]
     end
-    error("@brm: a kernel `@plate` range must be `eachindex(x)` or `axes(x, 1)`")
+    error("@brm: a kernel `@plate` range must be `eachindex(x)`, `axes(x, 1)` or `groups(g)`")
 end
 
 function _brm_plate_input_key(x)
     x isa Symbol && return (:column, x)
     # `ragged(x, group)`, or `ragged(x, group, cells)` lowered from a model-scope
-    # `ragged(x, group => cells)`, either with an optional `into=target`.
+    # `ragged(x, group => cells)`, either with an optional `into=target` and
+    # `order=time`.
     args = isxcall(x, :ragged) ? _brm_plate_grouping_args(x) : nothing
     if args !== nothing && length(args.positional) in (2, 3) &&
        all(arg -> arg isa Symbol, args.positional)
-        return (:ragged, args.positional..., args.into)
+        return (:ragged, args.positional..., args.into, args.order)
     end
     error(
         "@brm: a kernel `@plate` slices formula and data names (`x[i]`); declare " *
@@ -1219,11 +1254,33 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
 
     # A name with a model-scope `ragged(x, group)` declaration is read through
     # that grouping. The deprecated in-body wrapper stays accepted for a name
-    # without one; mixing both spellings for one name is refused.
+    # without one; mixing both spellings for one name is refused. In a
+    # `groups(...)` plate every read joins the header's grouping.
     inbody_ragged = false
     cell_groupings = Symbol[]
+    header = _brm_plate_header_grouping(range)
+    header_source = sprint(Base.show_unquoted, range)
+    # Nothing outside the plate could tell which group a collected value
+    # belongs to: it would be matched to the groups by position, the hazard
+    # `ragged(x, group => cells)` exists to rule out (`3681f4a`).
+    header === nothing || isempty(outputs) || error(
+        "@brm: a `@plate for $i in $header_source` cell observes its group's rows " *
+        "and collects no result; `$(first(outputs))[$i] = …` would leave a value " *
+        "per group that nothing outside the plate can match to its group. Keep " *
+        "the value a cell local (`$(first(outputs)) = …`) and observe in the cell.")
     function grouped(source)
-        if source isa Symbol && haskey(groupings, source)
+        if header !== nothing
+            source isa Symbol || error(
+                "@brm: a `@plate for $i in $header_source` cell reads names as " *
+                "`x[$i]`, each the rows of group `$i`; got " *
+                "`$(sprint(Base.show_unquoted, source))`")
+            haskey(groupings, source) && error(
+                "@brm: `$source` is grouped at model scope by " *
+                "`$(_brm_plate_grouping_repr(source, groupings[source]))`, but a " *
+                "`@plate for $i in $header_source` cell groups every name it reads " *
+                "by its header; drop the model-scope statement")
+            return _brm_plate_header_input(source, header)
+        elseif source isa Symbol && haskey(groupings, source)
             push!(grouped_reads, source)
             source in cell_groupings || push!(cell_groupings, source)
             return _brm_plate_grouping_input(source, groupings[source])
@@ -1239,8 +1296,9 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
     end
 
     # The range anchor participates even when the body does not read it: it is
-    # the subject-count witness in the no-random-effects panel form.
-    add_input(grouped(_brm_plate_range_input(range)))
+    # the subject-count witness in the no-random-effects panel form. A
+    # `groups(...)` plate's cells are its grouping's labels instead.
+    header === nothing && add_input(grouped(_brm_plate_range_input(range)))
 
     function rewrite(ex)
         ex === i && error(

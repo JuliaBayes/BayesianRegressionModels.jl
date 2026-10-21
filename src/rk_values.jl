@@ -20,7 +20,8 @@ function _rk_value_link!(bindings, link, lhs, taken)
     link === :identity && return lhs
     head = link === :log ? :exp : link === :logit ? _rk_value_callee!(bindings, logistic, taken) :
         link === :probit ? :brm_invprobit :
-        link === :cloglog ? :brm_invcloglog : error("RK backend: unknown link `$link`")
+        link === :cloglog ? :brm_invcloglog : link === :atanh ? :tanh :
+        error("RK backend: unknown link `$link`")
     _rk_ast_dotted(head, lhs)
 end
 

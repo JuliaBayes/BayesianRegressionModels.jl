@@ -5,6 +5,7 @@ using ReactiveKernels, ReactiveKernelsPPL, Enzyme, LogDensityProblems
 using DifferentiationInterface: AutoEnzyme
 import BridgeStan
 using CategoricalArrays
+import LogExpFunctions
 const BRM = BayesianRegressionModels
 include(joinpath(@__DIR__, "testset_filter.jl"))
 include(joinpath(@__DIR__, "rk_source_roundtrip.jl"))
@@ -14,6 +15,12 @@ function consumer_problem(brmi)
     println("RK_NAMES=", coordinate_names(backend.model.layout)); flush(stdout)
     backend, rk_logdensity_problem(backend; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
 end
+
+# A bounded `Uniform(lo, hi)` coordinate is `lo + (hi - lo) * logistic(u)`, as
+# Stan's lower/upper transform; its log Jacobian is below.
+uniform_value(u, lo, hi) = lo + (hi - lo) * LogExpFunctions.logistic(u)
+uniform_logjac(u, lo, hi) = log(hi - lo) - LogExpFunctions.log1pexp(-u) -
+    LogExpFunctions.log1pexp(u)
 
 # The position of the coordinate called `name`.
 function coordinate(names, name)

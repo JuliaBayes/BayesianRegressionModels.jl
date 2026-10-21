@@ -165,8 +165,24 @@ first and then returned.
 A cell needs no indexed output. When its only indexed statements are
 observations (`dv[i] ~ Normal(cp, sigma)` after a bare `cp = ...`), it has no
 collected result: `cp` stays a cell local and nothing is stored at model scope.
-RKBRMI builds such a cell; SBBRMI refuses it until StanBlocks has a plate with no
-collected result.
+Both backends build such a cell.
+
+A plate over long-format rows names its grouping in the header:
+`@plate for p in groups(g)` has one cell per distinct label of the data column
+`g`, in sorted order, and each read `x[p]` is `x`'s values on group `p`'s rows
+(a response, a data column, or a predictor with one value per row);
+`groups(g; order = t)` takes each group's rows in ascending `t`. Values shared
+by every row are read bare. Such a cell observes, and collects no result
+(`loc[p] = …`): nothing outside it could tell which group a collected value
+belongs to.
+
+A cell may hold a `@scan begin … end` recurrence, one per cell: seeds by literal
+index, then one `for` loop of steps reading earlier entries at a fixed lag. A
+carried array the scan writes (`h[t] ~ Normal(phi * h[t - 1], s)`) is a latent
+state per cell; observing the cell's own response entry by entry
+(`y[i][1] ~ …`, `y[i][t] ~ Normal(… y[i][t - 1] …)`) gives each entry's
+conditional density, and with `y` omitted the block draws whole trajectories.
+[`ar_errors`](@ref) is shorthand for one such recurrence.
 
 Indexed inputs split by kind. A raw data column on the plate's own
 one-row-per-subject frame is gathered into a per-group slice. A column or
@@ -262,12 +278,17 @@ end
 ```
 
 Rows join their cell by label, so the totals' frame may list its districts in
-any order. A plate with no random-effect predictor and no `cells` is refused:
-matching rows to cells by position — `group`'s first appearance — cannot be
-checked against a per-cell column, which would then bind to the wrong cells
-silently. Every `ragged(...)` input of one plate names the same `cells`; their
+any order. Every `ragged(...)` input of one plate names the same `cells`; their
 `group` columns may differ. Under a random-effect predictor the cells are its
 grouping, so `cells` may be named only as that same column.
+
+A plate with no random-effect predictor and no `cells` is refused: matching rows
+to cells by position cannot be checked against a per-cell column, which would
+then bind to the wrong cells silently. A plate over long-format rows with
+nothing per cell names its grouping in its header instead,
+`@plate for p in groups(group; order = time)` (see [`kernel`](@ref)): one cell
+per distinct label of `group`, each read `x[p]` the group's rows in `time`
+order.
 
 Why the grouping is an explicit argument rather than derived: an ordinary
 per-subject LP is grouped by the random-effect grouping that labels its rows
@@ -303,12 +324,63 @@ rewrite (`_brm_plate_kernel`, macro.jl), kernel-argument lowering lives in
 """
 ragged
 
-_check_term_kwargs(::typeof(ragged), kwargs) = all(==(:into), keys(kwargs)) || error(
+# `order=` is the kernel positional a `@plate for p in groups(g; order = t)`
+# header lowers to; it is not written on `ragged` itself.
+_check_term_kwargs(::typeof(ragged), kwargs) =
+    all(in((:into, :order)), keys(kwargs)) || error(
     "@brm: ragged(...) takes only the `into=` keyword, got $(keys(kwargs)). The ",
     "spelling is `ragged(<linear predictor or flat column>, <grouping column>)`, ",
     "`ragged(x, group => cells)` with a cell label column `cells`, or ",
     "`ragged(<index column>, <grouping column>; into=<grouping column of the ",
     "indexed axis>)`.")
+
+"""
+    y ~ ar_errors(Normal(mu, sigma), phi; time = t, by = g)
+
+Gaussian observations whose residuals follow an AR(1) process within each group
+of `g`, in the order of the integer time column `t`:
+`y[t] - mu[t] = phi^k * (y[t-k] - mu[t-k]) + e[t]`, where `k` is the number of
+time steps since the group's previous row.
+
+`ar_errors` is shorthand for the recurrence it states. `@brm` replaces the
+statement by this `@plate` / `@scan` source before building the model, and
+`show` and the descriptor print that expansion:
+
+```julia
+@plate for p in groups(g; order = t)    # one cell per group, rows in `t` order
+    @scan begin
+        y[p][1] ~ Normal(mu[p][1], sigma / sqrt(1 - phi ^ 2))
+        for s in 2:length(t[p])
+            k = t[p][s] - t[p][s - 1]
+            y[p][s] ~ Normal(mu[p][s] + phi ^ k * (y[p][s - 1] - mu[p][s - 1]),
+                             sigma * sqrt((1 - phi ^ (2 * k)) / (1 - phi ^ 2)))
+        end
+    end
+end
+```
+
+- `sigma` is the innovation SD. The first row of each group comes from the
+  stationary law `Normal(mu, sigma / sqrt(1 - phi^2))`, so `|phi| < 1` is
+  required. This is the exact AR(1) likelihood (brms' `ar(cov = TRUE)`).
+- A gap of `k` steps uses `phi^k` and innovation variance
+  `sigma^2 (1 - phi^(2k)) / (1 - phi^2)`: the exact density of the process
+  observed only on the recorded steps. Without gaps this is the plain recursion.
+- Rows may come in any order; each group's rows are taken in `t` order. Within
+  a group every time must be a whole number and occur once.
+- `mu`, `sigma` and `phi` are names or numbers. A name a formula declares
+  (`mu ~ 1 + x + (1 | g)`, `log(sigma) ~ 1 + (1 | g)`,
+  `atanh(phi) ~ 1 + (1 | g)`) or a data column varies by row and is read as
+  `mu[p]`, as above; a name with a distribution prior (`phi ~ Uniform(-1, 1)`)
+  is shared and read bare, as `sigma` and `phi` are above.
+- Only `Normal` innovations and order 1. For another family, a higher order or
+  a different start or gap rule, write the `@plate for` / `@scan` recurrence
+  directly; the expansion above is the template.
+
+Each row's pointwise log likelihood is its conditional density given the
+group's earlier rows. With `y` omitted, the same block draws whole AR(1)
+trajectories per group.
+"""
+function ar_errors end
 
 # Reject the retired keyword surface at CONSTRUCTION — i.e. at the `@brm` /
 # `kernel(...)` call the consumer actually wrote — not merely when the model is

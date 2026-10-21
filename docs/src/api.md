@@ -89,6 +89,7 @@ BayesianRegressionModels.mo
 BayesianRegressionModels.mo1
 BayesianRegressionModels.kernel
 BayesianRegressionModels.ragged
+BayesianRegressionModels.ar_errors
 ```
 
 `truncated` and `censored` are re-exported unchanged from Distributions.jl and

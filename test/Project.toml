@@ -44,8 +44,9 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # Descriptor outputs carry their value shape as `dims`; non-finite literals render; `weighted`
 # takes a censored/truncated/interval_censored family; an exchangeable ordered prior re-draws
 # as the sorted iid draw. 82a954da adds observed scans (a carried array that is bound data)
-# and per-cell scan lengths in plate cells.
-rev = "82a954daf39f5d0497ca5d203ec2f6af7379fd64"
+# and per-cell scan lengths in plate cells; 4ee6e0e8 also through a do-cell parameter that
+# shadows its data name.
+rev = "4ee6e0e87b3015a9f89bb6f0ac7ce348964b68cd"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"

@@ -4,6 +4,7 @@ module BayesianRegressionModels
 # intermediate: expression tree + column metadata).
 using OrderedCollections
 include("macro.jl")
+include("ar_errors.jl")
 
 # Introspection helpers on a BRMI -- outcomes / linear predictors /
 # grouping factors / continuous & categorical predictors / RE terms.
@@ -155,6 +156,8 @@ export me, mi, s, t2, ar, dar, rw, cdar, mo, mo1, hsgp, OrderedLogistic, Ordinal
 # (A former whole-model parametric response marker was shed as dead code;
 # the shared-bucket + `kernel(...)` composition is the current idiom.)
 export TruncatedNormal, kernel, ragged
+# Per-group AR(1) residuals, shorthand for a `@plate` + `@scan` recurrence.
+export ar_errors
 export brm_multinomial, brm_multinomial_lpmf, brm_multinomial_lpmfs, brm_multinomial_rng
 # Julia-native response-family composition. `truncated` and `censored` are the
 # exact Distributions.jl functions; `interval_censored` is BRM's formula marker

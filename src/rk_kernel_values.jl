@@ -256,12 +256,12 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
     group_values = if isempty(groups)
         # Without a subject predictor, `ragged(x, group => cells)` inputs label
         # the cells by their explicit cell label column (district totals over
-        # facility predictors are the shape).
+        # facility predictors are the shape), and a `groups(g)` plate by the
+        # labels of `g`.
         if isempty(ragged_cols)
             nothing
         else
-            column = _brm_kernel_cell_label_column(ragged_cols; prefix="RK backend")
-            _brm_kernel_subject_values(parent(parent(column)), _rk_kernel_column_name(column); prefix="RK backend")
+            _brm_kernel_plate_cells(ragged_cols; prefix="RK backend").values
         end
     else
         length(unique(group.key for group in groups)) == 1 || error(
@@ -280,7 +280,9 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
         if argument isa ExprColumn && getf(argument) === ragged
             value, group = _brm_kernel_ragged_args(argument; prefix="RK backend")
             value isa NamedColumn || error("RK backend: ragged input must name a column or predictor")
-            partition = _brm_kernel_ragged_rows(value, group, group_values; prefix="RK backend")
+            (; into, order) = _brm_kernel_ragged_options(argument; prefix="RK backend")
+            partition = _brm_kernel_ragged_rows(value, group, group_values;
+                prefix="RK backend", order)
             if params[i] in scanned && parent(value) isa DataColumn
                 # A response a scan observes is bound one series per subject
                 # and read in place, as RKPPL observes it.
@@ -293,7 +295,6 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             rows = Symbol(name, :_rows_, i)
             columns[rows] = partition.rows
             column = _rk_kernel_column_name(value)
-            into = _brm_kernel_ragged_into(argument; prefix="RK backend")
             source = !isnothing(into) ? Symbol(name, :_index_, column) :
                 column in observed ? Symbol(name, :_input_, column) : column
             if !isnothing(into)

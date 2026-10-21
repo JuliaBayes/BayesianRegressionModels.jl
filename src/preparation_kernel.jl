@@ -142,6 +142,34 @@ function _brm_kernel_cell_label_column(ragged_cols; prefix="BRM kernel preparati
     column
 end
 
+# The cells of a plate no random-effect linear predictor labels, as
+# `(; column, values, distinct)`: one cell per row of the cell label column
+# every `ragged(x, group => cells)` input names. A `@plate for p in groups(g)`
+# header lowers each read to `ragged(x, g, g)`, its grouping column as its own
+# cell labels: one cell per distinct label of `g`, sorted (`distinct`). Such a
+# cell has no per-cell input and collects nothing (the header refuses it), so
+# nothing is matched to a cell by position (decision `1pnob5t`); `@brm`
+# refuses `ragged(x, g => g)` written at model scope.
+function _brm_kernel_plate_cells(ragged_cols; prefix="BRM kernel preparation")
+    column = _brm_kernel_cell_label_column(ragged_cols; prefix)
+    distinct = all(c -> name(getargs(c)[2]) === name(column), ragged_cols)
+    values = distinct ?
+        _brm_kernel_distinct_labels(parent(parent(column)), name(column); prefix) :
+        _brm_kernel_subject_values(parent(parent(column)), name(column); prefix)
+    (; column, values, distinct)
+end
+
+# The distinct labels of a grouping column, sorted: the cells of a plate that
+# only joins rows by that column.
+function _brm_kernel_distinct_labels(raw, group::Symbol; prefix="BRM kernel preparation")
+    raw isa AbstractVector || error(
+        "$prefix: kernel(...) grouping column `$group` must be a vector, got $(typeof(raw)).")
+    values = collect(_brm_group_values(raw))
+    any(ismissing, values) && error(
+        "$prefix: kernel(...) grouping column `$group` has missing labels.")
+    sort!(unique(values))
+end
+
 # Under a random-effect linear predictor the cells are already labelled by its
 # grouping; a `ragged(x, group => cells)` must then name that same column.
 function _brm_kernel_check_cell_labels(ragged_cols, group::Symbol;
@@ -164,7 +192,7 @@ _brm_ragged_column_length!(lens, name, ::_BRMAbsentResponse) = lens
 
 function _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals;
                                  prefix="BRM kernel preparation",
-                                 allow_unbound_observation=false)
+                                 allow_unbound_observation=false, order=nothing)
     a_name = name(arg_col)
     decl = parent(arg_col)
     is_lp = decl isa ExprColumn && getf(decl) === (~)
@@ -202,17 +230,42 @@ function _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals;
     end
 
     rows = _brm_kernel_ragged_partition(a_name, grp_name, ev_vals, g_vals; prefix)
+    if !isnothing(order)
+        (order isa NamedColumn && parent(order) isa DataColumn) || error(
+            "$prefix: kernel(...) `ragged($a_name, $grp_name; order=…)`: `order=` ",
+            "names a raw data column on `$grp_name`'s rows; got $(typeof(order)).")
+        _brm_kernel_order_rows!(rows, parent(parent(order)), name(order), grp_name, n_ev;
+            prefix)
+    end
 
     (; rows, is_lp, is_unbound, group_name=grp_name, group_values=ev_vals)
 end
 
-# The `into=` target of a `ragged(...)` kernel positional, or `nothing`.
-function _brm_kernel_ragged_into(c; prefix="BRM kernel preparation")
+# `ragged(x, group; order=time)`: each cell's rows in ascending `time`, ties in
+# row order.
+function _brm_kernel_order_rows!(rows, times, order::Symbol, group::Symbol, nrows;
+                                 prefix="BRM kernel preparation")
+    got = times isa AbstractVector ? "$(length(times)) rows" : typeof(times)
+    times isa AbstractVector && length(times) == nrows || error(
+        "$prefix: kernel(...) `ragged(…, $group; order=$order)`: `$order` must be a ",
+        "column on `$group`'s $nrows rows; got $got.")
+    any(ismissing, times) && error(
+        "$prefix: kernel(...) `ragged(…, $group; order=$order)`: `$order` has missing values.")
+    for cell in rows
+        sort!(cell; by=r -> times[r], alg=Base.Sort.DEFAULT_STABLE)
+    end
+    rows
+end
+
+# The `into=` target and `order=` column of a `ragged(...)` kernel positional,
+# each `nothing` when absent.
+function _brm_kernel_ragged_options(c; prefix="BRM kernel preparation")
     kwargs = getkwargs(c)
-    all(==(:into), keys(kwargs)) || error(
-        "$prefix: kernel(...) `ragged(...)` accepts only the `into=` keyword; got ",
-        join(("`$k`" for k in keys(kwargs) if k !== :into), ", "), ".")
-    get(kwargs, :into, nothing)
+    unknown = [k for k in keys(kwargs) if !(k in (:into, :order))]
+    isempty(unknown) || error(
+        "$prefix: kernel(...) `ragged(...)` accepts only the `into=` and `order=` ",
+        "keywords; got ", join(("`$k`" for k in unknown), ", "), ".")
+    (; into=get(kwargs, :into, nothing), order=get(kwargs, :order, nothing))
 end
 
 # `ragged(idx, group; into=target)`: `idx` holds 1-based row numbers on the flat
