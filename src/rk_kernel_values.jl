@@ -974,6 +974,15 @@ end
 _rk_kernel_inv_logit(x) = logistic(x)
 _rk_kernel_inv_logit(x::AbstractArray) = logistic.(x)
 
+# StanBlocks declares Stan's builtins as functions without Julia methods. A
+# cell that calls one through its StanBlocks binding runs its Julia equivalent
+# on RK (the table is in the ReactiveKernels extension); every other callable
+# runs as bound. `_rk_kernel_function_arguments` names the positional
+# arguments a builtin takes as functions.
+_rk_kernel_stan_builtin(callable) = callable
+_rk_kernel_function_arguments(callable) = ()
+_rk_kernel_named(value) = value isa Symbol || value isa GlobalRef || Meta.isexpr(value, :.)
+
 # Stan broadcasts scalar addition/subtraction over vectors and matrices.
 # Julia's undotted operators require matching array operands, so bind those
 # Stan cases at the cell edge while leaving all other dispatch unchanged.
@@ -1027,9 +1036,18 @@ function _rk_kernel_bind_calls(value, scope, bindings, taken; index=false)
         elseif head isa Symbol && isdefined(Base, head) &&
                 isdefined(scope, head) && getfield(scope, head) === getfield(Base, head)
             args[1] = head
-        elseif head isa Symbol || head isa GlobalRef || Meta.isexpr(head, :.)
-            callable = Core.eval(scope, head)
-            args[1] = _rk_value_callee!(bindings, callable, taken)
+        elseif _rk_kernel_named(head)
+            callable = _rk_kernel_binding(scope, head)
+            args[1] = _rk_value_callee!(bindings, _rk_kernel_stan_builtin(callable), taken)
+            # A function passed by name (an ODE right-hand side) is bound as a
+            # callable, not read as a value of the program.
+            for position in _rk_kernel_function_arguments(callable)
+                position + 1 <= length(args) &&
+                    !any(arg -> Meta.isexpr(arg, :...), args[2:position + 1]) &&
+                    _rk_kernel_named(args[position + 1]) || continue
+                args[position + 1] = _rk_value_callee!(bindings,
+                    _rk_kernel_binding(scope, args[position + 1]), taken)
+            end
         end
     end
     Expr(value.head, args...)

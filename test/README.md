@@ -438,6 +438,35 @@ describes the same censoring as the call form
 julia --startup-file=no --project=test test/description_cell_combinators.jl
 ```
 
+## ODE solvers in kernel cells
+
+`rk_kernel_ode_cell.jl` runs the population-PK `@plate for` cell of
+`nlme_fixtures.jl` with its closed-form concentration replaced by Stan's
+`ode_rk45`, `ode_rk45_tol`, `ode_bdf` and `ode_bdf_tol`, spelled as
+stanblocks-use §29 writes them (`rep_vector`, `to_array_1d`, `[:, 1]`,
+`to_vector`) with a `@deffun @juliacompat` right-hand side. On RKBRMI each
+solve is checked against the closed-form model's density and Reverse gradient
+at the same coordinates, and the tolerance-controlled forms against the
+compiled Stan density and gradient. It needs ReactiveKernels with
+`rk_ode_rk45_tol` (`ce48fc77` or later) and the solver packages, which the
+test environment does not carry. Run it from a copy of this environment that
+develops such a ReactiveKernels checkout (its root and the three nested
+packages, as `setup_env.jl` does) and adds the solvers:
+
+```sh
+cp test/Project.toml test/Manifest.toml <scratch-env>/
+julia --project=<scratch-env> -e 'using Pkg; rk = "<ReactiveKernels checkout>"
+    Pkg.develop([PackageSpec(path=rk),
+        PackageSpec(path=joinpath(rk, "packages", "ReactiveKernelsPPL")),
+        PackageSpec(path=joinpath(rk, "packages", "ReactiveKernelsDistributionKernels")),
+        PackageSpec(path=joinpath(rk, "packages", "ReactiveKernelsPPLExamples"))])
+    Pkg.add(["OrdinaryDiffEqLowOrderRK", "OrdinaryDiffEqBDF", "SciMLBase", "SciMLSensitivity"])'
+julia --startup-file=no --project=<scratch-env> test/rk_kernel_ode_cell.jl
+```
+
+`kernel_ode_cell.jl` remains
+the Stan-only gate for the closure-style `kernel(...) do` spelling.
+
 ## Native GP and dual HSGP adoption
 
 `rk_gp_covariance.jl` checks BRM-owned squared-exponential and periodic
