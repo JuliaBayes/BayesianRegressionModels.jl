@@ -259,27 +259,38 @@ function _sb_total_basis_map(population, columns)
     rank(A) == size(A,2) ? A : nothing
 end
 
+"""Why a predictor's random-effect block stays conventional under exact totals."""
+struct _SBTotalIneligible
+    reason::String
+end
+
+# `nothing`: the predictor has no random-effect block; `_SBTotalIneligible`: it
+# has one, which keeps the conventional representation for the stated reason.
 function _sb_total_plan(brmi, prepared, predictor, overrides, buckets, sd_overrides;
                         cv_groups, centered_groups, r2d2_overrides, ranef_r2d2_overrides,
                         s2z_groups=Set{Symbol}())
     target = predictor.name
     declarations = filter(d -> d.predictor === target, prepared.context.group_declarations)
     isempty(declarations) && return nothing
+    ineligible(reason) = _SBTotalIneligible(reason)
     # Do not reinterpret shared/correlated/stratified/multi-membership blocks.
-    any(d -> d.raw_group isa MultiMembershipTerm || d.descriptor isa Tuple, declarations) && return nothing
+    any(d -> d.raw_group isa MultiMembershipTerm || d.descriptor isa Tuple, declarations) &&
+        return ineligible("its block is multi-membership, stratified or shared")
     plans = _brm_simple_random_effect_plans(brmi,target,prepared.context)
-    isnothing(plans) && return nothing
+    isnothing(plans) && return ineligible("its random effects are not one simple grouping")
     group = first(plans).group
-    all(p -> p.group === group && (p.zero_correlation || length(p.columns) == 1),plans) || return nothing
-    group in cv_groups && return nothing
+    all(p -> p.group === group && (p.zero_correlation || length(p.columns) == 1),plans) ||
+        return ineligible("it has random effects on several groupings or correlated random columns")
+    group in cv_groups && return ineligible("`$group` is in `cv_groups`")
     # Explicit conventional centered_groups is a request for that representation.
-    group in centered_groups && return nothing
+    group in centered_groups && return ineligible("`$group` is in `centered_groups`")
     # An explicit S2Z request is likewise a request for that representation.
-    group in s2z_groups && return nothing
-    haskey(r2d2_overrides,target) && return nothing
+    group in s2z_groups && return ineligible("`$group` is in `s2z_groups`")
+    haskey(r2d2_overrides,target) && return ineligible("it has an R2D2 prior")
     pop, ran, direct = Any[], Any[], Any[]
     foreach(t -> _sb_classify_term!(t,pop,ran,direct), _sb_terms(predictor.expression))
-    all(_sb_total_passthrough_term,direct) || return nothing
+    all(_sb_total_passthrough_term,direct) ||
+        return ineligible("it has a term other than `offset(...)` outside its population design (a spline, GP, monotonic, autoregressive or categorical term)")
     obs_name = get(prepared.context.target_obs,target,nothing)
     design = _brm_population_design(target,Tuple(pop),prepared.context.data,obs_name)
     if isnothing(design) && (isnothing(obs_name) || !haskey(prepared.context.data,obs_name))
@@ -290,18 +301,27 @@ function _sb_total_plan(brmi, prepared, predictor, overrides, buckets, sd_overri
         # representation and names instead of dropping every `:auto` plan.
         design = _brm_population_design(target,Tuple(pop),prepared.context.data,obs_name; row_source=group)
     end
-    (isnothing(design) || isempty(design.columns) || !isempty(design.fixed_terms)) && return nothing
+    isnothing(design) && return ineligible("its population design cannot be resolved")
+    isempty(design.columns) &&
+        return ineligible("it has no population coefficient to integrate (as in `0 + (1 | $group)`)")
+    isempty(design.fixed_terms) || return ineligible("its population design has fixed terms")
     columns = Tuple(c for p in plans for c in p.columns)
-    all(c -> isnothing(c.preprocess) || c.preprocess.kind === :protect,columns) || return nothing
-    length(unique(c.label for c in columns)) == length(columns) || return nothing
+    all(c -> isnothing(c.preprocess) || c.preprocess.kind === :protect,columns) ||
+        return ineligible("its random-effect columns are transformed")
+    length(unique(c.label for c in columns)) == length(columns) ||
+        return ineligible("its random-effect columns repeat a label")
     maps = [_sb_total_basis_map((column,),columns) for column in design.columns]
     all_priors = _sb_pop_effect_overrides(overrides,target)
     isnothing(all_priors) && (all_priors = fill(nothing,length(design.columns)))
     infos = map(_sb_total_population_prior,all_priors)
-    any(i -> !isnothing(maps[i]) && isnothing(infos[i]),eachindex(maps)) && return nothing
+    unsupported = findfirst(i -> !isnothing(maps[i]) && isnothing(infos[i]),eachindex(maps))
+    isnothing(unsupported) || return ineligible(
+        "the prior on its `$(design.columns[unsupported].label)` coefficient is not Normal, Student-t or Flat")
     matched = findall(i -> !isnothing(maps[i]) && !isnothing(infos[i]),eachindex(maps))
-    isempty(matched) && return nothing
-    rank(hcat((maps[i] for i in matched)...)) == length(matched) || return nothing
+    isempty(matched) &&
+        return ineligible("it has no population coefficient that matches a random-effect column")
+    rank(hcat((maps[i] for i in matched)...)) == length(matched) ||
+        return ineligible("its matched population coefficients are not identified by the random-effect columns")
     indices, levels = first(plans).indices, first(plans).levels
     group_level = _sb_total_group_level_columns(prepared.context.data,target,group,design,
         columns,maps,infos,matched,indices,levels)
@@ -339,14 +359,16 @@ function _sb_total_plan(brmi, prepared, predictor, overrides, buckets, sd_overri
         else
             keys_ = [key for (key,bucket) in buckets if first(key) === plan.id &&
                      any(entry -> first(entry) === target,bucket.per_target)]
-            length(keys_) == 1 || return nothing
+            length(keys_) == 1 || return ineligible("its `|$(plan.id)|` names more than one block")
             key = only(keys_)
-            haskey(ranef_r2d2_overrides,key) && return nothing
-            length(buckets[key].per_target) == 1 || return nothing
+            haskey(ranef_r2d2_overrides,key) && return ineligible("its `|$(plan.id)|` block has an R2D2 prior")
+            length(buckets[key].per_target) == 1 ||
+                return ineligible("its `|$(plan.id)|` block is shared with another predictor")
             sd = get(sd_overrides,key,nothing)
             # The induced total covariance is Gaussian; a Student-t block's
             # per-level mixing weights have no representation in it.
-            !isnothing(sd) && !isnothing(sd.dist) && return nothing
+            !isnothing(sd) && !isnothing(sd.dist) &&
+                return ineligible("its `|$(plan.id)|` block has non-Gaussian random effects")
             append!(scale_priors,isnothing(sd) ? fill(nothing,length(plan.columns)) : sd.sd_prior)
             for i in eachindex(plan.columns)
                 push!(column_ids,plan.id)
@@ -357,15 +379,39 @@ function _sb_total_plan(brmi, prepared, predictor, overrides, buckets, sd_overri
     end
     # Only priors whose emitted support is the ordinary positive half-line
     # can use WHMC's logarithmic scale accessor in this first implementation.
-    for prior in scale_priors
-        isnothing(prior) && continue
-        prior isa ExprColumn || return nothing
-        isempty(getkwargs(prior)) || return nothing
-        getf(prior) in (Normal,LogNormal,Cauchy,Exponential,TDist,LocationScale,Gamma) || return nothing
-        isempty(_sb_prior_references(_sb_effect_prior_arg(prior))) || return nothing
+    for (prior,id) in zip(scale_priors,column_ids)
+        isnothing(prior) || _sb_total_scale_prior(prior) || return ineligible(
+            "its $(isnothing(id) ? "random-effect" : "`sd(:, $id)`") prior `$prior` is not supported " *
+            "(supported: Normal, LogNormal, Cauchy, Exponential, TDist, LocationScale or Gamma " *
+            "with literal arguments, or one of them truncated at zero with no upper bound)")
     end
     (; target,group,columns,design,A,W,group_records,prior_info,scale_priors,column_ids,scale_configured,
        claimed,absorbed,remaining,remaining_priors=all_priors[remaining],passthrough=Tuple(direct),indices,levels)
+end
+
+# A random-effect scale prior exact totals support: a family on the positive
+# half-line with literal arguments, or one truncated at zero with no upper
+# bound. On the `lower=0` scale the truncation only renormalizes by a constant,
+# so the emitted support stays the ordinary positive half-line.
+_sb_total_scale_prior(_prior) = false
+_sb_total_scale_prior(prior::ExprColumn) =
+    _sb_total_scale_prior(getf(prior), getargs(prior), getkwargs(prior), prior)
+_sb_total_scale_prior(f, _args, kwargs, prior) =
+    isempty(kwargs) && f in (Normal,LogNormal,Cauchy,Exponential,TDist,LocationScale,Gamma) &&
+    isempty(_sb_prior_references(_sb_effect_prior_arg(prior)))
+_sb_total_scale_prior(::typeof(truncated), args, kwargs, _prior) =
+    _sb_total_zero_truncation(args, kwargs) && _sb_total_scale_prior(first(args))
+# `truncated(F; lower = 0)` or `truncated(F, 0, Inf)`: a zero lower bound, no upper.
+function _sb_total_zero_truncation(args, kwargs)
+    if length(args) == 3 && isempty(kwargs)
+        lower, upper = args[2], args[3]
+    elseif length(args) == 1 && haskey(kwargs, :lower) && issubset(keys(kwargs), (:lower, :upper))
+        lower, upper = kwargs.lower, get(kwargs, :upper, Inf)
+    else
+        return false
+    end
+    lower, upper = _sb_effect_prior_arg(lower), _sb_effect_prior_arg(upper)
+    lower isa Real && iszero(lower) && upper isa Real && upper == Inf
 end
 
 _sb_total_unit(k,c) = (u = zeros(k,1); u[c] = 1.; u)
@@ -476,42 +522,89 @@ _sb_total_passthrough_term(t) = t isa ExprColumn && getf(t) === offset
 Base.@nospecializeinfer function _sb_plan_totals(@nospecialize(brmi),prepared,overrides,buckets,sd_overrides,selection;
                          cv_groups,centered_groups,r2d2_overrides,ranef_r2d2_overrides,
                          s2z_groups=Set{Symbol}())
-    selection === :auto || selection isa Symbol || selection isa Tuple || selection isa AbstractVector || selection isa AbstractSet ||
-        throw(ArgumentError("total_groups must be :auto, a grouping-factor name, or a collection (empty disables totals)"))
-    requested = selection === :auto ? nothing : Set(selection isa Symbol ? (selection,) : selection)
+    selection === :auto || selection isa Symbol || selection isa Pair || selection isa Tuple ||
+        selection isa AbstractVector || selection isa AbstractSet ||
+        throw(ArgumentError("total_groups must be :auto, a grouping-factor name, `group => predictor(s)`, or a collection of these (empty disables totals)"))
+    requested = selection === :auto ? nothing : _sb_total_request(selection)
     !isnothing(requested) && isempty(requested) && return Dict{Symbol,Any}()
     out = Dict{Symbol,Any}()
+    reasons = Dict{Symbol,String}()
     for predictor in prepared.predictors
         plan = _sb_total_plan(brmi,prepared,predictor,overrides,buckets,sd_overrides;
                              cv_groups,centered_groups,r2d2_overrides,ranef_r2d2_overrides,
                              s2z_groups)
+        plan isa _SBTotalIneligible && (reasons[predictor.name] = plan.reason; continue)
         isnothing(plan) && continue
-        isnothing(requested) || plan.group in requested || continue
+        isnothing(requested) || (haskey(requested,plan.group) &&
+            _sb_total_requested(requested[plan.group],predictor.name)) || continue
         out[predictor.name] = plan
     end
-    # Preserve the existing automatic WHMC route for mixed models: its current
-    # exact scoring plans use one geometry family at a time.
+    # `:auto` keeps the whole model conventional when any block must stay
+    # conventional (user decision 1rar7wo); an explicit `group => predictors`
+    # request is how a model mixes the two representations.
     if isnothing(requested) && any(d -> !haskey(out,d.predictor),prepared.context.group_declarations)
         empty!(out)
     end
-    isnothing(requested) || _sb_check_requested_totals(prepared,requested,out)
+    isnothing(requested) || _sb_check_requested_totals(prepared,requested,out,reasons)
     out
 end
 
-# An explicit request is honoured for every block of each requested group, or
-# refused naming the predictors whose blocks would stay conventional.
-function _sb_check_requested_totals(prepared,requested,out)
+# An explicit request, by group: `nothing` for every block on it (a bare group
+# name), or the predictors whose blocks on it are requested (`group => p` or
+# `group => [p, ...]`).
+function _sb_total_request(selection)
+    requested = Dict{Symbol,Union{Nothing,Set{Symbol}}}()
+    for entry in (selection isa Union{Symbol,Pair} ? (selection,) : selection)
+        _sb_total_request!(requested,entry)
+    end
+    requested
+end
+_sb_total_request!(_requested,entry) = throw(ArgumentError(
+    "total_groups entries must be a grouping-factor name or `group => predictor(s)`; got `$(repr(entry))`"))
+function _sb_total_request!(requested,group::Symbol)
+    isnothing(get(requested,group,nothing)) || _sb_total_request_conflict(group)
+    requested[group] = nothing
+end
+function _sb_total_request!(requested,entry::Pair)
+    group, predictors = first(entry), last(entry)
+    names = predictors isa Symbol ? (predictors,) : predictors
+    group isa Symbol && !isempty(names) && all(p -> p isa Symbol,names) || throw(ArgumentError(
+        "total_groups expects `group => predictor` or `group => [predictor, ...]` with Symbol names; got `$(repr(entry))`"))
+    haskey(requested,group) && isnothing(requested[group]) && _sb_total_request_conflict(group)
+    requested[group] = union(get(requested,group,Set{Symbol}()),names)
+end
+_sb_total_request_conflict(group) = throw(ArgumentError(
+    "total_groups names `$group` both as a whole group and as `$group => predictors`; keep one"))
+
+_sb_total_requested(::Nothing,_predictor) = true
+_sb_total_requested(predictors::Set{Symbol},predictor) = predictor in predictors
+
+# An explicit request is honoured exactly: every block of a group named whole,
+# and each named predictor's block of a `group => predictors` entry. Otherwise it
+# is refused naming each predictor whose block would stay conventional and why.
+function _sb_check_requested_totals(prepared,requested,out,reasons)
     unavailable = String[]
-    for group in sort!(collect(requested);by=string)
-        skipped = unique(d.predictor for d in prepared.context.group_declarations
-            if _s2z_declaration_group(d) === group &&
-               !(haskey(out,d.predictor) && out[d.predictor].group === group))
-        integrated = any(p -> p.group === group,values(out))
-        if !isempty(skipped)
-            push!(unavailable,"$group (predictor$(length(skipped) == 1 ? "" : "s") $(join(("`$p`" for p in skipped),", ")))")
-        elseif !integrated
+    for group in sort!(collect(keys(requested));by=string)
+        on_group = unique(d.predictor for d in prepared.context.group_declarations
+            if _s2z_declaration_group(d) === group)
+        if isempty(on_group)
             push!(unavailable,"$group (no random-effect block)")
+            continue
         end
+        selected = requested[group]
+        problems = String[]
+        for p in (isnothing(selected) ? on_group : sort!(collect(selected);by=string))
+            if !(p in on_group)
+                push!(problems,"`$p` has no random-effect block on `$group`")
+            elseif !(haskey(out,p) && out[p].group === group)
+                push!(problems,"`$p`: $(get(reasons,p,"its block is not eligible"))")
+            end
+        end
+        isempty(problems) && continue
+        eligible = sort!([p for (p,plan) in out if plan.group === group];by=string)
+        hint = isnothing(selected) && !isempty(eligible) ?
+            "; to integrate only the eligible blocks, request `$(repr(group)) => [$(join(repr.(eligible),", "))]`" : ""
+        push!(unavailable,"$group (predictor$(length(problems) == 1 ? "" : "s") $(join(problems,"; "))$hint)")
     end
     isempty(unavailable) || throw(ArgumentError("exact totals are unavailable for group(s) $(join(unavailable, ", ")); requires one independent Gaussian grouping structure, matched population design and supported priors"))
     nothing
