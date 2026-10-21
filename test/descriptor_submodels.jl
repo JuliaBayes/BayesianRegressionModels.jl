@@ -509,8 +509,7 @@ end
           [log_scales, weights]
     @test occursin("binds no `nope`; it binds (:log_scales, :weights, :scales, :doubled)",
                    thrown(() -> brm_output(d, :nope; submodel=:m)))
-    # The typed `=` is bound and emitted as a transformed parameter, but
-    # StanBlocks' `stan_descriptor` lists no output for it (StanBlocks snag
-    # `stan-descriptor-19ef14e6`), so it has no carrier yet.
-    @test_broken any(o -> o.name === :m_doubled, s.outputs)
+    # The typed `=` is a transformed parameter with its own carrier.
+    @test any(o -> o.name === :m_doubled, s.outputs)
+    @test brm_output(d, :doubled; submodel=:m).name === :m_doubled
 end
