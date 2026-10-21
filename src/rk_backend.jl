@@ -436,6 +436,18 @@ end
 _RKEmittedProgram(defs::Vector{Expr}, main::Expr) =
     _RKEmittedProgram(defs, main, Pair{Symbol,Any}[])
 
+# A value computed once, on first use, under its own lock.
+mutable struct _RKOnce
+    const lock::ReentrantLock
+    value::Any
+end
+_RKOnce() = _RKOnce(ReentrantLock(), nothing)
+_RKOnce(value) = _RKOnce(ReentrantLock(), value)
+_rk_once!(compute, once::_RKOnce) = lock(once.lock) do
+    once.value === nothing && (once.value = compute())
+    once.value
+end
+
 """
     RKBRMI(brmi; held_out=())
     RKBRMI(brmi, plan, built)
@@ -456,17 +468,31 @@ The wrapper retains these exact values; the caller must preserve their common
 provenance and `held_out` selection. Retain the bound program separately for
 queries. This constructor supports coordinate transport and its physical check
 on that existing build.
+
+A backend translates its emitted program (definition module and lowering) and
+binds its data once, on first use; every query reads that one binding.
+[`reprocess`](@ref) replays share the fit's translated program and bind only
+their own data.
 """
 struct RKBRMI{P<:BRMI,PL,M}
     parent::P
     plan::PL
     model::M
+    # Translation is per program, binding per data. `program` (the emitted
+    # source and its definition module) is shared with every `reprocess`
+    # replay that emits the same program with the same callables; `bound` is
+    # this backend's own binding of it. Both are filled by the ReactiveKernels
+    # extension on first use.
+    program::_RKOnce
+    bound::_RKOnce
     # The retained parent is the model the plan lowered: `optional(...)`
     # priors and grouping-column addresses are already resolved
     # (`_brm_resolve_prior_addresses`).
-    function RKBRMI(parent::BRMI, plan, model)
+    function RKBRMI(parent::BRMI, plan, model; program::_RKOnce=_RKOnce(),
+            bound::_RKOnce=_RKOnce())
         parent = _brm_resolve_prior_addresses(parent)
-        new{typeof(parent),typeof(plan),typeof(model)}(parent, plan, model)
+        new{typeof(parent),typeof(plan),typeof(model)}(parent, plan, model,
+            program, bound)
     end
 end
 
