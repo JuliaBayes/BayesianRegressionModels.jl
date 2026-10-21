@@ -9,6 +9,30 @@ const BRM = BayesianRegressionModels
 
 include("rk_statistical_gp.jl")
 
+# Stan builtins a kernel cell calls, bound to their Julia equivalents. Stan's
+# conversions between vectors and one-dimensional arrays flatten column-major,
+# as `vec` does. Its ODE solvers run RK's native bridges, which return the
+# solution with one row per output time and one column per state, so
+# `sol[i, k]` and `sol[:, k]` read as in Stan. The untolerated forms take
+# Stan's defaults. Each bridge needs its solver package loaded with SciMLBase
+# and SciMLSensitivity (reactivekernels-use §4g).
+const _STAN_BUILTIN = BRM.StanBlocks.stan.builtin
+BRM._rk_kernel_stan_builtin(::typeof(_STAN_BUILTIN.to_vector)) = vec
+BRM._rk_kernel_stan_builtin(::typeof(_STAN_BUILTIN.to_array_1d)) = vec
+BRM._rk_kernel_stan_builtin(::typeof(_STAN_BUILTIN.ode_rk45_tol)) =
+    ReactiveKernels.rk_ode_rk45_tol
+BRM._rk_kernel_stan_builtin(::typeof(_STAN_BUILTIN.ode_bdf_tol)) =
+    ReactiveKernels.rk_ode_bdf_tol
+BRM._rk_kernel_stan_builtin(::typeof(_STAN_BUILTIN.ode_rk45)) = _rk_ode_rk45
+BRM._rk_kernel_stan_builtin(::typeof(_STAN_BUILTIN.ode_bdf)) = _rk_ode_bdf
+BRM._rk_kernel_function_arguments(::Union{typeof(_STAN_BUILTIN.ode_rk45),
+    typeof(_STAN_BUILTIN.ode_rk45_tol), typeof(_STAN_BUILTIN.ode_bdf),
+    typeof(_STAN_BUILTIN.ode_bdf_tol)}) = (1,)
+_rk_ode_rk45(f::F, y0, t0, ts, args::Vararg{Any,N}) where {F,N} =
+    ReactiveKernels.rk_ode_rk45_tol(f, y0, t0, ts, 1e-6, 1e-6, 10^6, args...)
+_rk_ode_bdf(f::F, y0, t0, ts, args::Vararg{Any,N}) where {F,N} =
+    ReactiveKernels.rk_ode_bdf_tol(f, y0, t0, ts, 1e-6, 1e-6, 10^6, args...)
+
 # The emitted source is the executable contract. Every statistical prior and
 # observation role lowers through the public RKPPL surface; binding supplies
 # the data, with no ordinal or missing-response plan mutations.
