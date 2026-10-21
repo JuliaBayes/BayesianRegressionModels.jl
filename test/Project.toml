@@ -85,8 +85,9 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # (Gaussian observation arguments), fa23fe7f (in-place column reads of a
 # row-gathered joint monotonic output), 609c7a9d (one composed plate cell
 # query per subject), a2268e47 (compact selected-coordinate cell gradients),
-# and 68a77b03 (a design binds without its conditioned response values).
+# 68a77b03 (a design binds without its conditioned response values) and
+# dad59972 (censored and truncated responses bind absent too).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "68a77b032b849b1e395e7a530867ae7b0b17b56b"
+rev = "dad59972b3d6b38c610201484de509adc0eed144"
