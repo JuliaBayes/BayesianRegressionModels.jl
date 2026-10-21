@@ -1,7 +1,9 @@
 # Prior-median starting values, NLME estimates in the model's own names and
 # natural units, and the one-call fit through NLMEEstimation's estimators.
-# RUN: julia --project=<env with NLMEEstimation> test/nlme_fit.jl
+# RUN: julia --threads=2 --project=<env with NLMEEstimation> test/nlme_fit.jl
+# (the second thread interrupts a running saem fit)
 using NLMEEstimation, Random, LinearAlgebra
+using Treebars: with_progress, render_text, request_interrupt!, ProgressInterrupted
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 
 # The plate population-PK fixture with an authored prior on every estimated
@@ -345,4 +347,106 @@ end
     @test e.result.modes == empirical_bayes(f.model, f.result.theta, f.result.sigma,
         f.result.omega; subjects=[3, 1], η0=f.result.eta[[3, 1]]).modes
     @test length.(e.result.modes) == [4, 2]
+end
+
+# The state glyph of every row of a rendered progress tree, keyed by the row's
+# label (the text after the glyph, without counter, message or duration).
+function progress_states(node)
+    rows = Dict{String,Char}()
+    for line in split(render_text(node), '\n')
+        m = match(r"^[│├└─\s]*(\S) (.+?)(?: \(\d+/\d+\))?(?: — .*)?(?: \[[^\]]*\])?(?: · .*)?$", line)
+        m === nothing || (rows[m[2]] = only(m[1]))
+    end
+    rows
+end
+
+@stestset "brm_nlme_fit reports one progress tree" begin
+    brmi = authored_pk(NLME_PLATE_DATA)
+    options = SAEMOptions(iterations=10, burnin=5)
+    tree = Ref{Any}(nothing)
+    f = with_progress(:state; description="fit") do p
+        tree[] = p
+        brm_nlme_fit(brmi, saem; progress=p, rng=Xoshiro(1), options)
+    end
+    rows = progress_states(tree[])
+    # BRM's preparation, the estimator's own node and the EBE pass's, under one
+    # node, all finished.
+    for label in ("BRM NLME fit", "Lower to ReactiveKernels", "Prepare NLME model",
+            "Subject partition", "Pointwise sampler", "Observation attribution",
+            "η Hessian-vector product", "Gaussian observations", "Subject cells",
+            "Population prior", "Starting point", "Estimate (saem)", "SAEM",
+            "MCMC burn-in", "Stochastic approximation", "Posthoc EBEs",
+            "Empirical Bayes (Newton)")
+        @test get(rows, label, nothing) == '✓'
+    end
+    @test all(==('✓'), values(rows))
+    # Reporting changes no number.
+    g = brm_nlme_fit(f.model, saem; rng=Xoshiro(1), options)
+    @test f.result.theta == g.result.theta && f.result.omega == g.result.omega
+    @test f.ebes.modes == g.ebes.modes
+
+    # A prepared model reuses both preparation stages; the EBE pass only
+    # follows saem.
+    e = with_progress(:state; description="posthoc") do p
+        tree[] = p
+        brm_nlme_fit(f.model, empirical_bayes; progress=p)
+    end
+    rows = progress_states(tree[])
+    @test rows["Lower to ReactiveKernels"] == '↺' && rows["Prepare NLME model"] == '↺'
+    @test rows["Starting point"] == '✓' && rows["Estimate (empirical_bayes)"] == '✓'
+    @test !haskey(rows, "Posthoc EBEs") && !haskey(rows, "Subject partition")
+    # A backend symbol starts the fit's own root.
+    @test brm_nlme_fit(f.model, empirical_bayes; progress=:state).ebes.modes ==
+        e.ebes.modes
+    @test_throws ArgumentError brm_nlme_fit(f.model, empirical_bayes; progress="tree")
+
+    # A step a model does not need stays skipped: a nested model has no
+    # Gaussian observation protocol.
+    with_progress(:state; description="nested") do p
+        tree[] = p
+        brm_nlme_model(RKBRMI(nested_model(NESTED_DATA)); ad_backend=NLME_AD,
+            subject_group=:subject, nested_groups=(unit=:obs_subject,), progress=p)
+    end
+    rows = progress_states(tree[])
+    @test rows["Prepare NLME model"] == '✓' && rows["Subject partition"] == '✓'
+    @test rows["Gaussian observations"] == '⊘'
+end
+
+@stestset "an interrupt stops brm_nlme_fit and keeps saem's result" begin
+    brmi = authored_pk(NLME_PLATE_DATA)
+    tree = Ref{Any}(nothing)
+    # Before any result exists, the next preparation phase raises.
+    with_progress(:state; description="stopped") do p
+        tree[] = p
+        request_interrupt!(p)
+        @test_throws ProgressInterrupted brm_nlme_fit(brmi, saem; progress=p)
+    end
+    rows = progress_states(tree[])
+    @test rows["Lower to ReactiveKernels"] == '✗' && rows["Prepare NLME model"] == '⊘'
+    @test rows["Estimate (saem)"] == '⊘' && rows["Posthoc EBEs"] == '⊘'
+
+    # During saem: its last completed iteration is the result, and the EBE pass,
+    # which would raise, is skipped.
+    if Threads.nthreads() < 2
+        @info "skipped: interrupting a running saem needs a second thread (julia --threads=2)"
+    else
+        m = brm_nlme_model(RKBRMI(brmi); ad_backend=NLME_AD)
+        iterations = 20_000
+        f = with_progress(:state; description="interrupted") do p
+            tree[] = p
+            task = Threads.@spawn brm_nlme_fit(m, saem; progress=p, rng=Xoshiro(1),
+                options=SAEMOptions(; iterations, burnin=5))
+            deadline = time() + 600
+            while get(progress_states(p), "Stochastic approximation", nothing) != '▶' &&
+                    !istaskdone(task) && time() < deadline
+                sleep(0.05)
+            end
+            request_interrupt!(p)
+            fetch(task)
+        end
+        @test f.result.interrupted && 0 < f.result.iterations < iterations
+        @test f.ebes === nothing && f.estimates.eta === nothing
+        rows = progress_states(tree[])
+        @test rows["Estimate (saem)"] == '✓' && rows["Posthoc EBEs"] == '⊘'
+    end
 end
