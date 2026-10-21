@@ -206,8 +206,23 @@ end
     @test occursin("\nm = mu + x_loc\n", shown_assigned)
     @test startswith(shown_assigned, "x_loc = constant(mean(x) + 1)\n")
 
+    # A Symbol keyword value prints as the literal it is, on the built model and
+    # on the builder (snag print-a-built-mo-d1f838f3).
+    symbol_source = "sigma ~ Exponential(1)\n" *
+        "mu ~ 1 + x + hsgp(x; k=5, cov=:exp_quad, extrapolate=:clamp)\n" *
+        "y ~ Normal(mu, sigma)"
+    symbol_builder = @brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + hsgp(x; k=5, cov=:exp_quad, extrapolate=:clamp)
+        y ~ Normal(mu, sigma)
+    end
+    symbols = symbol_builder(FAMILY_DATA)
+    @test sprint(show, symbol_builder) == symbol_source
+    @test sprint(show, symbols) == symbol_source
+    @test sprint(show, structure_of(symbols)) == symbol_source
+
     # The printed source is the model: re-parsing it gives the same program.
-    for m in (model, terms, assigned)
+    for m in (model, terms, assigned, symbols)
         reparsed = Core.eval(@__MODULE__,
             BRM._brm(Meta.parse("begin\n" * sprint(show, m) * "\nend"); df=FAMILY_DATA))
         @test sb_code(reparsed) == sb_code(m)

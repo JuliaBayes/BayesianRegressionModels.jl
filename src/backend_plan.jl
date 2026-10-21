@@ -1853,6 +1853,22 @@ _brm_frozen_replay() = get(task_local_storage(), _BRM_FROZEN_REPLAY, nothing)
 _brm_with_frozen_replay(f, frozen::_BRMFrozenReplay) =
     task_local_storage(f, _BRM_FROZEN_REPLAY, frozen)
 
+# A response the replay data omit (a prediction design). It answers the
+# training column's element type, so planning takes the fit's route, and
+# holds no values: reading its values or its length is an error. The RK
+# planner leaves it unbound (`_rk_bind_source_column!`), and RKPPL binds the
+# observation without a value.
+struct _BRMAbsentResponse{T} <: AbstractVector{T}
+    name::Symbol
+end
+_brm_absent_read(x::_BRMAbsentResponse) = error(
+    "RK reprocess: `new_data` omits response `$(x.name)`, which this model " *
+    "reads while planning the replay; supply `$(x.name)`")
+Base.size(x::_BRMAbsentResponse) = _brm_absent_read(x)
+Base.getindex(x::_BRMAbsentResponse, ::Int) = _brm_absent_read(x)
+Base.show(io::IO, x::_BRMAbsentResponse) = print(io, "<absent response `", x.name, "`>")
+Base.show(io::IO, ::MIME"text/plain", x::_BRMAbsentResponse) = show(io, x)
+
 function _brm_fit_source(name::Symbol, values)
     frozen = _brm_frozen_replay()
     frozen === nothing && return values

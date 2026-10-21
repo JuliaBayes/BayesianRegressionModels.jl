@@ -279,7 +279,7 @@ function _sb_total_plan(brmi, prepared, predictor, overrides, buckets, sd_overri
     haskey(r2d2_overrides,target) && return nothing
     pop, ran, direct = Any[], Any[], Any[]
     foreach(t -> _sb_classify_term!(t,pop,ran,direct), _sb_terms(predictor.expression))
-    isempty(direct) || return nothing
+    all(_sb_total_passthrough_term,direct) || return nothing
     obs_name = get(prepared.context.target_obs,target,nothing)
     design = _brm_population_design(target,Tuple(pop),prepared.context.data,obs_name)
     if isnothing(design) && (isnothing(obs_name) || !haskey(prepared.context.data,obs_name))
@@ -365,7 +365,7 @@ function _sb_total_plan(brmi, prepared, predictor, overrides, buckets, sd_overri
         isempty(_sb_prior_references(_sb_effect_prior_arg(prior))) || return nothing
     end
     (; target,group,columns,design,A,W,group_records,prior_info,scale_priors,column_ids,scale_configured,
-       claimed,absorbed,remaining,remaining_priors=all_priors[remaining],indices,levels)
+       claimed,absorbed,remaining,remaining_priors=all_priors[remaining],passthrough=Tuple(direct),indices,levels)
 end
 
 _sb_total_unit(k,c) = (u = zeros(k,1); u[c] = 1.; u)
@@ -468,6 +468,11 @@ function _sb_total_group_level_columns(data,target,group,design,columns,maps,inf
     out
 end
 
+# A direct term the totals' predictor emits unchanged beside them. An offset adds
+# a known summand (data or a model value) and shares no coefficient with the
+# totals, so integrating the population coefficients stays exact.
+_sb_total_passthrough_term(t) = t isa ExprColumn && getf(t) === offset
+
 Base.@nospecializeinfer function _sb_plan_totals(@nospecialize(brmi),prepared,overrides,buckets,sd_overrides,selection;
                          cv_groups,centered_groups,r2d2_overrides,ranef_r2d2_overrides,
                          s2z_groups=Set{Symbol}())
@@ -489,11 +494,27 @@ Base.@nospecializeinfer function _sb_plan_totals(@nospecialize(brmi),prepared,ov
     if isnothing(requested) && any(d -> !haskey(out,d.predictor),prepared.context.group_declarations)
         empty!(out)
     end
-    if !isnothing(requested)
-        missing = setdiff(requested,Set(p.group for p in values(out)))
-        isempty(missing) || throw(ArgumentError("exact totals are unavailable for group(s) $(join(missing, ", ")); requires one independent Gaussian grouping structure, matched population design and supported priors"))
-    end
+    isnothing(requested) || _sb_check_requested_totals(prepared,requested,out)
     out
+end
+
+# An explicit request is honoured for every block of each requested group, or
+# refused naming the predictors whose blocks would stay conventional.
+function _sb_check_requested_totals(prepared,requested,out)
+    unavailable = String[]
+    for group in sort!(collect(requested);by=string)
+        skipped = unique(d.predictor for d in prepared.context.group_declarations
+            if _s2z_declaration_group(d) === group &&
+               !(haskey(out,d.predictor) && out[d.predictor].group === group))
+        integrated = any(p -> p.group === group,values(out))
+        if !isempty(skipped)
+            push!(unavailable,"$group (predictor$(length(skipped) == 1 ? "" : "s") $(join(("`$p`" for p in skipped),", ")))")
+        elseif !integrated
+            push!(unavailable,"$group (no random-effect block)")
+        end
+    end
+    isempty(unavailable) || throw(ArgumentError("exact totals are unavailable for group(s) $(join(unavailable, ", ")); requires one independent Gaussian grouping structure, matched population design and supported priors"))
+    nothing
 end
 
 # The random-effect design `Z` and basis `A` of the block on `predictor`, which
@@ -565,7 +586,7 @@ function _sb_emit_total!(stmts,data,target,plan;mod::Module=@__MODULE__)
                     _sb_shared_population_column!(data,c) for c in plan.columns]
     zn = _sb_total_design_name(suffix)
     push!(stmts,:($zn = $(Expr(:call,:hcat,zcols...))))
-    total_lp = _sb_total_location(total,idx,zn)
+    summands = Any[_sb_total_location(total,idx,zn)]
     if !isempty(plan.remaining)
         remaining_cols = Any[isnothing(plan.design.columns[c].source) ? :(rep_vector(1.,num_elements($idx))) :
             _sb_shared_population_column!(data,plan.design.columns[c]) for c in plan.remaining]
@@ -578,9 +599,12 @@ function _sb_emit_total!(stmts,data,target,plan;mod::Module=@__MODULE__)
         data[_SB_BINDINGS_KEY][pop] = (;role=:population_effect,logical=plan.target,family=nothing,
             population_columns=Tuple(plan.design.columns[c].label for c in plan.remaining),
             design_columns=Tuple(_sb_design_column_record(plan.design.columns[c]) for c in plan.remaining))
-        total_lp = :($total_lp + $pop)
+        push!(summands,pop)
     end
-    push!(stmts,:($target = $total_lp))
+    for t in plan.passthrough
+        _sb_emit_direct_expr!(stmts,data,target,getf(t),t,summands;mod)
+    end
+    push!(stmts,:($target = $(length(summands) == 1 ? only(summands) : Expr(:call,:+,summands...))))
     block = TotalEffectBlock(plan.target,plan.group,total,Symbol(tau,:_tau),beta,deviations,idx,ng,
         Tuple(c.label for c in plan.columns),Tuple(plan.design.columns[c].label for c in plan.absorbed),
         Tuple(r.column.label for r in plan.group_records),

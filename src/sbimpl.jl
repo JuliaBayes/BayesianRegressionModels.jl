@@ -3131,11 +3131,13 @@ resolver finds your locally-defined submodels.
 totals when the exact Gaussian conditional construction is available. It supports
 one grouping structure per predictor, independent random-effect margins, and
 Normal, Flat, or Student-t population priors (Student-t uses its exact Gaussian
-scale mixture). Unmatched fixed effects remain explicit. Original population
+scale mixture). Unmatched fixed effects and `offset(...)` terms remain explicit
+summands. Original population
 coefficients and deviations are recovered in generated quantities. Inspect
 [`total_effect_blocks`](@ref), or use `total_groups=()` for the conventional
-representation. Naming a group explicitly requires eligibility and errors
-otherwise. Correlated, crossed, stratified, multi-membership and R2D2 blocks
+representation. Naming a group explicitly requires every block of that group to
+be eligible and errors otherwise, naming the predictors whose blocks would stay
+conventional. Correlated, crossed, stratified, multi-membership and R2D2 blocks
 retain conventional emission under `:auto`.
 
 `s2z_groups` is an opt-in collection of grouping-factor names (default `()`,

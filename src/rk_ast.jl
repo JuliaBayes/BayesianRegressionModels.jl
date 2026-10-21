@@ -99,13 +99,32 @@ end
 
 # A planned column can describe geometry while its emitted assignment owns
 # the executable value. Bind only source inputs, so a cached preparation can
-# never shadow that assignment on replay or rebinding.
+# never shadow that assignment on replay or rebinding. A column no statement
+# reads (a kernel's port for a response its cells observe directly) is no
+# input either: binding it would make it a data argument of the program.
 function _rk_source_data_columns(plan, emitted)
     computed = Set{Symbol}()
     for statement in emitted.main.args
         _rk_source_assignments!(computed, statement)
     end
-    Dict{Symbol,Any}(name => value for (name, value) in plan.columns if !(name in computed))
+    read = _rk_source_symbols!(Set{Symbol}(), [emitted.defs; emitted.main])
+    columns = Dict{Symbol,Any}()
+    for (name, value) in plan.columns
+        (name in computed || !(name in read)) && continue
+        _rk_bind_source_column!(columns, name, value, plan)
+    end
+    columns
+end
+
+_rk_bind_source_column!(columns, name, value, plan) = (columns[name] = value; columns)
+# An absent response (a `reprocess` design without it) is never bound: RKPPL
+# keeps its observation and leaves the value out of every query's inputs
+# (rkppl-use §14, "Predicting without the response").
+function _rk_bind_source_column!(columns, name, value::_BRMAbsentResponse, plan)
+    name in _rk_observed_names(plan) || error(
+        "RK reprocess: `new_data` omits response `$(value.name)`, which this " *
+        "model also reads as `$name`; supply `$(value.name)`")
+    columns
 end
 
 function _rk_source_assignments!(names, statement)
