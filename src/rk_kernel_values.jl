@@ -212,6 +212,17 @@ function _rk_kernel_observation_modifier(observation, distribution, bound_names)
         bound(:lower), bound(:upper))
 end
 
+# A ragged join's values in partition order, and grouped per subject. An
+# absent replay response stays absent.
+_rk_join_values(raw, rows) = raw[brm_flatten_cells(rows)]
+_rk_join_values(raw::_BRMAbsentResponse, rows) = raw
+_rk_gather_rows(values, rows) = [values[r] for r in rows]
+_rk_gather_rows(values::_BRMAbsentResponse, rows) = values
+
+# Each data input's subject count; an absent replay response has none.
+_rk_push_outer_length!(lengths, values) = push!(lengths, length(values))
+_rk_push_outer_length!(lengths, ::_BRMAbsentResponse) = lengths
+
 Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BRMI), program, name, rhs)
     parts = _sb_kernel_lambda_parts(first(getargs(rhs)))
     parts === nothing && error("RK backend: kernel `$name` requires an inline cell body")
@@ -282,7 +293,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             values = parent(parent(argument))
             values isa AbstractVector || error("RK backend: kernel input `$source` must be an array")
             columns[source] = values
-            push!(outer_lengths, length(values))
+            _rk_push_outer_length!(outer_lengths, values)
             push!(inputs, (; source, kind=:element, rows=nothing, column))
         elseif argument isa NamedColumn && parent(argument) isa ExprColumn
             push!(inputs, (; source=_rk_kernel_column_name(argument), kind=:element,
@@ -405,7 +416,7 @@ function _rk_nested_kernel_cells(observation, layout, kernels, columns, paramete
     gathered = Set{Symbol}()
     context = (; kernels, columns, parameters, name=observation.name,
         lengths=layout.lengths, joined=layout.rows === nothing ? nothing :
-            length(layout.values), gathered)
+            sum(length, layout.rows; init=0), gathered)
     _rk_nested_law_cells!(cells, distribution.callable, distribution, context) || return nothing
     modifier === nothing && return (; cells, gathered)
     all(bound -> bound === nothing ||
@@ -420,11 +431,10 @@ end
 # same planning; RKPPL observes a bounded (censored, truncated) response only
 # from a bound column, never from a derived definition.
 function _rk_prepare_nested_join!(columns, taken, observation, layout, nested, raw)
-    gather(values) = [values[rows] for rows in layout.rows]
-    columns[observation.name] = gather(raw)
+    columns[observation.name] = _rk_gather_rows(raw, layout.rows)
     for name in sort!(collect(nested.gathered))
         key = _rk_ast_fresh_name(string(observation.name, "_cells_", name), taken)
-        columns[key] = gather(columns[name])
+        columns[key] = _rk_gather_rows(columns[name], layout.rows)
         nested.cells[name] = key
     end
     nested.cells
@@ -433,6 +443,9 @@ end
 # Data bounds read per subject are validated as the flattened route validates
 # them, on their concatenated values. `response` holds the observed values in
 # the bounds' row order: one array per subject, or a join's flat column.
+# An absent replay response has no values to compare with its bounds; RKPPL
+# still validates the bounds themselves.
+_rk_validate_nested_bounds(observation, ::_BRMAbsentResponse, data) = nothing
 function _rk_validate_nested_bounds(observation, response, data)
     modifier = observation.modifier
     modifier === nothing && return
@@ -537,17 +550,18 @@ function _rk_kernel_observed_layout(observation, kernels)
         length(matches) == 1 || error(
             "RK backend: response `$(observation.name)` needs one kernel subject axis for its ragged join")
         partition = _brm_kernel_ragged_rows(value, group, only(matches).group_values; prefix="RK backend")
-        raw = parent(parent(value))
-        values = raw[brm_flatten_cells(partition.rows)]
+        values = _rk_join_values(parent(parent(value)), partition.rows)
         return (; values, rows=partition.rows, lengths=length.(partition.rows))
     end
-    response = observation.response
-    if response isa AbstractVector{<:AbstractVector}
-        return (; values=brm_flatten_cells(response),
-            rows=nothing, lengths=length.(response))
-    end
-    (; values=response, rows=nothing, lengths=nothing)
+    _rk_observed_layout(observation.response)
 end
+_rk_observed_layout(response) = (; values=response, rows=nothing, lengths=nothing)
+_rk_observed_layout(response::AbstractVector{<:AbstractVector}) =
+    (; values=brm_flatten_cells(response), rows=nothing, lengths=length.(response))
+# An absent array-per-index response keeps the fitted nested route; each cell
+# takes its shape from the data it reads, so it has no lengths to check.
+_rk_observed_layout(response::_BRMAbsentResponse{<:AbstractVector}) =
+    (; values=response, rows=nothing, lengths=response)
 
 # The partition fixes likelihood geometry; its values are produced from the
 # original response port by the emitted numerical graph. A ragged join's row
@@ -596,6 +610,7 @@ _rk_observation_argument_rows!(defs, statements, taken, observation, layout,
 
 # Grouped argument data broadcasts against its response subject by subject: one
 # array per subject, each as long as the response's or a single value.
+_rk_check_argument_groups(response, argument, raw, ::_BRMAbsentResponse) = nothing
 function _rk_check_argument_groups(response, argument, raw, expected)
     lengths = length.(raw)
     length(lengths) == length(expected) &&
@@ -809,7 +824,7 @@ Base.@nospecializeinfer function _brm_rk_composed_kernel_plan(@nospecialize(brmi
             # The response stays one array per subject. Each argument and the
             # weight is read per subject or shared, as the cell reads it.
             response = observation.input.kind === :gather ?
-                [raw[rows] for rows in kernel.columns[observation.input.rows]] : raw
+                _rk_gather_rows(raw, kernel.columns[observation.input.rows]) : raw
             plan.columns[observation.source] = response
             routes = [_rk_kernel_cell_argument(kernel, name, argument) for (name, argument)
                 in zip(observation.argument_names, observation.arguments)]
