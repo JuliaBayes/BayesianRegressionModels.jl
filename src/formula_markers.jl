@@ -165,8 +165,23 @@ first and then returned.
 A cell needs no indexed output. When its only indexed statements are
 observations (`dv[i] ~ Normal(cp, sigma)` after a bare `cp = ...`), it has no
 collected result: `cp` stays a cell local and nothing is stored at model scope.
-RKBRMI builds such a cell; SBBRMI refuses it until StanBlocks has a plate with no
-collected result.
+Both backends build such a cell.
+
+A plate over long-format rows iterates [`groups`](@ref), an ordinary function:
+in `@plate for p in groups(g; order = t)`, `p` is one group's indices (one
+cell per distinct label of the data vector `g`, in sorted order, its indices in
+ascending `t`), so a read `x[p]` is `x` at those indices (a response, a data
+vector, or a predictor indexed like `g`), as the same Julia loop reads it. Values shared by every row are read bare. Such a cell observes, and
+collects no result (`loc[p] = …`): nothing outside it could tell which group a
+collected value belongs to.
+
+A cell may hold a `@scan begin … end` recurrence, one per cell: seeds by literal
+index, then one `for` loop of steps reading earlier entries at a fixed lag. A
+carried array the scan writes (`h[t] ~ Normal(phi * h[t - 1], s)`) is a latent
+state per cell; observing the cell's own response entry by entry
+(`y[i][1] ~ …`, `y[i][t] ~ Normal(… y[i][t - 1] …)`) gives each entry's
+conditional density, and with `y` omitted the block draws whole trajectories.
+[`AR1Normal`](@ref) observes a group's series under one such recurrence.
 
 Indexed inputs split by kind. A raw data column on the plate's own
 one-row-per-subject frame is gathered into a per-group slice. A column or
@@ -262,12 +277,17 @@ end
 ```
 
 Rows join their cell by label, so the totals' frame may list its districts in
-any order. A plate with no random-effect predictor and no `cells` is refused:
-matching rows to cells by position — `group`'s first appearance — cannot be
-checked against a per-cell column, which would then bind to the wrong cells
-silently. Every `ragged(...)` input of one plate names the same `cells`; their
+any order. Every `ragged(...)` input of one plate names the same `cells`; their
 `group` columns may differ. Under a random-effect predictor the cells are its
 grouping, so `cells` may be named only as that same column.
+
+A plate with no random-effect predictor and no `cells` is refused: matching rows
+to cells by position cannot be checked against a per-cell column, which would
+then bind to the wrong cells silently. A plate over long-format rows with
+nothing per cell iterates its groups instead,
+`@plate for p in groups(group; order = time)` (see [`groups`](@ref)): one cell
+per distinct label of `group`, each read `x[p]` the group's rows in `time`
+order.
 
 Why the grouping is an explicit argument rather than derived: an ordinary
 per-subject LP is grouped by the random-effect grouping that labels its rows
@@ -303,7 +323,10 @@ rewrite (`_brm_plate_kernel`, macro.jl), kernel-argument lowering lives in
 """
 ragged
 
-_check_term_kwargs(::typeof(ragged), kwargs) = all(==(:into), keys(kwargs)) || error(
+# `order=` is the kernel positional a `@plate for p in groups(g; order = t)`
+# header lowers to; it is not written on `ragged` itself.
+_check_term_kwargs(::typeof(ragged), kwargs) =
+    all(in((:into, :order)), keys(kwargs)) || error(
     "@brm: ragged(...) takes only the `into=` keyword, got $(keys(kwargs)). The ",
     "spelling is `ragged(<linear predictor or flat column>, <grouping column>)`, ",
     "`ragged(x, group => cells)` with a cell label column `cells`, or ",

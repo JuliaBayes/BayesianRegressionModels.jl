@@ -89,6 +89,8 @@ BayesianRegressionModels.mo
 BayesianRegressionModels.mo1
 BayesianRegressionModels.kernel
 BayesianRegressionModels.ragged
+BayesianRegressionModels.groups
+BayesianRegressionModels.AR1Normal
 ```
 
 `truncated` and `censored` are re-exported unchanged from Distributions.jl and
