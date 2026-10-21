@@ -5068,8 +5068,11 @@ _sb_same_raw_ref(a::NamedTuple, b::NamedTuple) =
         ab -> _sb_same_raw_ref(ab...), zip(values(a), values(b)))
 
 function _sb_resample_preproc(training, fresh, groups)
-    training_keys = Set(keys(training))
-    fresh_keys = Set(keys(fresh))
+    # A consumer term's record is the re-emission's own call on the new frame,
+    # which the replay re-invokes; an artifact built before those records
+    # existed has none.
+    training_keys = Set(k for (k, e) in training if e.kind !== :submodel_hook)
+    fresh_keys = Set(k for (k, e) in fresh if e.kind !== :submodel_hook)
     training_keys == fresh_keys || error(
         "sbimpl: resample replay: rebuilding on the new DataFrame changed the " *
         "preprocessed model shape (training-only keys: " *
@@ -5086,6 +5089,9 @@ function _sb_resample_preproc(training, fresh, groups)
             "$(new.kind)/$(repr(new.raw_ref)); the rebuilt formula is not the " *
             "fitted model.")
         out[key] = old.kind === :group_index && old.raw_ref in groups ? new : old
+    end
+    for (key, e) in fresh
+        e.kind === :submodel_hook && (out[key] = e)
     end
     out
 end
@@ -5621,6 +5627,85 @@ function _sb_total_check_group_design(e::PreprocEntry, df)
     nothing
 end
 
+# The scalar data columns a recorded term reads (a `name = constant(expr)` or a
+# scalar field of the data), by name, with their fitted values.
+_sb_hook_scalar_columns!(out, _x) = out
+_sb_hook_scalar_columns!(out, x::Union{Tuple,NamedTuple}) =
+    (foreach(v -> _sb_hook_scalar_columns!(out, v), x); out)
+_sb_hook_scalar_columns!(out, x::ExprColumn) =
+    (_sb_hook_scalar_columns!(out, getargs(x));
+     _sb_hook_scalar_columns!(out, values(getkwargs(x))); out)
+function _sb_hook_scalar_columns!(out, x::NamedColumn)
+    payload = parent(x)
+    if payload isa DataColumn
+        value = parent(payload)
+        value isa AbstractArray || (out[name(x)] = value)
+    elseif !(payload isa MissingColumn)
+        _sb_hook_scalar_columns!(out, payload)
+    end
+    out
+end
+
+# Re-invoke one recorded consumer term (`_sb_claim_submodel!`) on the replay
+# frame `df` and take every key it wrote from that call. Its vector columns
+# come from `df`. Its scalar columns follow the rule for the model's other
+# scalars: the fitted value, or with `freeze=false` the constant re-evaluated
+# in step 1 and a scalar field `df` supplies. The fitted program applies only
+# if the hook emits the same statements and writes the same keys.
+function _sb_reprocess_submodel_hook!(new_data, new_preproc, handled, key::Symbol,
+                                      e::PreprocEntry, sb::SBBRMI, df, freeze::Bool)
+    record = e.const_
+    term = "`$(record.target) ~ $(record.f isa Function ? nameof(record.f) : record.f)(...)`"
+    scalars = _sb_hook_scalar_columns!(Dict{Symbol,Any}(), record.rhs)
+    if !freeze
+        for k in collect(keys(scalars))
+            fitted = get(sb.preproc, k, nothing)
+            if fitted isa PreprocEntry && fitted.kind === :constant
+                scalars[k] = new_data[k]
+            elseif _sb_df_has_column(df, k)
+                delete!(scalars, k)
+            end
+        end
+    end
+    rhs = try
+        _brm_rebind_value(record.rhs, _BRMReplayData(df, scalars))
+    catch err
+        err isa ErrorException || rethrow()
+        error("sbimpl: reprocess: the custom term $term cannot read its columns ",
+              "from the new DataFrame: ", err.msg)
+    end
+    stmts = Any[]
+    scratch = Dict{Symbol,Any}(new_data)
+    before = Dict{Symbol,Any}(scratch)
+    claimed = _sb_submodel_rhs!(stmts, scratch, record.target, record.f, rhs)
+    claimed === nothing && error(
+        "sbimpl: reprocess: the custom term $term no longer claims its binding ",
+        "on the new DataFrame (its `_sb_submodel_rhs!` method returned `nothing`).")
+    stmts == record.statements || error(
+        "sbimpl: reprocess: the custom term $term emits different statements on ",
+        "the new DataFrame, so the fitted Stan program does not apply to it.\n",
+        "fit:    ", join(record.statements, "; "), "\n",
+        "replay: ", join(stmts, "; "), "\n",
+        "Rebuild the SBBRMI from the new DataFrame (or use ",
+        "`generative_plan(plan, new_df)`) instead.")
+    written = Set{Symbol}(k for (k, v) in scratch if !haskey(before, k) || before[k] !== v)
+    for k in record.keys
+        # Dropped from the Stan data at build, or replayed by its own record.
+        haskey(sb.data, k) || continue
+        haskey(sb.preproc, k) && continue
+        k in written || error(
+            "sbimpl: reprocess: the custom term $term wrote data key `$k` for the ",
+            "fit but not on the new DataFrame, so the fitted Stan program does not ",
+            "apply to it.")
+        new_data[k] = scratch[k]
+        push!(handled, k)
+    end
+    new_preproc[key] = PreprocEntry(:submodel_hook,
+        _SBSubmodelHookCall(record.f, record.target, rhs, record.keys, record.statements),
+        e.raw_ref, e.dim_coupled)
+    nothing
+end
+
 """
     reprocess(sb::SBBRMI, new_df; freeze_constants=true,
               resample_groups=(), resample_covariates=(),
@@ -5672,7 +5757,10 @@ formula-boundary `ragged(response, group)` observations and their data-backed
 flat source column into the kernel's per-subject row order), continuous
 × continuous interaction columns, typed observation weights, categorical
 outcomes, and pass-through raw columns (plain data, `me` obs values, `ar`
-time). A derived non-vector key with no preprocessing record is carried through
+time). A consumer `_sb_submodel_rhs!` term is called again on `new_df`, and
+every data key it writes comes from that call (its scalar keyword columns
+follow `freeze_constants`); the call must emit the fitted statements. A
+derived non-vector key with no preprocessing record is carried through
 when the replay DataFrame supplies its raw column; StanBlocks then retraces the
 derived carrier (for example a vector-of-vectors column becomes the ragged
 `mem`/`ends` data). Frozen replay errors loudly on an unseen fitted level.
@@ -5711,8 +5799,15 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     # 1. Regenerate every independent transform-output key from its preproc
     #    record. Interactions wait until their raw/transformed operands exist.
     for (key, e) in sb.preproc
-        e.kind === :interaction && continue
+        e.kind in (:interaction, :submodel_hook) && continue
         _sb_reprocess_entry!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
+    end
+    # 1b. Re-invoke each consumer `_sb_submodel_rhs!` term on the new frame; it
+    #     re-derives every key it wrote, reading constants regenerated in step 1.
+    for (key, e) in sb.preproc
+        e.kind === :submodel_hook || continue
+        _sb_reprocess_submodel_hook!(new_data, new_preproc, handled, key, e, sb,
+                                     new_df, freeze_constants)
     end
     # 2. Account for every remaining old data key: pass-through raw columns, or
     #    frozen structural scalars; ERROR on any unaccounted derived structure.
@@ -5735,7 +5830,10 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
                     "reprocess covers the Julia-side predictor transforms ",
                     "(zscale/standardize/center/factor/mo/s/t2/gp/hsgp), protect/implicit-fn ",
                     "columns, typed `mm(...)`, plain random-effects group indices, ",
-                    "kernel ragged inputs, and pass-through raw columns. A key BRM ",
+                    "kernel ragged inputs, keys a custom `_sb_submodel_rhs!` term ",
+                    "writes (re-derived by calling it again; an SBBRMI built by a BRM ",
+                    "that did not record those calls must be rebuilt once), and ",
+                    "pass-through raw columns. A key BRM ",
                     "cannot re-derive — a kernel(...) cell capture or a column your own ",
                     "preprocessing computes outside BRM (e.g. a per-subject index) — is ",
                     "CARRIED THROUGH when you include it, recomputed for the replay ",
@@ -5902,8 +6000,60 @@ that reads `g` while `data[g]` holds string labels is refused at build:
 store an integer coding under `g`, or read `g_idx`. The derived index
 names belong to BRM: if one already holds a different value when BRM
 writes it, the build is refused (`_sb_set_group_index_datum!`).
+
+**Replay.** [`reprocess`](@ref) calls the hook again on the replay
+DataFrame and takes every data key it writes from that call, so a key the
+hook derives from the term's columns (a schedule, an index, a count) is
+re-derived for the new rows. Its vector columns come from the new
+DataFrame; a scalar keyword column keeps the fitted value unless
+`freeze_constants=false`. A value the hook computes from the data itself
+is re-computed, so a calibration that must keep its fitted value is a
+`name = constant(expr)` passed to the term as a keyword. On the replay
+the hook must emit the statements it emitted for the fit.
 """
 _sb_submodel_rhs!(stmts, data, target, f, rhs) = nothing
+
+# A consumer term's data is computed inside its hook, where BRM records no
+# transform it could re-run on new rows. A claimed call is recorded instead
+# (`:submodel_hook`, under a key that is never Stan data), with the data keys
+# the call wrote and the statements it emitted; `reprocess` re-invokes it
+# (`_sb_reprocess_submodel_hook!`). BRM's own `kernel(...)` term records each
+# key's provenance itself.
+_sb_submodel_hook_key(target::Symbol) = Symbol(:__sb_submodel_hook__, target)
+_sb_records_submodel_hook(_f) = true
+_sb_records_submodel_hook(::typeof(kernel)) = false
+
+# The record is read-only once made, so copies of a plan share it: its
+# statements interpolate consumer objects (a `@slic` model holds its module),
+# which `deepcopy` refuses.
+struct _SBSubmodelHookCall
+    f::Any
+    target::Symbol
+    rhs::Any
+    keys::Tuple{Vararg{Symbol}}
+    statements::Vector{Any}
+end
+Base.deepcopy_internal(x::_SBSubmodelHookCall, ::IdDict) = x
+
+_sb_copy_statement(x::Expr) = copy(x)
+_sb_copy_statement(x) = x
+
+function _sb_claim_submodel!(stmts, data, target::Symbol, f, rhs)
+    _sb_records_submodel_hook(f) || return _sb_submodel_rhs!(stmts, data, target, f, rhs)
+    before = Dict{Symbol,Any}(data)
+    first_statement = length(stmts) + 1
+    claimed = _sb_submodel_rhs!(stmts, data, target, f, rhs)
+    claimed === nothing && return nothing
+    written = sort!(Symbol[k for (k, v) in data
+                           if !haskey(before, k) || before[k] !== v])
+    # The emitted statements belong to the model body; the record owns a copy.
+    statements = Any[_sb_copy_statement(s) for s in stmts[first_statement:end]]
+    _sb_record_preproc!(data, _sb_submodel_hook_key(target), PreprocEntry(
+        :submodel_hook,
+        _SBSubmodelHookCall(f, target, rhs, Tuple(written), statements),
+        target, true))
+    claimed
+end
 
 # ============================================================================
 # do-block kernel surface (decision z9vkkf, User chose B): the consumer writes the
@@ -7807,7 +7957,7 @@ _sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs;
                 return
             end
         end
-        _sb_submodel_rhs!(stmts, data, key, f, rhs_e) !== nothing && return
+        _sb_claim_submodel!(stmts, data, key, f, rhs_e) !== nothing && return
         # Vector-valued parameter priors first: they need `data` (a multivariate
         # family's hyperparameters carry the declared size), so they cannot ride
         # the four-argument scalar seam below.
