@@ -699,42 +699,47 @@ whose subject and observation columns have different lengths.
 ### Per-group recurrences over long-format rows
 
 With one row per observation and a grouping column, a plate iterates
-[`groups`](@ref)`(probe; order = day)`: each probe's indices, in day order. A per-group AR(1) residual process is one statement in the cell:
+[`groups`](@ref)`(probe; order = day)`: each probe's indices, in day order. A
+per-group AR(1) residual process is one statement in the cell:
 
-```julia
-@brm df begin                                   # one row per probe and day
-    mu ~ 1 + c1 + s1 + trend + (1 | probe)
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+probe_series = (@brm begin
+    mu ~ 1 + x + (1 | probe)
     sigma ~ Exponential(1)
     phi ~ Uniform(-1, 1)
-    @plate for p in groups(probe; order = day)  # one cell per probe, rows in day order
+    @plate for p in groups(probe; order = day)  # one cell per probe, in day order
         y[p] ~ AR1Normal(mu[p], sigma, phi; time = day[p])
     end
-end
+end)((;
+    # One entry per probe and day, in any order; probe a skips day 3.
+    probe=["b", "a", "b", "a", "b", "a"],
+    day=[2, 1, 1, 2, 3, 4],
+    x=[0.3, -0.2, 0.1, 0.4, -0.1, 0.0],
+    y=[0.5, -0.1, 0.2, 0.3, 0.1, 0.0],
+))
+""", :probe_series; title="Per-group AR(1) residuals", require_stan=true)
 ```
 
 `p` is the probe's indices, so `x[p]` is `x` at those indices, in `day` order,
 as the same Julia loop reads it; shared values are read bare. `AR1Normal` is
 the exact likelihood of AR(1) residuals observed on the recorded days: a gap
-of `k` days uses `phi^k`. Without `time`, consecutive rows are one step apart.
-The grouping is the plate's: there is no `by=` keyword.
+of `k` days uses `phi^k`. Without `time`, consecutive entries are one step
+apart. The grouping is the plate's: there is no `by=` keyword.
 
-For now `@brm` evaluates the statement as the `@scan` recurrence it states, and
-that recurrence is also how to write another family, a higher order or another
-start or gap rule:
+For now `@brm` evaluates the statement as the `@scan` recurrence it states (the
+StanBlocks pane above shows it), and that recurrence is also how to write
+another family, a higher order or another start or gap rule. In the same model,
+the cell would read:
 
 ```julia
-@brm df begin                                   # one row per probe and day
-    mu ~ 1 + c1 + s1 + trend + (1 | probe)
-    sigma ~ Exponential(1)
-    phi ~ Uniform(-1, 1)
-    @plate for p in groups(probe; order = day)  # one cell per probe, rows in day order
-        @scan begin
-            y[p][1] ~ Normal(mu[p][1], sigma / sqrt(1 - phi ^ 2))
-            for t in 2:length(day[p])
-                k = day[p][t] - day[p][t - 1]
-                y[p][t] ~ Normal(mu[p][t] + phi ^ k * (y[p][t - 1] - mu[p][t - 1]),
-                                 sigma * sqrt((1 - phi ^ (2 * k)) / (1 - phi ^ 2)))
-            end
+@plate for p in groups(probe; order = day)
+    @scan begin
+        y[p][1] ~ Normal(mu[p][1], sigma / sqrt(1 - phi ^ 2))
+        for t in 2:length(day[p])
+            k = day[p][t] - day[p][t - 1]
+            y[p][t] ~ Normal(mu[p][t] + phi ^ k * (y[p][t - 1] - mu[p][t - 1]),
+                             sigma * sqrt((1 - phi ^ (2 * k)) / (1 - phi ^ 2)))
         end
     end
 end
