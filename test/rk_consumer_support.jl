@@ -15,6 +15,13 @@ function consumer_problem(brmi)
     backend, rk_logdensity_problem(backend; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
 end
 
+# The position of the coordinate called `name`.
+function coordinate(names, name)
+    index = findfirst(==(name), names)
+    index === nothing && error("missing coordinate $name in $names")
+    index
+end
+
 function consumer_stan(brmi, name; mod=@__MODULE__)
     sb = SBBRMI(brmi; mod, total_groups=())
     folder = joinpath(tempdir(), "brm-rk-consumer")

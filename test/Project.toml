@@ -43,8 +43,9 @@ julia = "1.10"
 url = "https://github.com/nsiccha/StanBlocks.jl"
 # Descriptor outputs carry their value shape as `dims`; non-finite literals render; `weighted`
 # takes a censored/truncated/interval_censored family; an exchangeable ordered prior re-draws
-# as the sorted iid draw.
-rev = "f175dd6f436bc674914556a14a205fc100d42171"
+# as the sorted iid draw. 82a954da adds observed scans (a carried array that is bound data)
+# and per-cell scan lengths in plate cells.
+rev = "82a954daf39f5d0497ca5d203ec2f6af7379fd64"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
@@ -86,8 +87,10 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # row-gathered joint monotonic output), 609c7a9d (one composed plate cell
 # query per subject), a2268e47 (compact selected-coordinate cell gradients),
 # 68a77b03 (a design binds without its conditioned response values) and
-# dad59972 (censored and truncated responses bind absent too).
+# dad59972 (censored and truncated responses bind absent too),
+# 60ff95f1 (sampled seeds and steps in plate-cell scans) and cc50dae0
+# (observed carried arrays in `@scan`, top level and per plate cell).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "dad59972b3d6b38c610201484de509adc0eed144"
+rev = "cc50dae06e9c212fb0d36c11332aeefef1d0e3a5"

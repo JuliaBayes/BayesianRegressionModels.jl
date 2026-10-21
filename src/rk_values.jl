@@ -880,6 +880,8 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
             (; kind=:missing_value, target=completion.source))
     end
     for observation in plan.observations
+        # Observed in its kernel's plate cell.
+        observation isa _RKScanObservation && continue
         modifier = observation.modifier
         distribution = modifier === nothing ? observation.distribution :
             _brm_prepare_expr(modifier.base)

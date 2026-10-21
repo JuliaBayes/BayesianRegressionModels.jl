@@ -41,7 +41,7 @@ const TESTENV = @__DIR__
 # name => (github url, pinned commit)   — comment records the branch the commit
 # is on, for humans; the pin itself is the full SHA and needs no branch.
 const PINS = [
-    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "f175dd6f436bc674914556a14a205fc100d42171"),  # devibe: descriptor outputs carry their value shape as `dims`; non-finite literals render as Stan infinity builtins; `weighted` over censored/truncated/interval_censored; an exchangeable ordered prior re-draws as the sorted iid draw
+    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "82a954daf39f5d0497ca5d203ec2f6af7379fd64"),  # devibe: descriptor outputs carry their value shape as `dims`; non-finite literals render as Stan infinity builtins; `weighted` over censored/truncated/interval_censored; an exchangeable ordered prior re-draws as the sorted iid draw; observed scans and per-cell scan lengths (82a954da)
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     # 0194dce (2026-09-27, dev): WindowSelectionPlan (WarmupHMC-held evidence)
     # and the controls interface for custom reparametrizers,
@@ -90,8 +90,11 @@ const PINS = [
     # for prediction-only designs; dad59972 extends that to censored,
     # truncated and interval-censored responses (snag
     # rkppl-absent-cen-9af487f3). Both contain f13e68d4 (location-alias
-    # elision renames cell parameters).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "dad59972b3d6b38c610201484de509adc0eed144"),  # main
+    # elision renames cell parameters). cc50dae0 observes a carried array
+    # that is bound data in `@scan`, at top level and per plate cell (snag
+    # observed-scan-rk-f3f85355); it contains 60ff95f1 (sampled seeds and
+    # steps in plate-cell scans).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "cc50dae06e9c212fb0d36c11332aeefef1d0e3a5"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.5); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "d16c4efb72b963f45de9d6f632c38d46706c23e1"),  # main
