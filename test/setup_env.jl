@@ -41,7 +41,7 @@ const TESTENV = @__DIR__
 # name => (github url, pinned commit)   — comment records the branch the commit
 # is on, for humans; the pin itself is the full SHA and needs no branch.
 const PINS = [
-    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "2f5b6203ac72296320eac97d0aff68dc9dec2e0e"),  # devibe: descriptor outputs carry their value shape as `dims`; non-finite literals render as Stan infinity builtins; `weighted` over censored/truncated/interval_censored; an exchangeable ordered prior re-draws as the sorted iid draw; observed scans and per-cell scan lengths (82a954da), also through a do-cell parameter that shadows its data name (4ee6e0e8); integer step locals in nested scans (2f5b6203)
+    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "e67bc314e07120510dc05c620b65dc5108daddcd"),  # devibe: descriptor outputs carry their value shape as `dims`; non-finite literals render as Stan infinity builtins; `weighted` over censored/truncated/interval_censored; an exchangeable ordered prior re-draws as the sorted iid draw; observed scans and per-cell scan lengths (82a954da), also through a do-cell parameter that shadows its data name (4ee6e0e8); integer step locals in nested scans (2f5b6203); a latent or observed `@scan` inside a called `@slic` submodel (e67bc314)
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     # 0194dce (2026-09-27, dev): WindowSelectionPlan (WarmupHMC-held evidence)
     # and the controls interface for custom reparametrizers,
@@ -96,8 +96,11 @@ const PINS = [
     # the RK main containing them. It also observes a carried array that is
     # bound data in `@scan`, at top level and per plate cell (3581f5a8, snag
     # observed-scan-rk-f3f85355), and contains 60ff95f1 (sampled seeds and
-    # steps in plate-cell scans).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "cc50dae06e9c212fb0d36c11332aeefef1d0e3a5"),  # main
+    # steps in plate-cell scans). 6c7e18af adds a `@scan` in a per-cell
+    # `@rkppl` submodel (c4008d62, snag per-cell-submode-cd87e071), and
+    # contains ce48fc77 (`rk_ode_rk45_tol`), 9bef9c04 (per-row provider-law
+    # subject cells) and fef26022 (queries skip unread plate outputs).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "6c7e18af9b824792f6a1a3861320df94d62bb33a"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.5); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "d16c4efb72b963f45de9d6f632c38d46706c23e1"),  # main
