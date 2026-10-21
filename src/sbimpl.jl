@@ -6724,6 +6724,11 @@ function _sb_emit_prior!(stmts, target, ::typeof(truncated), op)
          getfield(@__MODULE__, token)) : token
     lower = isnothing(spec.lower) ? nothing : _sb_effect_prior_arg(spec.lower)
     upper = isnothing(spec.upper) ? nothing : _sb_effect_prior_arg(spec.upper)
+    # An infinite bound is an open end, as in `Distributions.truncated`.
+    lower isa Real && lower == -Inf && (lower = nothing)
+    upper isa Real && upper == Inf && (upper = nothing)
+    isnothing(lower) && isnothing(upper) &&
+        return (push!(stmts, only(translated)); true)
     producer, arguments = if isnothing(lower)
         StanBlocks.upper_conditioning, (family, upper, rhs.args[2:end]...)
     elseif isnothing(upper)
@@ -7161,7 +7166,9 @@ _sb_prior_arg(x::Symbol) = x
 # Inside an HSGP submodel the term's validity floor is its `rho_lower` input.
 _sb_prior_arg(::_BRMLengthScaleFloor) = :rho_lower
 _sb_prior_arg(x::NamedColumn) = _sb_prior_arg_named(x, parent(x))
-_sb_prior_arg_named(x, ::MissingColumn) = name(x)
+# An unbound `Inf` (a truncation bound) is Julia's number, which StanBlocks
+# renders as Stan's infinity; a bare name would resolve to a Main Float64.
+_sb_prior_arg_named(x, ::MissingColumn) = name(x) === :Inf ? Inf : name(x)
 _sb_prior_arg_named(x, ::DataColumn) = name(x)
 _sb_prior_arg_named(x, ::ExprColumn{typeof(assign)}) = name(x)
 # After a formula-local prior has been parsed, later references carry that
