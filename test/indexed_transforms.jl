@@ -275,6 +275,27 @@ end
     @test occursin(string(first(sb.preproc[:standardize_age_subject].const_)), md)
 end
 
+@stestset "brm_transform_constants reads the per-group fit" begin
+    data = indexed_data()
+    sb = sbfit(IT.standardized, data; total_groups=())
+    s = brm_transform_constants(sb, :standardize_age_subject)
+    @test (s.kind, s.column, s.source, s.observed_only) == (:standardize, :age, :age, false)
+    @test [s.center, s.scale] ≈ [mean(AGE), std(AGE)]
+    # Exactly the values the model reads.
+    @test BRM.stan_data(sb)[:standardize_age_subject] == ((AGE .- s.center) ./ s.scale)[SUBJECT]
+    @test brm_transform_constants(brm_descriptor(sb; name=:indexed), :standardize_age_subject) == s
+    c = brm_transform_constants(sbfit(IT.centered, data; total_groups=()), :center_age_subject)
+    @test (c.column, c.scale) == (:age, 1.0) && c.center ≈ mean(AGE)
+    # RKBRMI evaluates the anchors of the field-axis transform it indexes.
+    r = brm_transform_constants(RKBRMI(IT.standardized(data)), :standardize_age_subject)
+    @test r == s
+    new = indexed_data(; age=[70.0, 20.0, 33.0], subject=[3, 1, 2], x=zeros(3), y=zeros(3))
+    @test brm_transform_constants(reprocess(sb, new), :standardize_age_subject) == s
+    refit = brm_transform_constants(reprocess(sb, new; freeze_constants=false),
+        :standardize_age_subject)
+    @test [refit.center, refit.scale] ≈ [mean([70.0, 20.0, 33.0]), std([70.0, 20.0, 33.0])]
+end
+
 # refused: a keyword on `center`/`zscale`/`standardize` used to be dropped on
 # SBBRMI and VBRMI, silently keeping the row-level fit; the per-group fit is
 # spelled `standardize(x)[g]` (snag `standardize-equa-a92391f2`, decision `0siic7u`).

@@ -25,7 +25,10 @@ Each record is
 - `name` — the transformed value's name, which is also its population
   coefficient label (`:standardize_age_yr` for `standardize(age_yr)`). An
   expression inner has a hashed name (`:zscale_expr_301a4a5c` for
-  `zscale(log(w))`); list the records to find it by `source`.
+  `zscale(log(w))`); list the records to find it by `source`. A per-group
+  field read at row positions, `standardize(age_yr)[subject]`, is
+  `:standardize_age_yr_subject`; its constants are fitted over `age_yr` and
+  each row's value is `(age_yr[subject] - center) / scale`.
 - `kind` — `:center`, `:zscale` or `:standardize`.
 - `column` — the single name the transform reads (`:age_yr`), or `nothing`
   for an expression inner.
@@ -72,12 +75,15 @@ _brm_transform_record(name::Symbol, kind::Symbol, inner, center, scale,
        scale=Float64(scale), observed_only)
 
 _brm_transform_column(inner::NamedColumn) = name(inner)
+# `standardize(x)[g]` fits over `x`, which names the record.
+_brm_transform_column(inner::_BRMIndexedSource) = _brm_transform_column(inner.value)
 _brm_transform_column(_inner) = nothing
 
 _brm_transform_source(inner::NamedColumn) = name(inner)
 _brm_transform_source(inner::ExprColumn) = Expr(:call, _brm_transform_head(getf(inner)),
     map(_brm_transform_source, getargs(inner))...,
     (Expr(:kw, key, _brm_transform_source(value)) for (key, value) in pairs(getkwargs(inner)))...)
+_brm_transform_source(inner::_BRMIndexedSource) = _brm_transform_source(inner.value)
 _brm_transform_source(inner) = inner
 
 _brm_transform_head(f::Union{Function,Type}) = nameof(f)
@@ -160,6 +166,19 @@ function _brm_transform_sites!(sites,
     sites[_brm_wrapper_col_name(kind, inner)] = (; kind, inner)
     sites
 end
+# `standardize(x)[g]` is the value `standardize_x_g` (`_brm_indexed_col_name`),
+# fitted over `x`; any other indexing is searched like other calls.
+function _brm_transform_sites!(sites, x::ExprColumn{typeof(getindex)})
+    args = getargs(x)
+    source = first(args)
+    kind = source isa ExprColumn ? _brm_transform_kind(getf(source)) : nothing
+    (length(args) == 2 && isempty(getkwargs(x)) && !isnothing(kind) &&
+        length(getargs(source)) == 1 && isempty(getkwargs(source))) || return invoke(
+            _brm_transform_sites!, Tuple{Any,ExprColumn}, sites, x)
+    inner = only(getargs(source))
+    sites[_brm_indexed_col_name(kind, inner, last(args))] = (; kind, inner)
+    sites
+end
 _brm_transform_sites!(sites, _x) = sites
 
 _rk_plan_derived(plan::_RKStructuralPlan) = plan.derived
@@ -187,6 +206,15 @@ function _rk_transform_anchors(x)
     isnothing(sd) ? nothing : (; mean, sd)
 end
 
+# An indexed value `t[g]` (`_rk_lower_indexed`) reads the staged transform `t`;
+# its anchors are in that definition.
+function _rk_indexed_definition(derived, expression)
+    Meta.isexpr(expression, :ref, 2) && first(expression.args) isa Symbol ||
+        return expression
+    index = findfirst(spec -> spec.name === first(expression.args), derived)
+    isnothing(index) ? expression : derived[index].expression
+end
+
 function brm_transform_constants(rk::RKBRMI)
     derived = _rk_plan_derived(rk.plan)
     sites = _brm_transform_sites(parent(rk))
@@ -195,7 +223,8 @@ function brm_transform_constants(rk::RKBRMI)
         index = findfirst(spec -> spec.name === name, derived)
         # An `&` operand is staged under an internal `rkd_*` name.
         isnothing(index) && continue
-        anchors = _rk_transform_anchors(derived[index].expression)
+        anchors = _rk_transform_anchors(
+            _rk_indexed_definition(derived, derived[index].expression))
         isnothing(anchors) && error(
             "brm_transform_constants: internal: RK value `$name` is not a " *
             "fitted transform: $(derived[index].expression)")
