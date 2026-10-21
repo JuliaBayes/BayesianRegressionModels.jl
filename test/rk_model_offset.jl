@@ -25,11 +25,6 @@ const OFFSET_ROWS = (;
     y=[0.1, 0.2, 0.3, 0.4, 0.0],
 )
 
-function coordinate(names, name)
-    index = findfirst(==(name), names)
-    index === nothing && error("missing coordinate $name in $names")
-    index
-end
 coordinates_matching(names, part) = findall(n -> occursin(part, string(n)), names)
 
 # The reporter's shape: a declared scalar is the typical value of a

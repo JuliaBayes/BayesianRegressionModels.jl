@@ -110,12 +110,6 @@ pop_panel_other_axis(data) = @brm data begin
     end
 end
 
-function coordinate(names, name)
-    index = findfirst(==(name), names)
-    index === nothing && error("missing coordinate $name in $names")
-    index
-end
-
 @stestset "a population predictor beside a random-effect predictor" begin
     data = POP_PANEL
     saved = deepcopy(data)

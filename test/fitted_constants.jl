@@ -59,11 +59,6 @@ const ONE_ROW = (; conc=[2.0], x=[0.5], subject=[11], y=[0.2])
 const ONE_ROW_NO_CONC = (; x=[0.5], subject=[11], y=[0.2])
 
 constants(sb) = Dict(k => stan_data(sb)[k] for k in (:ec50_loc, :ec50_scale, :V))
-function coordinate(names, name)
-    index = findfirst(==(name), names)
-    isnothing(index) && error("missing coordinate $name in $names")
-    index
-end
 const FITTED = Dict(:ec50_loc => LOC, :ec50_scale => SCALE, :V => V)
 
 @stestset "a constant is the scalar data field it computes" begin

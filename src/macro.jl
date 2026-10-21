@@ -657,6 +657,30 @@ function _brm_cell_bound_names!(acc, lambda::Expr)
     for stmt in (Meta.isexpr(body, :block) ? body.args : Any[body])
         Meta.isexpr(stmt, :(=), 2) && _brm_bound_symbols!(acc, stmt.args[1])
     end
+    _brm_scan_bound_names!(acc, body)
+    acc
+end
+
+# The names a cell's `@scan` blocks bind: each loop variable, and every array or
+# local a seed or step writes (`h[1] = …`, `h[t] ~ …`, `z ~ …`). They are scan
+# locals, never data columns, even when a column happens to share the name.
+function _brm_scan_bound_names!(acc, body)
+    for stmt in (Meta.isexpr(body, :block) ? body.args : Any[body])
+        _is_brm_scan(stmt) && _brm_scan_block_bound!(acc, stmt.args[end])
+    end
+    acc
+end
+function _brm_scan_block_bound!(acc, block)
+    for stmt in (Meta.isexpr(block, :block) ? block.args : Any[block])
+        if Meta.isexpr(stmt, :for)
+            Meta.isexpr(stmt.args[1], :(=)) && _brm_bound_symbols!(acc, stmt.args[1].args[1])
+            _brm_scan_block_bound!(acc, stmt.args[2])
+        elseif Meta.isexpr(stmt, :(=), 2) || isxcall(stmt, :~)
+            lhs = Meta.isexpr(stmt, :(=)) ? stmt.args[1] : stmt.args[2]
+            Meta.isexpr(lhs, :ref) ? _brm_bound_symbols!(acc, lhs.args[1]) :
+                _brm_bound_symbols!(acc, lhs)
+        end
+    end
     acc
 end
 _brm_bound_symbols!(acc, x::Symbol) = push!(acc, x)
@@ -832,9 +856,21 @@ parse!(x::Expr; info) = if x.head == :block
 elseif _is_brm_plate(x)
     groupings = hasproperty(info, :groupings) ? info.groupings : Dict{Symbol,_BRMPlateGrouping}()
     grouped_reads = hasproperty(info, :grouped_reads) ? info.grouped_reads : Set{Symbol}()
-    kernel, inbody_ragged = _brm_plate_kernel(x; groupings, grouped_reads)
+    # `y[p] ~ AR1Normal(...)` is evaluated as the `@scan` it states
+    # (`ar1_normal.jl`); `show` prints the cell as written, and the time checks
+    # run when the model is built.
+    authored = x
+    x, ar1_normal_checks = _brm_expand_cell_ar1_normal(x)
+    kernel, inbody_ragged = _brm_plate_kernel(x; groupings, grouped_reads, authored)
     parsed = parse!(kernel; info)
+    isempty(ar1_normal_checks) || (parsed = Expr(:block, parsed, ar1_normal_checks...))
     inbody_ragged ? Expr(:block, :($_brm_depwarn_plate_inbody_ragged()), parsed) : parsed
+elseif _is_brm_ar1_normal(x)
+    # The series and its grouping are the plate's (decision `1pnob5t`).
+    error("@brm: `AR1Normal(...)` observes one series per `@plate` cell: write " *
+        "`@plate for p in groups(g; order = t)` with " *
+        "`y[p] ~ AR1Normal(mu[p], sigma, phi; time = t[p])` in its cell; got " *
+        "`$(sprint(Base.show_unquoted, x))`")
 elseif _is_brm_plate_grouping(x)
     # Collected by `_brm_plate_groupings` before parsing and consumed by the
     # `@plate for` rewrite; the declaration itself emits nothing.
@@ -939,6 +975,33 @@ end
 _is_brm_plate(x) = Meta.isexpr(x, :macrocall) && !isempty(x.args) &&
                    x.args[1] === Symbol("@plate")
 
+# A `@scan begin … end` statement inside an `@plate for` cell is one recurrence
+# per cell, exactly as in StanBlocks and RKPPL: the seeds fill the first
+# entries, the trailing `for` steps the rest. Its reads of sliced inputs
+# (`y[i][t]`, `mu[i][t - 1]`) become reads of the cell's slice like any other
+# cell read; the block itself is passed to the backend unchanged.
+_is_brm_scan(x) = Meta.isexpr(x, :macrocall) && !isempty(x.args) &&
+                  x.args[1] === Symbol("@scan")
+
+# The cell's statements with every `@scan` block's seeds and step statements
+# spliced in, for the checks that look at every observation of the cell.
+function _brm_plate_flat_statements(stmts)
+    flat = Any[]
+    function visit(stmt)
+        if _is_brm_scan(stmt)
+            visit(stmt.args[end])
+        elseif Meta.isexpr(stmt, :block)
+            foreach(visit, stmt.args)
+        elseif Meta.isexpr(stmt, :for)
+            visit(stmt.args[2])
+        elseif !(stmt isa LineNumberNode)
+            push!(flat, stmt)
+        end
+    end
+    foreach(visit, stmts)
+    flat
+end
+
 _is_brm_plate_grouping(x) = isxcall(x, :ragged)
 
 # Model-scope `ragged(x, group)` statements of one `@brm` block, keyed by `x`.
@@ -966,7 +1029,14 @@ function _brm_plate_groupings(x)
                 "grouping data column `group` and a cell label column `cells`, or " *
                 "`ragged(idx, group; into=target)` for an index column into the " *
                 "flat axis `target` labels; got `$(repr(stmt))`")
-            (; name, spec, into) = decl
+            (; name, spec, into, order) = decl
+            # Row order belongs to the plate that reads the rows (decision
+            # `1pnob5t`), not to another model-scope statement.
+            order === nothing || error(
+                "@brm: `$(sprint(Base.show_unquoted, stmt))`: a model-scope grouping " *
+                "takes no `order=`; " *
+                "state a per-group plate's grouping and row order in its header, " *
+                "`@plate for p in groups($(spec[1]); order = $order)`")
             name in spec && error(
                 "@brm: `$(repr(stmt))` groups `$name` by itself")
             length(spec) == 2 && spec[1] === spec[2] && error(
@@ -986,28 +1056,31 @@ function _brm_plate_groupings(x)
     groupings
 end
 
-# The positional arguments and `into=` target of a `ragged(...)` call, or
-# `nothing` when it carries any other keyword.
+# The positional arguments, `into=` target and `order=` column of a
+# `ragged(...)` call, or `nothing` when it carries any other keyword.
 function _brm_plate_grouping_args(stmt)
     positional, keywords = Any[], Any[]
     for arg in stmt.args[2:end]
         Meta.isexpr(arg, :parameters) ? append!(keywords, arg.args) :
         Meta.isexpr(arg, :kw) ? push!(keywords, arg) : push!(positional, arg)
     end
-    isempty(keywords) && return (; positional, into=nothing)
-    length(keywords) == 1 && Meta.isexpr(only(keywords), :kw, 2) &&
-        only(keywords).args[1] === :into && only(keywords).args[2] isa Symbol ||
-        return nothing
-    (; positional, into=only(keywords).args[2])
+    options = Dict{Symbol,Symbol}()
+    for keyword in keywords
+        Meta.isexpr(keyword, :kw, 2) && keyword.args[1] in (:into, :order) &&
+            keyword.args[2] isa Symbol && !haskey(options, keyword.args[1]) ||
+            return nothing
+        options[keyword.args[1]] = keyword.args[2]
+    end
+    (; positional, into=get(options, :into, nothing), order=get(options, :order, nothing))
 end
 
 function _brm_plate_grouping_decl(stmt)
     args = _brm_plate_grouping_args(stmt)
     args === nothing && return nothing
-    (; positional, into) = args
+    (; positional, into, order) = args
     length(positional) == 2 && positional[1] isa Symbol || return nothing
     spec = _brm_plate_grouping_spec(positional[2])
-    spec === nothing ? nothing : (; name=positional[1], spec, into)
+    spec === nothing ? nothing : (; name=positional[1], spec, into, order)
 end
 
 _brm_plate_grouping_spec(group::Symbol) = (group,)
@@ -1054,26 +1127,48 @@ function _brm_plate_loop(x::Expr)
     binding.args[1], binding.args[2], loop.args[2]
 end
 
+# `@plate for p in groups(g; order = t)`: one cell per distinct label of the
+# data column `g`, and each read `x[p]` is `x`'s values on group `p`'s rows,
+# ascending in `t` when `order` is given (decision `1pnob5t`). It lowers to the
+# kernel positional `ragged(x, g, g; order = t)` for every name the cell reads.
+# Returns `(; group, order)`, or `nothing` for an `eachindex`/`axes` range.
+function _brm_plate_header_grouping(range)
+    isxcall(range, :groups) || return nothing
+    args = _brm_plate_grouping_args(range)
+    args !== nothing && length(args.positional) == 1 && only(args.positional) isa Symbol &&
+        args.into === nothing || error(
+        "@brm: a grouped `@plate` range is `groups(g)` or `groups(g; order = t)` with a " *
+        "grouping data column `g` and a time column `t`; got " *
+        "`$(sprint(Base.show_unquoted, range))`")
+    (; group=only(args.positional), args.order)
+end
+# Each read joins the header's grouping, which is also its own cell label
+# column (`_brm_kernel_plate_cells`).
+_brm_plate_header_input(name, (; group, order)) = order === nothing ?
+    Expr(:call, :ragged, name, group, group) :
+    Expr(:call, :ragged, Expr(:parameters, Expr(:kw, :order, order)), name, group, group)
+
 function _brm_plate_range_input(range)
     Meta.isexpr(range, :call) || error(
-        "@brm: a kernel `@plate` range must be `eachindex(x)` or `axes(x, 1)`")
+        "@brm: a kernel `@plate` range must be `eachindex(x)`, `axes(x, 1)` or `groups(g)`")
     head = range.args[1]
     if head === :eachindex && length(range.args) == 2
         return range.args[2]
     elseif head === :axes && length(range.args) == 3 && range.args[3] == 1
         return range.args[2]
     end
-    error("@brm: a kernel `@plate` range must be `eachindex(x)` or `axes(x, 1)`")
+    error("@brm: a kernel `@plate` range must be `eachindex(x)`, `axes(x, 1)` or `groups(g)`")
 end
 
 function _brm_plate_input_key(x)
     x isa Symbol && return (:column, x)
     # `ragged(x, group)`, or `ragged(x, group, cells)` lowered from a model-scope
-    # `ragged(x, group => cells)`, either with an optional `into=target`.
+    # `ragged(x, group => cells)`, either with an optional `into=target` and
+    # `order=time`.
     args = isxcall(x, :ragged) ? _brm_plate_grouping_args(x) : nothing
     if args !== nothing && length(args.positional) in (2, 3) &&
        all(arg -> arg isa Symbol, args.positional)
-        return (:ragged, args.positional..., args.into)
+        return (:ragged, args.positional..., args.into, args.order)
     end
     error(
         "@brm: a kernel `@plate` slices formula and data names (`x[i]`); declare " *
@@ -1123,7 +1218,7 @@ function _brm_plate_outputs(body, i)
             push!(outputs, lhs)
         end
     end
-    isempty(outputs) && !any(stmt -> isxcall(stmt, :~), stmts) && error(
+    isempty(outputs) && !any(stmt -> isxcall(stmt, :~), _brm_plate_flat_statements(stmts)) && error(
         "@brm: a kernel `@plate` cell needs an indexed output (`loc[$i] = ...`) " *
         "or an observation (`y[$i] ~ ...`); this one has neither")
     stmts, outputs
@@ -1133,9 +1228,14 @@ end
 # response plus `_cell` (`y[i] ~ …` and `ragged(y, g)[i] ~ …` both give `y_cell`).
 # Backends derive the cell's emitted names from it, as they do from an output's.
 function _brm_plate_effect_name(stmts, i)
-    for stmt in stmts
-        isxcall(stmt, :~) && _brm_plate_indexed(stmt.args[2], i) || continue
-        source = stmt.args[2].args[1]
+    for stmt in _brm_plate_flat_statements(stmts)
+        isxcall(stmt, :~) || continue
+        observed = stmt.args[2]
+        # A scan step observes one entry of the cell's slice: `y[i][t] ~ …`.
+        Meta.isexpr(observed, :ref) && _brm_plate_indexed(observed.args[1], i) &&
+            (observed = observed.args[1])
+        _brm_plate_indexed(observed, i) || continue
+        source = observed.args[1]
         base = source isa Symbol ? source :
                isxcall(source, :ragged) && source.args[2] isa Symbol ? source.args[2] :
                nothing
@@ -1157,7 +1257,7 @@ function _brm_cell_without_result(statements)
 end
 
 function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
-                           grouped_reads=Set{Symbol}())
+                           grouped_reads=Set{Symbol}(), authored=x)
     i, range, body = _brm_plate_loop(x)
     stmts, outputs = _brm_plate_outputs(body, i)
     output_set = Set(outputs)
@@ -1190,11 +1290,33 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
 
     # A name with a model-scope `ragged(x, group)` declaration is read through
     # that grouping. The deprecated in-body wrapper stays accepted for a name
-    # without one; mixing both spellings for one name is refused.
+    # without one; mixing both spellings for one name is refused. In a
+    # `groups(...)` plate every read joins the header's grouping.
     inbody_ragged = false
     cell_groupings = Symbol[]
+    header = _brm_plate_header_grouping(range)
+    header_source = sprint(Base.show_unquoted, range)
+    # Nothing outside the plate could tell which group a collected value
+    # belongs to: it would be matched to the groups by position, the hazard
+    # `ragged(x, group => cells)` exists to rule out (`3681f4a`).
+    header === nothing || isempty(outputs) || error(
+        "@brm: a `@plate for $i in $header_source` cell observes its group's rows " *
+        "and collects no result; `$(first(outputs))[$i] = …` would leave a value " *
+        "per group that nothing outside the plate can match to its group. Keep " *
+        "the value a cell local (`$(first(outputs)) = …`) and observe in the cell.")
     function grouped(source)
-        if source isa Symbol && haskey(groupings, source)
+        if header !== nothing
+            source isa Symbol || error(
+                "@brm: a `@plate for $i in $header_source` cell reads names as " *
+                "`x[$i]`, each the rows of group `$i`; got " *
+                "`$(sprint(Base.show_unquoted, source))`")
+            haskey(groupings, source) && error(
+                "@brm: `$source` is grouped at model scope by " *
+                "`$(_brm_plate_grouping_repr(source, groupings[source]))`, but a " *
+                "`@plate for $i in $header_source` cell groups every name it reads " *
+                "by its header; drop the model-scope statement")
+            return _brm_plate_header_input(source, header)
+        elseif source isa Symbol && haskey(groupings, source)
             push!(grouped_reads, source)
             source in cell_groupings || push!(cell_groupings, source)
             return _brm_plate_grouping_input(source, groupings[source])
@@ -1210,8 +1332,9 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
     end
 
     # The range anchor participates even when the body does not read it: it is
-    # the subject-count witness in the no-random-effects panel form.
-    add_input(grouped(_brm_plate_range_input(range)))
+    # the subject-count witness in the no-random-effects panel form. A
+    # `groups(...)` plate's cells are its grouping's labels instead.
+    header === nothing && add_input(grouped(_brm_plate_range_input(range)))
 
     function rewrite(ex)
         ex === i && error(
@@ -1239,6 +1362,34 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
 
     rewritten = Any[]
     bare_bindings = Dict{Symbol,Any}() # cell local => authored right-hand side
+
+    # A `@scan` block keeps its shape: seeds, then one `for` loop of steps. Its
+    # slice reads are rewritten like every other cell read; its `=`/`~` targets
+    # are the scan's carried arrays and step locals, or (`y[i][t] ~ …`) entries
+    # of an observed slice.
+    function rewrite_scan(block)
+        Meta.isexpr(block, :block) || error(
+            "@brm: a kernel `@plate` cell's `@scan` takes `@scan begin … end`")
+        Expr(:block, map(rewrite_scan_statement, block.args)...)
+    end
+    function rewrite_scan_statement(stmt)
+        stmt isa LineNumberNode && return stmt
+        if Meta.isexpr(stmt, :for) && Meta.isexpr(stmt.args[1], :(=), 2) &&
+                stmt.args[1].args[1] isa Symbol
+            loop = stmt.args[1]
+            return Expr(:for, Expr(:(=), loop.args[1], rewrite(loop.args[2])),
+                rewrite_scan(stmt.args[2]))
+        elseif Meta.isexpr(stmt, :(=), 2)
+            return Expr(:(=), rewrite(stmt.args[1]), rewrite(stmt.args[2]))
+        elseif isxcall(stmt, :~)
+            _brm_plate_check_observed(stmt.args[2], i, bare_bindings, output_set)
+            return Expr(:call, :~, rewrite(stmt.args[2]), rewrite(stmt.args[3]))
+        end
+        error(
+            "@brm: a `@scan` block in a kernel `@plate` cell holds `=`/`~` seeds " *
+            "and one `for t in …` loop of `=`/`~` steps; got `$(repr(stmt))`")
+    end
+
     for stmt in stmts
         stmt isa LineNumberNode && (push!(rewritten, stmt); continue)
         if Meta.isexpr(stmt, :(=), 2)
@@ -1256,10 +1407,12 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
         elseif isxcall(stmt, :~)
             _brm_plate_check_observed(stmt.args[2], i, bare_bindings, output_set)
             push!(rewritten, Expr(:call, :~, rewrite(stmt.args[2]), rewrite(stmt.args[3])))
+        elseif _is_brm_scan(stmt)
+            push!(rewritten, Expr(:macrocall, stmt.args[1:end-1]..., rewrite_scan(stmt.args[end])))
         else
             error(
-                "@brm: kernel `@plate` cells contain `=` assignments and `~` " *
-                "statements; got `$(repr(stmt))`")
+                "@brm: kernel `@plate` cells contain `=` assignments, `~` " *
+                "statements and `@scan begin … end` blocks; got `$(repr(stmt))`")
         end
     end
     collision = findfirst(p -> haskey(bare_bindings, p), params)
@@ -1287,7 +1440,8 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
         end
     end
     lambda = Expr(:->, Expr(:tuple, params...), Expr(:block, rewritten...),
-                  _brm_plate_source(i, range, stmts, cell_groupings, groupings))
+                  _brm_plate_source(i, range, first(_brm_plate_outputs(_brm_plate_loop(authored)[3], i)),
+                      cell_groupings, groupings))
     call = Expr(:call, :kernel, lambda, positionals...)
     Expr(:call, :~, target, call), inbody_ragged
 end
@@ -1306,13 +1460,31 @@ function _brm_print_plate(io::IO, i, range, stmts)
     print(io, "@plate for ", i, " in ")
     _brm_print_source(io, range)
     println(io)
+    _brm_print_cell_statements(io, stmts, "    ")
+    print(io, "end")
+end
+# One line per statement; a `@scan` block and its `for` loop nest one level.
+function _brm_print_cell_statements(io::IO, stmts, indent)
     for stmt in stmts
         stmt isa LineNumberNode && continue
-        print(io, "    ")
-        _brm_print_source(io, stmt)
+        print(io, indent)
+        if _is_brm_scan(stmt) || Meta.isexpr(stmt, :for)
+            body = stmt.args[end]
+            if _is_brm_scan(stmt)
+                println(io, "@scan begin")
+            else
+                print(io, "for ", stmt.args[1].args[1], " in ")
+                _brm_print_source(io, stmt.args[1].args[2])
+                println(io)
+            end
+            _brm_print_cell_statements(io,
+                Meta.isexpr(body, :block) ? body.args : Any[body], indent * "    ")
+            print(io, indent, "end")
+        else
+            _brm_print_source(io, stmt)
+        end
         println(io)
     end
-    print(io, "end")
 end
 
 # Formula source as written. Julia's own `Expr` printer renders a left-nested
@@ -1334,7 +1506,8 @@ function _brm_print_source(io::IO, x::Expr, outer::Int=0; left::Bool=false)
         parens = precedence < outer || (precedence == outer && !left)
         parens && print(io, "(")
         for (i, arg) in enumerate(operands)
-            i == 1 || print(io, " ", op, " ")
+            # A range is written `2:T`, as Julia prints it.
+            i == 1 || print(io, op === :(:) ? ":" : " $op ")
             _brm_print_source(io, arg, precedence; left=i == 1)
         end
         parens && print(io, ")")
@@ -1958,7 +2131,9 @@ parselocals!(x::Expr; info, val) = if Meta.isexpr(x, :->)
     # registers them as shared data so the emitted plate cell resolves them the
     # way a `plate` captures a `@slic` data kwarg. Cell params/locals and typos
     # that are not columns fall away in `_brm`.
-    hasproperty(info, :captures) && _brm_cell_value_refs!(info.captures, x.args[2])
+    hasproperty(info, :captures) && union!(info.captures, setdiff(
+        _brm_cell_value_refs!(Set{Symbol}(), x.args[2]),
+        _brm_scan_bound_names!(Set{Symbol}(), x.args[2])))
     hasproperty(info, :inventory) && _brm_cell_bound_names!(info.inventory.cell_bound, x)
     x
 elseif _is_nested_brm(x)

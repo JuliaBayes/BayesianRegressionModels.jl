@@ -4096,9 +4096,10 @@ Base.@nospecializeinfer function _sb_observation_triage(@nospecialize(sb::SBBRMI
     bound = count(d -> d.role === :observation &&
                   (!isnothing(d.data_source) || d.target in missing_sources),
                   declarations)
-    unbound = sort!(Symbol[d.target for d in declarations
+    # A scan's seed and steps observe one response through several statements.
+    unbound = sort!(unique!(Symbol[d.target for d in declarations
                            if d.role === :observation && isnothing(d.data_source) &&
-                              !(d.target in missing_sources) && !(d.target in fresh_sources)])
+                              !(d.target in missing_sources) && !(d.target in fresh_sources)]))
     (; bound, unbound, fresh_sources)
 end
 
@@ -4759,6 +4760,27 @@ function _sb_plan_collect!(declarations, x, data_scope, context, obs_keys, plate
                                           obs_keys, plate_params, unbound_cell), x.args)
         return nothing
     end
+    # A cell's `@scan` writes each array it carries through its seeds and its
+    # steps (`h[1] ~ …`, `h[t] ~ …`), and StanBlocks declares that array once:
+    # one declaration per array, family `:scan` (a structural site, like
+    # `:plate`), with the whole recurrence as its expression.
+    if _is_brm_scan(x)
+        sites = GenerativeDeclaration[]
+        _sb_plan_collect!(sites, x.args[end], data_scope, context, obs_keys,
+                          plate_params, unbound_cell)
+        for target in unique(site.target for site in sites)
+            site = first(s for s in sites if s.target === target)
+            push!(declarations, GenerativeDeclaration(site.role, target, :scan,
+                site.data_source, site.draw, site.context, _sb_plan_copy(x),
+                (), (;), site.annotation, (), (;)))
+        end
+        return nothing
+    end
+    # The step loop's statements are the scan's.
+    if x.head === :for
+        return _sb_plan_collect!(declarations, x.args[end], data_scope, context,
+                                 obs_keys, plate_params, unbound_cell)
+    end
     if x.head === :call && length(x.args) >= 3 && x.args[1] === :~
         target = _sb_plan_lhs_name(x.args[2])
         isnothing(target) && error(
@@ -5342,15 +5364,13 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             new_data[key] = _sb_reprocess_column_length(df, e.raw_ref,
                 "kernel per-subject column")
         else
-            subjects = _sb_kernel_subject_values(
-                _sb_df_column(df, e.raw_ref), e.raw_ref)
+            subjects = _sb_reprocess_kernel_cells(df, e.raw_ref, e.const_)
             new_data[key] = length(subjects)
         end
         new_preproc[key] = e
     elseif e.kind === :kernel_ragged
         arg_name, event_group, subject_group = e.raw_ref
-        subjects = _sb_kernel_subject_values(
-            _sb_df_column(df, subject_group), subject_group)
+        subjects = _sb_reprocess_kernel_cells(df, subject_group, e.const_)
         event_groups = _sb_df_column(df, event_group)
         event_groups isa AbstractVector || error(
             "sbimpl: reprocess: kernel event grouping column `$event_group` " *
@@ -5358,6 +5378,9 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         rows = _sb_kernel_ragged_partition(
             arg_name, event_group,
             collect(_sb_group_values(event_groups)), subjects)
+        order = get(e.const_, :order, nothing)
+        isnothing(order) || _brm_kernel_order_rows!(rows, _sb_df_column(df, order),
+            order, event_group, length(event_groups); prefix="sbimpl: reprocess")
         if e.const_.is_lp
             new_data[key] = rows
         else
@@ -6080,10 +6103,18 @@ _sb_kernel_subject_values(raw, group::Symbol) =
 _sb_kernel_ragged_partition(a_name, grp_name, ev_vals, subject_vals) =
     _brm_kernel_ragged_partition(a_name, grp_name, ev_vals, subject_vals; prefix="sbimpl")
 
+# A plate's cells on a replayed frame: the labels of its cell column, one per
+# row, or the distinct labels of its one grouping column.
+_sb_reprocess_kernel_cells(df, column, options) =
+    options isa NamedTuple && get(options, :distinct_labels, false) ?
+        _brm_kernel_distinct_labels(_sb_df_column(df, column), column;
+            prefix="sbimpl: reprocess") :
+        _sb_kernel_subject_values(_sb_df_column(df, column), column)
+
 function _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals;
-                                allow_unbound_observation=false)
+                                allow_unbound_observation=false, order=nothing)
     prepared = _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals;
-        prefix="sbimpl", allow_unbound_observation)
+        prefix="sbimpl", allow_unbound_observation, order)
     # Non-numeric labels only join rows in preparation; Stan consumes indices.
     all(v -> v isa Real, prepared.group_values) || pop!(data, prepared.group_name, nothing)
     (prepared.rows, prepared.is_lp, prepared.is_unbound)
@@ -6092,11 +6123,12 @@ end
 # Is a kernel cell parameter OBSERVED by the cell body — the LHS of a top-level
 # in-cell `~` statement? The do-block body is captured verbatim (macro.jl `_x`),
 # so observation statements keep their surface `yy ~ family(...)` call form.
-# Only top-level statements count: the shipped contract observes responses with
-# ordinary statements in the inline body, and a nested observation is outside
-# the omission surface (it keeps the loud missing-column error below).
+# Top-level statements and the seeds and steps of the cell's `@scan` blocks
+# count (`y[t] ~ …` observes an entry of the cell's `y`); any other nested
+# observation is outside the omission surface (it keeps the loud missing-column
+# error below).
 function _sb_cell_param_observed(body_stmts, param::Symbol)
-    for s in body_stmts
+    for s in _brm_plate_flat_statements(body_stmts)
         s isa Expr || continue
         s.head === :call && length(s.args) >= 3 && s.args[1] === :~ || continue
         lhs = s.args[2]
@@ -6263,8 +6295,8 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
                 "got a bare $(typeof(arg_col)).",
                 _sb_kernel_link_advice(arg_col))
             gath_sym = Symbol("kernel_", target, "_", name(arg_col), "_ragged")
-            into = _brm_kernel_ragged_into(c; prefix="sbimpl")
-            push!(ragged_specs, (i, arg_col, grp_arg, gath_sym, into))
+            (; into, order) = _brm_kernel_ragged_options(c; prefix="sbimpl")
+            push!(ragged_specs, (i, arg_col, grp_arg, gath_sym, into, order))
             push!(dcol_names, gath_sym)
             continue
         end
@@ -6326,18 +6358,21 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     # rides on the subject frame the others, or the pre-grouped columns, define.
     lp_buckets = _sb_kernel_lp_buckets(lp_cols; ragged_cols)
     grouped = [b for b in lp_buckets if b !== nothing]
+    # Cells that are the distinct labels of the plate's one grouping column
+    # (`_brm_kernel_plate_cells`), which replay recounts the same way.
+    distinct = false
     if isempty(grouped) && !isempty(ragged_specs)
         # Label-anchored plate: no per-cell LP carries a ranef bucket, so the
         # cells are the rows of the explicit cell label column every
         # `ragged(x, group => cells)` names — districts beside their totals,
-        # with each facility row joining its district by label. Replayed on a
-        # new frame this is the ordinary subject-labelled plate below.
-        group_col = _brm_kernel_cell_label_column(ragged_cols; prefix="sbimpl")
-        g_vals = _sb_kernel_subject_values(
-            parent(parent(group_col)), name(group_col))
-        nsub = length(g_vals)
+        # with each facility row joining its district by label — or, for a
+        # `groups(g)` plate, the labels of `g`. Replayed on a new frame this is
+        # the ordinary subject-labelled plate below.
         lp_names = Set(name(c) for c in lp_cols)
         ragged_names = Set(spec[4] for spec in ragged_specs)
+        cells = _brm_kernel_plate_cells(ragged_cols; prefix="sbimpl")
+        group_col, g_vals, distinct = cells.column, cells.values, cells.distinct
+        nsub = length(g_vals)
         for k in kept_names
             (k in lp_names || k in ragged_names || !haskey(data, k)) && continue
             length(data[k]) == nsub || error(
@@ -6348,8 +6383,8 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         end
         all(v -> v isa Real, g_vals) || pop!(data, name(group_col), nothing)
         data[nsub_sym] = nsub
-        _sb_record_preproc!(data, nsub_sym,
-            PreprocEntry(:kernel_subject_count, nothing, name(group_col), false))
+        _sb_record_preproc!(data, nsub_sym, PreprocEntry(:kernel_subject_count,
+            distinct ? (; distinct_labels=true) : nothing, name(group_col), false))
     elseif isempty(grouped)
         # The subject count is the common length of the pre-grouped data
         # columns or, when the cell slices only LPs (beside omitted outcomes),
@@ -6425,9 +6460,9 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     # rather than its own. Wrapping it for the cell must not claim the flat
     # column: something else may name it on its own axis — `hsgp(log_dose)` over
     # the event frame, say — and that term registers it through its own path.
-    for (i, arg_col, grp_arg, gath_sym, into) in ragged_specs
+    for (i, arg_col, grp_arg, gath_sym, into, order) in ragged_specs
         rows, is_lp, is_unbound = _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals;
-            allow_unbound_observation=i in unbound_idx)
+            allow_unbound_observation=i in unbound_idx, order)
         # An `into=` index column gathers its rebased positions, not its raw
         # row numbers; the target's labels only join rows here.
         flat = isnothing(into) ? nothing :
@@ -6449,8 +6484,11 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
             gathered = [flat[r] for r in rows]
             data[gath_sym] = gathered
         end
-        _sb_record_preproc!(data, gath_sym, PreprocEntry(
-            :kernel_ragged, isnothing(into) ? (; is_lp) : (; is_lp, into=name(into)),
+        options = (; is_lp)
+        isnothing(into) || (options = merge(options, (; into=name(into))))
+        isnothing(order) || (options = merge(options, (; order=name(order))))
+        distinct && (options = merge(options, (; distinct_labels=true)))
+        _sb_record_preproc!(data, gath_sym, PreprocEntry(:kernel_ragged, options,
             (name(arg_col), name(grp_arg), name(group_col)), false))
     end
 
