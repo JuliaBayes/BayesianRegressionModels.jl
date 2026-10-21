@@ -72,40 +72,34 @@ function _prior_omega_map(m::BRM.BRMNLMEModel, θ, σ, ω)
         "θ has length $(length(θ)); expected $(length(m.theta))"))
     length(σ) == length(m.sigma) || throw(DimensionMismatch(
         "σ has length $(length(σ)); expected $(length(m.sigma))"))
-    layout = m.backend.model.layout
     length(ω) == NE.nomega(NE.nlme_layout(m)) || throw(DimensionMismatch(
         "ω has length $(length(ω)); expected $(NE.nomega(NE.nlme_layout(m)))"))
-    u = copy(m.unit)
-    u[m.theta] = θ
-    u[m.sigma] = σ
-    values = RKPPL.constrain(layout, u)
-    chol = NE.omega_cholesky(NE.nlme_layout(m), ω)
-    C = BRM._brm_nlme_ragged(m.view) ? chol : Matrix(chol)
+    _prior_omega_map(m, _prior_structure(m), θ, σ, ω)
+end
+
+# Which packed coordinates hold each covariance block's scales and LKJ factor,
+# their layout entries, and the subject draws. None of it depends on the point,
+# so it is read once per model: reading the coordinate records and matching
+# coordinate names costs more than the RK prior query itself. A failed read is
+# not cached, so an unsupported model keeps refusing every prior evaluation.
+function _prior_structure(m::BRM.BRMNLMEModel)
+    cached = m.prior_structure[]
+    cached === nothing || return cached
+    m.prior_structure[] = _read_prior_structure(m)
+end
+
+function _read_prior_structure(m::BRM.BRMNLMEModel)
+    layout = m.backend.model.layout
     records = [r for r in BRM._brm_nlme_records(m.backend.plan) if r.kind === :ranef]
-    J = zeros(Float64, length(ω), length(ω))
-    omega_positions = Int[]
-    omega_logjac_gradient = Float64[]
-    log_omega_jacobian = 0.0
-    log_coordinate_jacobian = 0.0
-    log_omega_jacobian_gradient = zeros(Float64, length(ω))
-    saturated = false
-    margin_start = 1
-    omega_start = 1
-    for (family, record) in enumerate(records)
+    families = map(records) do record
         K = length(record.margins)
-        block = BRM._brm_nlme_ragged(m.view) ? C[family] :
-            C[margin_start:(margin_start + K - 1), margin_start:(margin_start + K - 1)]
-        τ = [norm(view(block, i, 1:i)) for i in 1:K]
-        scales = isnothing(record.scales) ? (record.scale,) : record.scales
         scale_positions = Int[]
         if isnothing(record.scales)
-            values = BRM._brm_rk_set_declaration_value(values, record.scale, (), τ)
             append!(scale_positions, _prior_positions(m, record.scale))
         else
-            length(scales) == K || BRM._brm_nlme_error(
+            length(record.scales) == K || BRM._brm_nlme_error(
                 "population prior: scale declarations do not match the random-effect block")
-            for (declaration, scale) in zip(scales, τ)
-                values = BRM._brm_rk_set_declaration_value(values, declaration, (), scale)
+            for declaration in record.scales
                 append!(scale_positions, _prior_positions(m, declaration))
             end
         end
@@ -114,35 +108,15 @@ function _prior_omega_map(m::BRM.BRMNLMEModel, θ, σ, ω)
         factor_positions = isnothing(record.L) ? Int[] : _prior_positions(m, record.L)
         length(factor_positions) == K * (K - 1) ÷ 2 || BRM._brm_nlme_error(
             "population prior: correlation coordinates do not match the random-effect block")
-        append!(omega_positions, scale_positions, factor_positions)
-        margin_start += K
-        omega_start += K * (K + 1) ÷ 2
+        (; K, scale_positions, factor_positions)
     end
-    length(omega_positions) == length(ω) || BRM._brm_nlme_error(
+    omega_positions = reduce(vcat,
+        (vcat(f.scale_positions, f.factor_positions) for f in families); init=Int[])
+    length(omega_positions) == NE.nomega(NE.nlme_layout(m)) || BRM._brm_nlme_error(
         "population prior: BRM covariance coordinates do not match NLME ω")
-    # Preserve the supplied unconstrained population point exactly after the
-    # constrained round trip. Only BRM's scale coordinates are replaced here;
-    # the correlation coordinates are written from C below.
-    mapped = RKPPL.unconstrain(layout, values)
-    mapped[m.theta] = θ
-    mapped[m.sigma] = σ
-    mapped[findall(==(:subject_effect), m.view.role)] .= 0.0
-    # Build the small covariance-coordinate Jacobian in the same block order
-    # as NLMELayout. Row i has i raw Cholesky entries, its last stored as log.
-    margin_start = 1
-    omega_start = 1
-    urow = 1
-    for (family, record) in enumerate(records)
-        K = length(record.margins)
-        scale_positions = omega_positions[urow:(urow + K - 1)]
-        factor_positions = omega_positions[(urow + K):(urow + K * (K + 1) ÷ 2 - 1)]
-        block = BRM._brm_nlme_ragged(m.view) ? C[family] :
-            C[margin_start:(margin_start + K - 1), margin_start:(margin_start + K - 1)]
-        τ = [norm(view(block, i, 1:i)) for i in 1:K]
-        local_omega = [omega_start + i * (i - 1) ÷ 2 + j - 1 for i in 1:K, j in 1:K]
-        for i in 1:K
-            scale_position = scale_positions[i]
-            entry = _prior_entry(layout, scale_position)
+    families = map(families) do family
+        scale_entries = map(family.scale_positions) do position
+            entry = _prior_entry(layout, position)
             entry.transform in (:exp, :floored, :upper, :interval, :logistic) ||
                 BRM._brm_nlme_error("population prior: unsupported scale transform " *
                     "`$(entry.transform)` for `$(entry.name)`")
@@ -150,6 +124,54 @@ function _prior_omega_map(m::BRM.BRMNLMEModel, θ, σ, ω)
                 "population prior: external random-effect scale transforms are not covered")
             entry.lo isa Real && entry.hi isa Real || BRM._brm_nlme_error(
                 "population prior: random-effect scale bounds must be fixed")
+            entry
+        end
+        for position in family.factor_positions
+            entry = _prior_entry(layout, position)
+            entry.kind === :cholesky_corr && entry.transform === :lkj ||
+                BRM._brm_nlme_error("population prior: expected an LKJ correlation factor")
+        end
+        (; family..., scale_entries)
+    end
+    # BRM's standardized z prior is one N(0,1) per subject and margin at z=0.
+    # NLMEEstimation owns the η prior, so the prior removes that constant term.
+    z_constant = -sum(length, m.view.subject_coordinates) * log(2π) / 2
+    (; families, omega_positions,
+        subject_effects=findall(==(:subject_effect), m.view.role), z_constant)
+end
+
+function _prior_omega_map(m::BRM.BRMNLMEModel, structure, θ, σ, ω)
+    chol = NE.omega_cholesky(NE.nlme_layout(m), ω)
+    C = BRM._brm_nlme_ragged(m.view) ? chol : Matrix(chol)
+    J = zeros(Float64, length(ω), length(ω))
+    omega_positions = structure.omega_positions
+    omega_logjac_gradient = Float64[]
+    log_omega_jacobian = 0.0
+    log_coordinate_jacobian = 0.0
+    log_omega_jacobian_gradient = zeros(Float64, length(ω))
+    saturated = false
+    # Keep the supplied unconstrained point exactly. Only BRM's scale and
+    # correlation coordinates are written, from C below; the subject draws sit
+    # at z = 0.
+    mapped = copy(m.unit)
+    mapped[m.theta] = θ
+    mapped[m.sigma] = σ
+    mapped[structure.subject_effects] .= 0.0
+    # Build the small covariance-coordinate Jacobian in the same block order
+    # as NLMELayout. Row i has i raw Cholesky entries, its last stored as log.
+    margin_start = 1
+    omega_start = 1
+    urow = 1
+    for (family, (; K, scale_positions, factor_positions, scale_entries)) in
+            enumerate(structure.families)
+        block = BRM._brm_nlme_ragged(m.view) ? C[family] :
+            C[margin_start:(margin_start + K - 1), margin_start:(margin_start + K - 1)]
+        τ = [norm(view(block, i, 1:i)) for i in 1:K]
+        local_omega = [omega_start + i * (i - 1) ÷ 2 + j - 1 for i in 1:K, j in 1:K]
+        for i in 1:K
+            scale_position = scale_positions[i]
+            entry = scale_entries[i]
+            mapped[scale_position] = RKPPL._unconstrain_elt(entry, τ[i])
             scale_logjac = RKPPL._logjac_elt(entry, mapped[scale_position])
             log_coordinate_jacobian += scale_logjac
             push!(omega_logjac_gradient,
@@ -169,9 +191,6 @@ function _prior_omega_map(m::BRM.BRMNLMEModel, θ, σ, ω)
         factor_index = 1
         for i in 2:K, j in 1:(i - 1)
             position = factor_positions[factor_index]
-            entry = _prior_entry(layout, position)
-            entry.kind === :cholesky_corr && entry.transform === :lkj ||
-                BRM._brm_nlme_error("population prior: expected an LKJ correlation factor")
             # The LKJ coordinate is atanh of the partial correlation
             # C[i,j] / ‖C[i,j:i]‖, i.e. asinh(C[i,j] / ‖C[i,j+1:i]‖). That form
             # is finite for every finite ω, while the partial correlation
@@ -202,7 +221,8 @@ function _prior_omega_map(m::BRM.BRMNLMEModel, θ, σ, ω)
     end
     correction = log_omega_jacobian - log_coordinate_jacobian
     (; mapped, omega_positions, J, omega_logjac_gradient,
-        log_omega_jacobian_gradient, correction, saturated)
+        log_omega_jacobian_gradient, correction, saturated,
+        structure.z_constant)
 end
 
 # A finite ω whose correlation coordinate saturates has an underflowed prior
@@ -211,11 +231,8 @@ end
 function NE.population_logprior(m::BRM.BRMNLMEModel, θ, σ, ω)
     mapping = _prior_omega_map(m, θ, σ, ω)
     mapping.saturated && return -Inf
-    # BRM's standardized z prior is one N(0,1) per subject and margin at z=0.
-    # NLMEEstimation owns the η prior, so remove precisely that constant term.
-    z_constant = -sum(length, m.view.subject_coordinates) * log(2π) / 2
     BRM._rk_nlme_population_prior_value(m.population_prior, mapping.mapped) +
-        mapping.correction - z_constant
+        mapping.correction - mapping.z_constant
 end
 
 function NE.population_logprior_and_gradient(m::BRM.BRMNLMEModel, θ, σ, ω)
@@ -224,11 +241,10 @@ function NE.population_logprior_and_gradient(m::BRM.BRMNLMEModel, θ, σ, ω)
         fill(NaN, length(ω))
     value, gradient = BRM._rk_nlme_population_prior_value_gradient(
         m.population_prior, mapping.mapped)
-    z_constant = -sum(length, m.view.subject_coordinates) * log(2π) / 2
     gω = mapping.J' *
         (gradient[mapping.omega_positions] - mapping.omega_logjac_gradient) +
         mapping.log_omega_jacobian_gradient
-    value + mapping.correction - z_constant,
+    value + mapping.correction - mapping.z_constant,
         gradient[m.theta], gradient[m.sigma], gω
 end
 
