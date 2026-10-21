@@ -15,6 +15,9 @@ struct _RKPreparedKernelAssignment
     # The graph value holding the collected value of each subject, which a
     # per-subject observation reads entry by entry.
     cells::Symbol
+    # Responses the cell's `@scan` blocks observe entry by entry, as
+    # `(; param, source)`: the plate observes them in place (`y[i][t] ~ …`).
+    scan_observed::Tuple
 end
 
 # The authored cell's lexical namespace is a stable callable authority, not
@@ -31,7 +34,8 @@ function Base.deepcopy_internal(x::_RKPreparedKernelAssignment, stack::IdDict)
         Base.deepcopy_internal(x.columns, stack),
         Base.deepcopy_internal(x.group_values, stack),
         Base.deepcopy_internal(x.observations, stack),
-        x.cells)
+        x.cells,
+        Base.deepcopy_internal(x.scan_observed, stack))
 end
 _rk_kernel_column_name(column::NamedColumn) = name(column)
 
@@ -45,6 +49,14 @@ end
 Base.getproperty(observation::_RKNestedObservation, field::Symbol) =
     field in (:observation, :cells) ? getfield(observation, field) :
         getproperty(getfield(observation, :observation), field)
+
+# A response a kernel cell's `@scan` observes entry by entry. RKPPL computes
+# its densities in the cell (rkppl-use §5 "Observing a carried array"): the
+# program conditions on it by name and emits no observation statement for it.
+struct _RKScanObservation{Y}
+    name::Symbol
+    response::Y
+end
 
 _rk_observation_statement(observation, base, taken) =
     Expr(:call, :.~, observation.name, base)
@@ -244,12 +256,12 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
     group_values = if isempty(groups)
         # Without a subject predictor, `ragged(x, group => cells)` inputs label
         # the cells by their explicit cell label column (district totals over
-        # facility predictors are the shape).
+        # facility predictors are the shape), and a `groups(g)` plate by the
+        # labels of `g`.
         if isempty(ragged_cols)
             nothing
         else
-            column = _brm_kernel_cell_label_column(ragged_cols; prefix="RK backend")
-            _brm_kernel_subject_values(parent(parent(column)), _rk_kernel_column_name(column); prefix="RK backend")
+            _brm_kernel_plate_cells(ragged_cols; prefix="RK backend").values
         end
     else
         length(unique(group.key for group in groups)) == 1 || error(
@@ -262,15 +274,27 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
     inputs = Any[]
     outer_lengths = Int[]
     observed = _rk_kernel_observed_columns(brmi, params, arguments, raw_body)
+    scanned = _rk_scan_observed_params(raw_body, params)
+    scan_observed = Any[]
     for (i, argument) in enumerate(arguments)
         if argument isa ExprColumn && getf(argument) === ragged
             value, group = _brm_kernel_ragged_args(argument; prefix="RK backend")
             value isa NamedColumn || error("RK backend: ragged input must name a column or predictor")
-            partition = _brm_kernel_ragged_rows(value, group, group_values; prefix="RK backend")
+            (; into, order) = _brm_kernel_ragged_options(argument; prefix="RK backend")
+            partition = _brm_kernel_ragged_rows(value, group, group_values;
+                prefix="RK backend", order)
+            if params[i] in scanned && parent(value) isa DataColumn
+                # A response a scan observes is bound one series per subject
+                # and read in place, as RKPPL observes it.
+                column = _rk_kernel_scan_response(name, value, observed)
+                columns[column] = _rk_gather_rows(parent(parent(value)), partition.rows)
+                push!(inputs, (; source=column, kind=:element, rows=nothing, column))
+                push!(scan_observed, (; param=params[i], source=column))
+                continue
+            end
             rows = Symbol(name, :_rows_, i)
             columns[rows] = partition.rows
             column = _rk_kernel_column_name(value)
-            into = _brm_kernel_ragged_into(argument; prefix="RK backend")
             source = !isnothing(into) ? Symbol(name, :_index_, column) :
                 column in observed ? Symbol(name, :_input_, column) : column
             if !isnothing(into)
@@ -289,19 +313,22 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             # keeps its original nested values in a separate port; that port
             # is also the response's raw source (`_rk_kernel_input_port`).
             column = _rk_kernel_column_name(argument)
-            source = column in observed ? Symbol(name, :_input_, column) : column
+            scan = params[i] in scanned
+            source = scan ? _rk_kernel_scan_response(name, argument, observed) :
+                column in observed ? Symbol(name, :_input_, column) : column
             values = parent(parent(argument))
             values isa AbstractVector || error("RK backend: kernel input `$source` must be an array")
             columns[source] = values
             _rk_push_outer_length!(outer_lengths, values)
             push!(inputs, (; source, kind=:element, rows=nothing, column))
+            scan && push!(scan_observed, (; param=params[i], source))
         elseif argument isa NamedColumn && parent(argument) isa ExprColumn
             push!(inputs, (; source=_rk_kernel_column_name(argument), kind=:element,
                 rows=nothing, column=nothing))
         elseif argument isa NamedColumn && parent(argument) isa MissingColumn &&
-                any(statement -> Meta.isexpr(statement, :call) &&
+                (params[i] in scanned || any(statement -> Meta.isexpr(statement, :call) &&
                     length(statement.args) == 3 && first(statement.args) === :~ &&
-                    statement.args[2] === params[i], raw_body)
+                    statement.args[2] === params[i], raw_body))
             # An unbound in-cell response is generated by Stan, but contributes
             # no RK likelihood. Keep its formal position so slices of the
             # deterministic cell can omit it without shifting later inputs.
@@ -391,7 +418,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
     globals = sort!(collect(intersect(setdiff(referenced, locals), available)))
     cells = _rk_ast_fresh_name(string(name, "_cells"), union(available, keys(columns)))
     _RKPreparedKernelAssignment(name, params, body, collected, scope, Tuple(inputs),
-        globals, columns, group_values, Tuple(observations), cells)
+        globals, columns, group_values, Tuple(observations), cells, Tuple(scan_observed))
 end
 
 # A formula observation of kernel output whose response holds one array per
@@ -510,6 +537,32 @@ _rk_rowwise_callable(callable) = false
 
 # The data columns observed by a likelihood: every authored response, and
 # every kernel input this cell observes. Each is flattened under its own name.
+# The cell parameters whose entries a `@scan` block observes (`y[1] ~ …`,
+# `y[t] ~ …` with `y` a cell slice): RKPPL observes such a carried array in
+# place, one series per subject (rkppl-use §5 "Observing a carried array").
+function _rk_scan_observed_params(raw_body, params)
+    observed = Symbol[]
+    for statement in raw_body
+        _is_brm_scan(statement) || continue
+        for s in _brm_plate_flat_statements(Any[statement])
+            isxcall(s, :~) && Meta.isexpr(s.args[2], :ref) || continue
+            param = first(s.args[2].args)
+            param in params && !(param in observed) && push!(observed, param)
+        end
+    end
+    observed
+end
+
+# A scan-observed response is conditioned under its own column name, which the
+# cell reads in place, so nothing else may observe it.
+function _rk_kernel_scan_response(kernel, value, observed)
+    column = _rk_kernel_column_name(value)
+    column in observed && error(
+        "RK backend: kernel `$kernel` observes response `$column` in a `@scan` " *
+        "block and again in another statement; observe each response once")
+    column
+end
+
 function _rk_kernel_observed_columns(brmi, params, arguments, raw_body)
     observed = Set{Symbol}()
     for (_, node) in _brm_operation_entries(brmi)
@@ -858,6 +911,9 @@ Base.@nospecializeinfer function _brm_rk_composed_kernel_plan(@nospecialize(brmi
             NamedColumn(observation.source, DataColumn(plan.columns[observation.source])),
             distribution, raw, modifier, weight))
     end
+    for kernel in kernels, entry in kernel.scan_observed
+        push!(observations, _RKScanObservation(entry.source, plan.columns[entry.source]))
+    end
     isempty(observations) && error("RK backend: kernel program needs at least one observed likelihood")
     _RKValuePlan(plan.regression, plan.assignments, Tuple(observations), plan.columns,
         plan.completions)
@@ -899,17 +955,23 @@ function _rk_kernel_unary_call(value)
     length(operands) == 1 && !Meta.isexpr(only(operands), :...)
 end
 
-function _rk_kernel_bind_calls(value, scope, bindings, taken)
+# Indices and range endpoints are integer arithmetic: Stan's scalar-array
+# broadcasting does not apply there, and RKPPL recognises a scan's lag reads
+# (`h[t - 1]`) and loop starts by their authored operators. `index` marks
+# such a position.
+function _rk_kernel_bind_calls(value, scope, bindings, taken; index=false)
     value isa Expr || return value
-    args = map(arg -> _rk_kernel_bind_calls(arg, scope, bindings, taken), value.args)
+    integer = value.head === :ref || (value.head === :call && first(value.args) === :(:))
+    args = Any[_rk_kernel_bind_calls(arg, scope, bindings, taken;
+        index=index || (integer && i > 1)) for (i, arg) in enumerate(value.args)]
     # A broadcast `f.(args...)` carries its callee in the same first slot.
     if value.head === :call || _brm_is_broadcast_call(value)
         head = first(value.args)
         if head === :rep_vector
             args[1] = :fill
-        elseif head === :+ && !_rk_kernel_unary_call(value)
+        elseif head === :+ && !index && !_rk_kernel_unary_call(value)
             args[1] = _rk_value_callee!(bindings, _rk_kernel_stan_add, taken)
-        elseif head === :- && !_rk_kernel_unary_call(value)
+        elseif head === :- && !index && !_rk_kernel_unary_call(value)
             args[1] = _rk_value_callee!(bindings, _rk_kernel_stan_sub, taken)
         elseif head === :inv_logit && !isdefined(scope, head)
             # Stan's vectorized primitive need not be defined in the cell's
@@ -955,10 +1017,13 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
     # `rendered` outputs are already emitted program expressions (hoisted
     # observation arguments): their calls are bound, not cell source.
     written = Any[outputs..., rendered...]
-    # Nothing written per subject (a cell without a collected value whose
-    # observations read only shared values): there is no cell to run.
-    isempty(written) && return
-    slice = _rk_kernel_value_slice(kernel, Expr(:tuple, last.(written)...))
+    # A response a scan observes is observed in the cell itself.
+    scanned = Any[entry.param for entry in kernel.scan_observed]
+    # Nothing written or observed per subject (a cell without a collected
+    # value whose observations read only shared values): there is no cell to
+    # run.
+    isempty(written) && isempty(scanned) && return
+    slice = _rk_kernel_value_slice(kernel, Expr(:tuple, last.(written)..., scanned...))
     any(input -> input.kind === :omitted, slice.inputs) && error(
         "RK backend: kernel `$(kernel.name)` reads an unbound in-cell response outside its observation")
     cell = Any[[_rk_kernel_bind_calls(statement, kernel.scope, bindings, taken)
@@ -1189,7 +1254,7 @@ function _rk_kernel_with_arguments(kernel::_RKPreparedKernelAssignment, argument
     _RKPreparedKernelAssignment(kernel.name, [kernel.params; arguments.params], body,
         arguments.value, kernel.scope, (kernel.inputs..., arguments.inputs...),
         kernel.globals, kernel.columns, kernel.group_values, kernel.observations,
-        kernel.cells)
+        kernel.cells, kernel.scan_observed)
 end
 
 # The cell restricted to what `value` reads: the body statements producing
@@ -1201,7 +1266,8 @@ function _rk_kernel_value_slice(kernel::_RKPreparedKernelAssignment, value)
     body = Any[]
     for statement in Iterators.reverse(kernel.body)
         outputs = Meta.isexpr(statement, :(=)) ?
-            _rk_source_outputs!(Set{Symbol}(), statement) : Set{Symbol}()
+            _rk_source_outputs!(Set{Symbol}(), statement) :
+            _is_brm_scan(statement) ? _rk_scan_writes(statement) : Set{Symbol}()
         !isempty(outputs) && isdisjoint(outputs, needed) && continue
         pushfirst!(body, statement)
         _brm_cell_value_refs!(needed, statement)
@@ -1209,5 +1275,18 @@ function _rk_kernel_value_slice(kernel::_RKPreparedKernelAssignment, value)
     kept = [i for (i, param) in enumerate(kernel.params) if param in needed]
     _RKPreparedKernelAssignment(kernel.name, kernel.params[kept], body, value,
         kernel.scope, kernel.inputs[kept], filter(in(needed), kernel.globals),
-        kernel.columns, kernel.group_values, (), kernel.cells)
+        kernel.columns, kernel.group_values, (), kernel.cells, ())
+end
+
+# The arrays and step locals a `@scan` block writes, and the responses it
+# observes (`y[t] ~ …` writes `y`'s entries).
+function _rk_scan_writes(scan)
+    names = Set{Symbol}()
+    for statement in _brm_plate_flat_statements(Any[scan])
+        Meta.isexpr(statement, :(=), 2) || isxcall(statement, :~) || continue
+        lhs = Meta.isexpr(statement, :(=)) ? first(statement.args) : statement.args[2]
+        Meta.isexpr(lhs, :ref) && (lhs = first(lhs.args))
+        lhs isa Symbol && push!(names, lhs)
+    end
+    names
 end

@@ -678,6 +678,7 @@ pair order. Neither can yet be combined with `cdar` cells.
 | `mi(y)` | brms-style observed/imputed split — missing rows become parameters drawn from the same family |
 | [`weighted(y, w)`](@ref) | typed observation weights on the likelihood |
 | `truncated`, `censored`, [`interval_censored`](@ref) | truncation and censoring — see [Likelihoods](@ref) |
+| [`AR1Normal`](@ref)`(mu[p], sigma, phi; time = t[p])` | in a `@plate for p in groups(g; order = t)` cell: Gaussian observations with AR(1) residuals along the group's rows (below) |
 
 `mm`'s membership weights are part of the random-effect contribution and are a
 different thing from `weighted(...)`, which scales the likelihood.
@@ -694,6 +695,55 @@ raw flat data column; `group` names, for every row of that frame, which subject
 the row belongs to. Declare it once, outside the cell; inside the cell, read
 `x[i]`. See the [multi-axis population PK kernel](@ref) for a runnable example
 whose subject and observation columns have different lengths.
+
+### Per-group recurrences over long-format rows
+
+With one row per observation and a grouping column, a plate iterates
+[`groups`](@ref)`(probe; order = day)`: each probe's indices, in day order. A per-group AR(1) residual process is one statement in the cell:
+
+```julia
+@brm df begin                                   # one row per probe and day
+    mu ~ 1 + c1 + s1 + trend + (1 | probe)
+    sigma ~ Exponential(1)
+    phi ~ Uniform(-1, 1)
+    @plate for p in groups(probe; order = day)  # one cell per probe, rows in day order
+        y[p] ~ AR1Normal(mu[p], sigma, phi; time = day[p])
+    end
+end
+```
+
+`p` is the probe's indices, so `x[p]` is `x` at those indices, in `day` order,
+as the same Julia loop reads it; shared values are read bare. `AR1Normal` is
+the exact likelihood of AR(1) residuals observed on the recorded days: a gap
+of `k` days uses `phi^k`. Without `time`, consecutive rows are one step apart.
+The grouping is the plate's: there is no `by=` keyword.
+
+For now `@brm` evaluates the statement as the `@scan` recurrence it states, and
+that recurrence is also how to write another family, a higher order or another
+start or gap rule:
+
+```julia
+@brm df begin                                   # one row per probe and day
+    mu ~ 1 + c1 + s1 + trend + (1 | probe)
+    sigma ~ Exponential(1)
+    phi ~ Uniform(-1, 1)
+    @plate for p in groups(probe; order = day)  # one cell per probe, rows in day order
+        @scan begin
+            y[p][1] ~ Normal(mu[p][1], sigma / sqrt(1 - phi ^ 2))
+            for t in 2:length(day[p])
+                k = day[p][t] - day[p][t - 1]
+                y[p][t] ~ Normal(mu[p][t] + phi ^ k * (y[p][t - 1] - mu[p][t - 1]),
+                                 sigma * sqrt((1 - phi ^ (2 * k)) / (1 - phi ^ 2)))
+            end
+        end
+    end
+end
+```
+
+Observing the response entry by entry gives each row its
+conditional density given the group's earlier rows, so this block is the exact
+likelihood of AR(1) residuals observed on the recorded days, and with `y`
+omitted it draws whole trajectories.
 
 ### Downstream grouped terms: the reusable-term pattern
 
