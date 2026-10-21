@@ -176,6 +176,62 @@ reads_joined(d) = @brm d begin
     end
     ragged(y, obs_subject) ~ censored(Normal(loc, sigma); lower=obs_limit)
 end
+
+# A cell whose curve a callable-source provider claims as an RK graph (a scan
+# over the doses and a plate over the read times), counting its emissions.
+import BayesianRegressionModels: _rk_callable_source!
+using ReactiveKernels
+function dosed_curve(t, dose, log_CL)
+    k = exp(log_CL)
+    [dose * exp(-k * ti) for ti in t]
+end
+const CURVE_EMISSIONS = Ref(0)
+function _rk_callable_source!(definitions, bindings, entry, ::typeof(dosed_curve))
+    CURVE_EMISSIONS[] += 1
+    push!(definitions, :(ReactiveKernels.@kernel $entry(t, dose, log_CL) = begin
+        k = exp(log_CL)
+        decay = ReactiveKernels.plate(eachindex(t)) do j
+            exp(-k * t[j])
+        end
+        reads = ReactiveKernels.scan(decay; init=0.0) do carry, e
+            (carry, dose * e)
+        end
+        return reads
+    end))
+    :done
+end
+pk_provided(d) = @brm d begin
+    sigma ~ Exponential(1)
+    log_CL ~ 1 + zscale(weight) + (1 | p | subject)
+    effect(log_CL, Intercept) ~ Normal(0, 1)
+    sd(:, p) ~ Exponential(1)
+    @plate for i in eachindex(log_CL)
+        conc[i] = dosed_curve(t[i], dose[i], log_CL[i])
+        y[i] ~ normal(conc[i], sigma)
+    end
+end
+# A provider whose leaf binding is a new object on every emission: the same
+# program text, other callables.
+fresh_leaf(t, dose, log_CL) = [dose * exp(-exp(log_CL) * ti) for ti in t]
+function _rk_callable_source!(definitions, bindings, entry, ::typeof(fresh_leaf))
+    scale = Ref(1.0)
+    leaf = Symbol(entry, :_leaf)
+    push!(bindings, leaf => (t, dose, log_CL) -> scale[] .* dose .* exp.(-exp(log_CL) .* t))
+    push!(definitions, :(function $entry(t, dose, log_CL)
+        return $leaf(t, dose, log_CL)
+    end))
+    :done
+end
+pk_fresh_leaf(d) = @brm d begin
+    sigma ~ Exponential(1)
+    log_CL ~ 1 + zscale(weight) + (1 | p | subject)
+    effect(log_CL, Intercept) ~ Normal(0, 1)
+    sd(:, p) ~ Exponential(1)
+    @plate for i in eachindex(log_CL)
+        conc[i] = fresh_leaf(t[i], dose[i], log_CL[i])
+        y[i] ~ normal(conc[i], sigma)
+    end
+end
 end
 const RM = ReprocessModels
 
@@ -465,4 +521,48 @@ end
     u = point(own)
     @test fresh.model !== rk.model
     @test density(fresh, u) == density(own, u)
+end
+
+@stestset "a replay binds the fit's translated program" begin
+    # Translation (emission, definition module, lowering) is per program and
+    # binding per data (snag `rk-bound-data-re-ddd101cb`): a replay shares the
+    # fit's program and binds only its own data, once, for every query.
+    ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
+    fresh(rk) = ext._rk_translated_plan(rk.plan).columns
+    for build in (RM.pk, RM.pk_provided)
+        rk = RKBRMI(build(PK))
+        u = point(rk)
+        conc = graph_value(rk, :conc, u)
+        for (design, groups) in ((rows_of(PK, [4, 1]), ()),
+                (without(merge(rows_of(PK, [2]), (; subject=["new"])), :y), [:subject]))
+            replay = reprocess(rk, design; resample_groups=groups)
+            @test replay.program === rk.program
+            @test ext._rk_program(replay).mod === ext._rk_program(rk).mod
+            bound = rk_bound_data(replay)
+            @test isequal(Dict(pairs(bound)), fresh(replay))
+            @test rk_bound_data(replay) === bound
+        end
+        replay = reprocess(rk, rows_of(PK, [4, 1]))
+        @test graph_value(replay, :conc, u) ≈ pk_reads(conc, [4, 1]) atol=1e-12 rtol=1e-12
+        @test density(reprocess(rk, PK), u) == density(rk, u)
+    end
+    # The provider runs once per emission: the fit's, and each replay's own
+    # (its program check). Binding a replay's data emits nothing.
+    rk = RKBRMI(RM.pk_provided(PK))
+    u = point(rk)
+    before = RM.CURVE_EMISSIONS[]
+    replay = reprocess(rk, rows_of(PK, [3]))
+    @test RM.CURVE_EMISSIONS[] == before + 1
+    graph_value(replay, :conc, u)
+    @test isfinite(density(replay, u))
+    @test RM.CURVE_EMISSIONS[] == before + 1
+    # Another callable object under the same name: the replay translates its
+    # own program, with its own callables.
+    rk = RKBRMI(RM.pk_fresh_leaf(PK))
+    u = point(rk)
+    replay = reprocess(rk, rows_of(PK, [4, 1]))
+    @test replay.program !== rk.program
+    @test isequal(Dict(pairs(rk_bound_data(replay))), fresh(replay))
+    @test graph_value(replay, :conc, u) ≈
+        pk_reads(graph_value(rk, :conc, u), [4, 1]) atol=1e-12 rtol=1e-12
 end
