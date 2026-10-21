@@ -247,6 +247,32 @@ end
     @test missing_m.model.observations == (:m, :y)
 end
 
+# BRM places a constant Dirichlet concentration in data (`s ~ dirichlet(s_alpha)`).
+# That vector is a hyperparameter, not row data: the simplex is a prior whether
+# or not anything reads it, and a latent computed from it stays a prior too.
+@testset "Dirichlet priors with a data concentration classify as priors" begin
+    roles(sb) = Dict(d.target => d.role for d in generative_plan(sb).declarations)
+    x, y = joint_df.x, joint_df.y
+    shares = @brm begin
+        s ~ Dirichlet(4, 2.0)
+        w ~ Dirichlet([1.0, 2.0, 3.0])
+        a ~ Normal(s[1], 1)
+        sigma ~ Exponential(1)
+        mu = a * x
+        y ~ Normal(mu, sigma)
+    end
+    sb = @test_logs min_level=Warn SBBRMI(shares((; x, y)); mod=@__MODULE__)
+    @test (roles(sb)[:s], roles(sb)[:w], roles(sb)[:a]) === (:prior, :prior, :prior)
+    @test sb.model.observations == (:y,)
+    # Control: the omitted response beside them still warns and simulates.
+    prior = @test_logs (:warn, r"^sbimpl: `y` bind\(s\) no data column") SBBRMI(
+        shares((; x)); mod=@__MODULE__)
+    @test (roles(prior)[:s], roles(prior)[:w], roles(prior)[:y]) === (:prior, :prior, :observation)
+    prior_code = BayesianRegressionModels.stan_code(prior)
+    @test occursin("y_gen", prior_code) && !occursin("s_gen", prior_code)
+    @test StanBlocks.stanc_check(prior_code; warn_pedantic=false).ok
+end
+
 # A consumer `@slic` submodel term routed by a `_sb_submodel_rhs!` hook binds a
 # latent to the submodel's `return` value. It reads row-varying data, but there
 # is no response to omit: misclassified, it warned "binds no data column", was
