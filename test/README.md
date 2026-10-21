@@ -109,6 +109,13 @@ traced program: a copy of the descriptor whose plan holds no traceable program
 answers each query identically, in a fitted and in a prior program, while
 `ranef_blocks` on that plan fails.
 
+`transform_constants.jl` checks `brm_transform_constants`, the fitted
+`center`/`zscale`/`standardize` constants. On SBBRMI each record reproduces the
+model's transformed Stan data bit for bit, follows frozen and refitted
+`reprocess`, and reports an `mi(...)` column's observed-only fit under the
+coefficient's name. On RKBRMI the records equal the graph's own transformed
+values, a frozen replay keeps them, and an `&` operand is refused by name.
+
 `plate_index_into.jl` checks `ragged(idx, group; into=target)`, an index column
 of row numbers on another flat axis: the gathered per-subject positions equal
 hand-rebased pre-grouped columns on BridgeStan and RK, `0` stays "no row",

@@ -93,6 +93,7 @@ include("s2z_select.jl")
 # parallel registry of its own.
 include("descriptor.jl")
 include("turing_descriptor.jl")
+include("transform_constants.jl")
 
 # Post-fit prediction modes — population-level ("no random effects") and
 # transported ("same draws, new covariates / new group levels") prediction.
@@ -235,6 +236,7 @@ export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        brm_nlme_loglikelihood_and_gradient, brm_nlme_loglikelihoods,
        brm_nlme_loglikelihoods_and_gradients,
        brm_operation, brm_execute, brm_columns, required_brm_inputs
+export brm_transform_constants
 
 # Accessor helpers for column types — used unqualified by html renderers,
 # sbimpl dispatch logic, and downstream extension hooks.
