@@ -5,11 +5,12 @@
 #
 # An event schedule numbers its reads across every subject, and each
 # observation stores the GLOBAL read it is taken at. A cell computes one value
-# per LOCAL read, so it needs per-subject positions. The model-scope statement
-# `ragged(obs_read, obs_subject; into=read_subject)` gathers `obs_read` by
-# `obs_subject` and maps every row number to its position among that subject's
-# rows of the read axis (labelled by `read_subject`), refusing an index that
-# leaves its own subject. The result must match hand-rebased, pre-grouped
+# per LOCAL read, so it needs per-subject positions: with
+# `reads = groups(read_subject => subject)` and `obs = groups(obs_subject =>
+# subject)`, the cell reads `indexin(obs_read[obs[i]], reads[i])`, each
+# observation's read as its position among the subject's reads, as Julia
+# computes it (todo `1nfukuv`). An index that leaves its own subject is
+# refused; `something.(indexin(…), 0)` keeps `0` as "no index". The result must match hand-rebased, pre-grouped
 # columns exactly, on both backends and on replay.
 
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
@@ -39,13 +40,12 @@ const PREGROUPED = (;
 declared(data) = @brm data begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + weight + (1 | p | subject)
-    ragged(read_time, read_subject)
-    ragged(obs_read, obs_subject; into=read_subject)
-    ragged(y, obs_subject)
+    reads = groups(read_subject => subject)
+    obs = groups(obs_subject => subject)
     @plate for i in eachindex(log_CL)
-        conc = exp.(-exp(log_CL[i]) .* read_time[i])
-        loc[i] = conc[obs_read[i]]
-        y[i] ~ normal(loc[i], sigma)
+        conc = exp.(-exp(log_CL[i]) .* read_time[reads[i]])
+        loc[i] = conc[indexin(obs_read[obs[i]], reads[i])]
+        y[obs[i]] ~ normal(loc[i], sigma)
     end
 end
 
@@ -96,7 +96,7 @@ end
     end
 end
 
-@stestset "into= keeps 0 as no row and replays on new data" begin
+@stestset "something.(indexin(…), 0) keeps 0 as no index and replays on new data" begin
     # Operation rows: `0` marks an operation that reads nothing.
     ops = merge(READS, (;
         op_subject=["b", "a", "a", "c", "b"],
@@ -105,18 +105,34 @@ end
     ops_model(data) = @brm data begin
         sigma ~ Exponential(1)
         log_CL ~ 1 + weight + (1 | p | subject)
-        ragged(read_time, read_subject)
-        ragged(op_read, op_subject; into=read_subject)
-        ragged(obs_read, obs_subject; into=read_subject)
-        ragged(y, obs_subject)
+        reads = groups(read_subject => subject)
+        ops = groups(op_subject => subject)
+        obs = groups(obs_subject => subject)
         @plate for i in eachindex(log_CL)
-            conc = exp.(-exp(log_CL[i]) .* read_time[i]) .+ 1e-3 * sum(op_read[i])
-            loc[i] = conc[obs_read[i]]
-            y[i] ~ normal(loc[i], sigma)
+            conc = exp.(-exp(log_CL[i]) .* read_time[reads[i]]) .+
+                1e-3 * sum(something.(indexin(op_read[ops[i]], reads[i]), 0))
+            loc[i] = conc[indexin(obs_read[obs[i]], reads[i])]
+            y[obs[i]] ~ normal(loc[i], sigma)
         end
     end
     sb = SBBRMI(ops_model(ops); mod=@__MODULE__, total_groups=())
     @test sb.data[:kernel_loc_op_read_ragged] == [[0, 2], [1, 3], [2]]
+    # The cell reads what Julia computes for the same loop.
+    reads = groups(ops.read_subject => ops.subject)
+    @test [something.(indexin(ops.op_read[r], reads[j]), 0)
+           for (j, r) in enumerate(groups(ops.op_subject => ops.subject))] ==
+          [[0, 2], [1, 3], [2]]
+    # refused: in plain `indexin(…)` a 0 has no position.
+    strict(data) = @brm data begin
+        sigma ~ Exponential(1)
+        log_CL ~ 1 + weight + (1 | p | subject)
+        reads = groups(read_subject => subject)
+        ops = groups(op_subject => subject)
+        @plate for i in eachindex(log_CL)
+            loc[i] = exp(log_CL[i]) .+ sum(indexin(op_read[ops[i]], reads[i]))
+        end
+    end
+    @test_throws "`op_read[1]` is 0, which is no index" strict(ops)
     # Replay rebases again: c's two observations swap reads, so their
     # positions swap too.
     swapped = merge(ops, (; obs_read=[3, 7, 5, 1, 2, 4, 6]))
@@ -138,31 +154,32 @@ end
         declared(beyond); mod=@__MODULE__, total_groups=())
 end
 
-@testset "into= declaration shape is checked at the formula boundary" begin
-    # refused: only `into=` is a grouping keyword; anything else is a typo.
-    other_keyword = :(@brm READS begin
+@testset "indexin reads are checked at the formula boundary" begin
+    # refused: the two bindings list different cells, so `reads[i]` is not
+    # the subject `obs[i]` belongs to.
+    other_cells = :(@brm merge(READS, (; label=READS.subject)) begin
         log_CL ~ 1 + (1 | p | subject)
-        ragged(obs_read, obs_subject; onto=read_subject)
+        reads = groups(read_subject => label)
+        obs = groups(obs_subject => subject)
         @plate for i in eachindex(log_CL)
-            loc[i] = obs_read[i]
+            loc[i] = sum(indexin(obs_read[obs[i]], reads[i]))
         end
     end)
-    @test_throws "`ragged(idx, group; into=target)`" macroexpand(@__MODULE__, other_keyword)
-    # refused: an index column cannot index its own values.
-    itself = :(@brm READS begin
+    @test_throws "list different cells" macroexpand(@__MODULE__, other_cells)
+    # refused: positions are among the target's indices in index order.
+    ordered = :(@brm READS begin
         log_CL ~ 1 + (1 | p | subject)
-        ragged(obs_read, obs_subject; into=obs_read)
+        reads = groups(read_subject => subject; order = read_time)
+        obs = groups(obs_subject => subject)
         @plate for i in eachindex(log_CL)
-            loc[i] = obs_read[i]
+            loc[i] = sum(indexin(obs_read[obs[i]], reads[i]))
         end
     end)
-    @test_throws "indexes `obs_read` into itself" macroexpand(@__MODULE__, itself)
-    # refused: a response holds values, not row numbers; `into=` there would be
-    # silently ignored by the likelihood.
+    @test_throws "bind `obs` and `reads` without `order`" macroexpand(@__MODULE__, ordered)
+    # refused: the formula-level grouped observation is retired (todo 1nfukuv).
     response = :(@brm READS begin
         mu ~ 1
         ragged(y, obs_subject; into=read_subject) ~ Normal(mu, 1)
     end)
-    @test_throws "an observation `ragged(y, group) ~ …` takes no keywords" macroexpand(
-        @__MODULE__, response)
+    @test_throws "are retired" macroexpand(@__MODULE__, response)
 end

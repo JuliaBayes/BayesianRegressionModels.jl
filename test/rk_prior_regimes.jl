@@ -14,11 +14,12 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
         sigma_add ~ Exponential(1)
         sigma_prop ~ Exponential(1)
         log_CL ~ 1 + (1 | p | subject)
-        loc ~ kernel(ragged(obs_idx, obs_subject), log_CL) do idxs, lCL
-            exp(lCL) .+ 0.0 .* idxs
+        obs = groups(obs_subject => subject)
+        @plate for i in eachindex(log_CL)
+            loc[i] = exp(log_CL[i]) .+ 0.0 .* obs_idx[obs[i]]
+            pk_conc[obs[i]] ~ censored(
+                Normal(loc[i], addprop(loc[i], sigma_add, sigma_prop)); lower=pk_lloq[obs[i]])
         end
-        ragged(pk_conc, obs_subject) ~ censored(
-            Normal(loc, addprop(loc, sigma_add, sigma_prop)); lower=pk_lloq)
     end
     ragged_data = (;
         subject=["s2", "s1"],
@@ -42,7 +43,10 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
         @test BRM.stan_code(backend.plan.generative) ==
             BRM.stan_code(SBBRMI(brmi))
         if label == "prior-ragged-bounds"
-            @test backend.plan.generative.data[:pk_conc_lower_pk_lloq_ragged] ==
+            # The bound read through the binding, gathered per subject.
+            bound = only(k for k in keys(backend.plan.generative.data)
+                if occursin("pk_lloq", string(k)) && endswith(string(k), "_ragged"))
+            @test backend.plan.generative.data[bound] ==
                 [[0.11, 0.13, 0.14, 0.16], [0.10, 0.12, 0.15]]
             @test !haskey(backend.plan.columns, :pk_conc)
         elseif label == "prior-regression"

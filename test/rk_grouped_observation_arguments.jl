@@ -90,10 +90,11 @@ function grouped_join(data)
         effect(alpha, Intercept) ~ Normal(0, 0.7)
         sd(:, p) ~ Exponential(0.9)
         sigma ~ Exponential(0.9)
-        loc ~ kernel(x, alpha) do xs, a
-            xs * a
+        events = groups(event_subject => subject)
+        @plate for i in eachindex(alpha)
+            loc[i] = x[i] * alpha[i]
+            y[events[i]] ~ relative_normal(loc[i], reference[events[i]], sigma)
         end
-        ragged(y, event_subject) ~ relative_normal(loc, reference, sigma)
         z ~ Normal(reference, 1)
     end
 end
@@ -176,15 +177,12 @@ function check_grouped_arguments(label, data)
     graph_sources = argument_graph_sources(kernel_graph(backend.model.spec))
     sources = sprint(show, graph_sources)
     if label === :joined
-        # The join is observed per subject. Its response and per-row
-        # reference are bound as subject cells grouped by the join's
-        # partition; `z` keeps reading the flat reference port. Neither the
+        # The response and its per-entry reference are read in the cell
+        # through the `groups` binding and observed per subject by the caller
+        # law; `z` keeps reading the flat reference port. Neither the
         # partition nor a row gather appears in source.
-        @test backend.plan.columns[:y_cells_reference] ==
-            [data.reference[rows] for rows in joined_partition]
         @test backend.plan.columns[:reference] == data.reference
-        @test occursin("y[i] .~ LogDensity.(y_scalar_logdensity, loc_cells[i], " *
-            "y_cells_reference[i], sigma)", main)
+        @test occursin("LogDensity.(y_scalar_logdensity", main)
         @test occursin("z .~ Normal.(reference, 1)", main)
         @test !occursin("[2, 3, 5", definitions * main)
         for retired in ("y_raw_response", "y_rows", "brm_gather_response",

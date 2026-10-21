@@ -102,8 +102,12 @@ _rk_kernel_binding(scope, head) =
 # In-cell distribution combinators take a family token as their first
 # positional (`weighted(normal, w, mu, sigma)`), never a data argument.
 _rk_kernel_weighted(callable) = callable === weighted || callable === StanBlocks.stan.weighted
-_rk_kernel_bounded(callable) = callable in (censored, truncated, interval_censored,
-    StanBlocks.stan.censored, StanBlocks.stan.truncated, StanBlocks.stan.interval_censored)
+_rk_kernel_bounded(callable) = _rk_kernel_bounded_kind(callable) !== nothing
+_rk_kernel_bounded_kind(callable) =
+    callable in (censored, StanBlocks.stan.censored) ? :censored :
+    callable in (truncated, StanBlocks.stan.truncated) ? :truncated :
+    callable in (interval_censored, StanBlocks.stan.interval_censored) ? :interval_censored :
+    nothing
 
 function _rk_kernel_observation_family(scope, expression, kernel)
     callable = _rk_kernel_observation_callee(scope, expression, kernel)
@@ -112,34 +116,36 @@ function _rk_kernel_observation_family(scope, expression, kernel)
         "write one `weighted(family, weight, args...)`")
     _rk_kernel_bounded(callable) && error(
         "RK backend: kernel `$kernel` in-cell `$(nameof(callable))(family, ...)` " *
-        "supports `censored(Normal(...); lower=..., upper=...)` only; " *
-        "use `_rk_observation_source!` for other bounded laws")
+        "supports `censored`, `truncated` or `interval_censored` of a `Normal(...)` " *
+        "family with `lower=`/`upper=` bounds only; use `_rk_observation_source!` " *
+        "for other bounded laws")
     callable === StanBlocks.normal && return Normal
     callable
 end
 
-# A cell writes the same censored Normal law as a formula response, but its
-# bounds may read cell locals and ragged inputs. Keep those expressions beside
-# the constructor arguments so the authored plate computes them on its axis.
+# A cell writes the same bounded Normal law as a formula response — censored,
+# truncated or interval-censored — but its bounds may read cell locals and
+# grouped inputs. Keep those expressions beside the constructor arguments so
+# the authored plate computes them on its axis.
 function _rk_kernel_observation_law(scope, expression, kernel)
     callable = _rk_kernel_observation_callee(scope, expression, kernel)
-    callable in (censored, StanBlocks.stan.censored) ||
-        return expression, nothing
+    kind = _rk_kernel_bounded_kind(callable)
+    kind === nothing && return expression, nothing
     args = expression.args[2:end]
     parameters = filter(arg -> Meta.isexpr(arg, :parameters), args)
     length(parameters) <= 1 || error(
-        "RK backend: kernel `$kernel` `censored` has repeated keyword groups")
+        "RK backend: kernel `$kernel` `$kind` has repeated keyword groups")
     bounds = Dict{Symbol,Any}()
     for keyword in (isempty(parameters) ? () : only(parameters).args)
         Meta.isexpr(keyword, :kw) && first(keyword.args) in (:lower, :upper) || error(
-            "RK backend: kernel `$kernel` `censored` accepts only `lower` and `upper` bounds")
+            "RK backend: kernel `$kernel` `$kind` accepts only `lower` and `upper` bounds")
         haskey(bounds, first(keyword.args)) && error(
-            "RK backend: kernel `$kernel` `censored` repeats `$(first(keyword.args))`")
+            "RK backend: kernel `$kernel` `$kind` repeats `$(first(keyword.args))`")
         bounds[first(keyword.args)] = last(keyword.args)
     end
     positional = filter(arg -> !Meta.isexpr(arg, :parameters), args)
     isempty(positional) && error(
-        "RK backend: kernel `$kernel` `censored` needs a Normal family")
+        "RK backend: kernel `$kernel` `$kind` needs a Normal family")
     family = first(positional)
     base = if Meta.isexpr(family, :call) && length(positional) == 1
         family
@@ -147,17 +153,21 @@ function _rk_kernel_observation_law(scope, expression, kernel)
             length(positional) > 1
         Expr(:call, positional...)
     else
-        error("RK backend: kernel `$kernel` `censored` needs a family call or token")
+        error("RK backend: kernel `$kernel` `$kind` needs a family call or token")
     end
     _rk_kernel_observation_family(scope, base, kernel) === Normal || error(
-        "RK backend: kernel `$kernel` in-cell `censored` currently supports Normal only")
+        "RK backend: kernel `$kernel` in-cell `$kind` currently supports Normal only")
     lower = get(bounds, :lower, nothing)
     upper = get(bounds, :upper, nothing)
     lower === :nothing && (lower = nothing)
     upper === :nothing && (upper = nothing)
     lower === nothing && upper === nothing && error(
-        "RK backend: kernel `$kernel` `censored` needs a non-nothing bound")
-    base, (; kind=:censored, lower, upper)
+        "RK backend: kernel `$kernel` `$kind` needs a non-nothing bound")
+    # The observed value is an interval's lower endpoint.
+    kind === :interval_censored && (lower === nothing && upper !== nothing || error(
+        "RK backend: kernel `$kernel` `interval_censored` takes `upper=` only; the " *
+        "observed value is the interval's lower endpoint"))
+    base, (; kind, lower, upper)
 end
 
 # SLIC's observation weighting `weighted(family, weight, args...)` is a power
@@ -230,6 +240,47 @@ _rk_join_values(raw, rows) = raw[brm_flatten_cells(rows)]
 _rk_join_values(raw::_BRMAbsentResponse, rows) = raw
 _rk_gather_rows(values, rows) = [values[r] for r in rows]
 _rk_gather_rows(values::_BRMAbsentResponse, rows) = values
+
+# A bounded in-cell observation is checked against its data when the model is
+# built, as a formula response is: every entry of the response within its
+# bounds, and an interval's lower endpoint below its upper one. A bound the
+# cell computes from parameters is the law's own business at evaluation.
+_rk_validate_cell_bounds(kernel, observation, ::_BRMAbsentResponse, data) = nothing
+function _rk_validate_cell_bounds(kernel, observation, response, data)
+    observation.modifier === nothing && return
+    response isa AbstractVector{<:AbstractVector} || return
+    values = Dict{Symbol,Any}()
+    function bound(label)
+        index = findfirst(entry -> entry.label === label, observation.bounds)
+        index === nothing && return nothing
+        expression = observation.bounds[index].expression
+        expression isa Real && return expression
+        expression isa Symbol || return missing
+        slice = _rk_kernel_value_slice(kernel, expression)
+        if isempty(slice.inputs)
+            value = get(data, expression, nothing)
+            return value isa Real ? value : missing
+        end
+        isempty(slice.body) && length(slice.inputs) == 1 || return missing
+        input = only(slice.inputs)
+        flat = get(kernel.columns, input.source, nothing)
+        flat === nothing && return missing
+        cells = input.kind === :gather ? _rk_gather_rows(flat, kernel.columns[input.rows]) : flat
+        cells isa AbstractVector{<:AbstractVector} &&
+            length.(cells) == length.(response) || return missing
+        key = Symbol(:bound_, label)
+        values[key] = brm_flatten_cells(cells)
+        NamedColumn(key, DataColumn(values[key]))
+    end
+    lower, upper = bound(:lower), bound(:upper)
+    (lower === missing || upper === missing) && return
+    spec = _BRMResponseModifierPlan(observation.modifier.kind, nothing, lower, upper)
+    validate = spec.kind === :interval_censored ? _brm_materialize_interval_response :
+        _brm_materialize_bounded_response
+    validate(spec, observation.source, brm_flatten_cells(response), values;
+        prefix="RK backend")
+    nothing
+end
 
 # Each data input's subject count; an absent replay response has none.
 _rk_push_outer_length!(lengths, values) = push!(lengths, length(values))
@@ -953,6 +1004,7 @@ Base.@nospecializeinfer function _brm_rk_composed_kernel_plan(@nospecialize(brmi
             # weight is read per subject or shared, as the cell reads it.
             response = observation.input.kind === :gather ?
                 _rk_gather_rows(raw, kernel.columns[observation.input.rows]) : raw
+            _rk_validate_cell_bounds(kernel, observation, response, program.context.data)
             plan.columns[observation.source] = response
             routes = [_rk_kernel_cell_argument(kernel, name, argument) for (name, argument)
                 in zip(observation.argument_names, observation.arguments)]

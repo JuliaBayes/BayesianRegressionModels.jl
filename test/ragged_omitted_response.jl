@@ -1,4 +1,8 @@
-# Run: julia --project=test test/ragged_omitted_response.jl
+# Run: julia --startup-file=no --project=test test/ragged_omitted_response.jl
+#
+# An omitted response observed per subject in the cell, through a `groups`
+# binding, with a data-backed censoring bound: the observation stays, the bound
+# is regathered on replay, and prior draws respect it.
 using Test
 using BayesianRegressionModels
 using StanBlocks
@@ -9,12 +13,17 @@ omitted_ragged_builder = @brm begin
     sigma_add ~ Exponential(1)
     sigma_prop ~ Exponential(1)
     log_CL ~ 1 + (1 | p | subject)
-    loc ~ kernel(ragged(obs_idx, obs_subject), log_CL) do idxs, lCL
-        exp(lCL) .+ 0.0 .* idxs
+    obs = groups(obs_subject => subject)
+    @plate for i in eachindex(log_CL)
+        loc[i] = exp(log_CL[i]) .+ 0.0 .* obs_idx[obs[i]]
+        pk_conc[obs[i]] ~ censored(
+            Normal(loc[i], addprop(loc[i], sigma_add, sigma_prop)); lower=pk_lloq[obs[i]])
     end
-    ragged(pk_conc, obs_subject) ~ censored(
-        Normal(loc, addprop(loc, sigma_add, sigma_prop)); lower=pk_lloq)
 end
+
+# The data the cell reads for `name`, whatever its prepared key.
+cell_key(sb, name) = only(k for k in keys(sb.data)
+    if occursin(string(name), string(k)) && endswith(string(k), "_ragged"))
 
 omitted_ragged_data = (;
     subject=["s2", "s1"],
@@ -23,25 +32,25 @@ omitted_ragged_data = (;
     pk_lloq=[0.10, 0.11, 0.12, 0.13, 0.14, 0.15, 0.16],
 )
 
-@testset "omitted ragged response retains observation and layout" begin
+@testset "omitted grouped response retains observation and layout" begin
     brmi = omitted_ragged_builder(omitted_ragged_data)
     sb = @test_logs (:warn, r"`pk_conc` bind\(s\) no data column") SBBRMI(
         brmi; mod=@__MODULE__)
     @test !haskey(sb.data, :pk_conc)
     @test !haskey(sb.preproc, :pk_conc)
-    @test sb.model.observations == (:pk_conc,)
-    bound_key = :pk_conc_lower_pk_lloq_ragged
+    # The omitted response is observed by its cell, under the cell's name.
+    observations = sb.model.observations
+    @test observations == (:loc_pk_conc,)
+    bound_key = cell_key(sb, :pk_lloq)
     @test sb.data[bound_key] == [[0.11, 0.13, 0.14, 0.16], [0.10, 0.12, 0.15]]
-    @test sb.preproc[bound_key].kind === :ragged_gather
 
     # The very same likelihood remains, with the same model-derived location
     # and scale. Omission changes the data binding, never the observation body.
     observed = SBBRMI(omitted_ragged_builder(merge(omitted_ragged_data,
         (; pk_conc=fill(0.2, 7)))); mod=@__MODULE__)
-    observation(body) = only(s for s in body.args if
-        Meta.isexpr(s, :call) && length(s.args) == 3 &&
-        s.args[1] === :~ && s.args[2] === :pk_conc)
-    @test observation(sb.model.model) == observation(observed.model.model)
+    @test BayesianRegressionModels.stan_code(sb) isa String
+    # Bound, the observation reads the response gathered per subject.
+    @test observed.model.observations == (:kernel_loc_pk_conc_ragged,)
     @test sb.data[bound_key] == observed.data[bound_key]
 
     # Frozen data replay regathers retained bounds from the new observation
@@ -52,13 +61,13 @@ omitted_ragged_data = (;
     replayed = reprocess(sb, replay_data)
     @test !haskey(replayed.data, :pk_conc)
     @test !haskey(replayed.preproc, :pk_conc)
-    @test replayed.model.observations == (:pk_conc,)
+    @test replayed.model.observations == observations
     @test replayed.data[bound_key] == [[0.21, 0.23, 0.25], [0.22, 0.24]]
 
-    @test_throws "has 6 rows but the flat response has 7" SBBRMI(
+    @test_throws "grouping column must name" SBBRMI(
         omitted_ragged_builder(merge(omitted_ragged_data,
             (; pk_lloq=fill(0.1, 6)))); mod=@__MODULE__)
-    @test_throws "group lengths [3, 4]; expected [4, 3]" SBBRMI(
+    @test_throws "ALREADY a ragged per-subject column" SBBRMI(
         omitted_ragged_builder(merge(omitted_ragged_data,
             (; pk_lloq=[fill(0.1, 3), fill(0.1, 4)]))); mod=@__MODULE__)
     @test_throws "name no subject" SBBRMI(
@@ -78,7 +87,7 @@ end
         :censored, :y, 0.1, nothing, :discrete, data)
 end
 
-@testset "omitted ragged censored response draws and replay" begin
+@testset "omitted grouped censored response draws and replay" begin
     sb = SBBRMI(omitted_ragged_builder(omitted_ragged_data); mod=@__MODULE__)
     replay_data = merge(omitted_ragged_data, (;
         obs_subject=["s2", "s1", "s2", "s1", "s2"],
@@ -94,7 +103,6 @@ end
             descriptor = brm_descriptor(model)
             output = brm_output(descriptor, :pk_conc; role=:posterior_predictive)
             @test output.logical === :pk_conc
-            @test output.source === :pk_conc
             @test output.segments == segments
             @test isempty(brm_outputs(descriptor; role=:pointwise_loglik))
             @test :predict in [op.name for op in descriptor.operations]

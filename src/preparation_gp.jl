@@ -57,30 +57,41 @@ function _brm_hsgp_declared_rho_lower(term, target, context, default_lower,
     default_lower
 end
 
+# The basis of an HSGP term without its evaluated rows: harmonics, validity
+# floor and fits. A backend that evaluates the basis itself (RK, in its graph)
+# prepares terms with this alone.
+function _brm_hsgp_basis_geometry(axes, K, cov, iso, period;
+                                  fits=nothing, orthogonal=nothing,
+                                  anchor=nothing, mask=nothing)
+    cov === :periodic && return (; axes,
+        harmonics=_brm_hsgp_periodic_harmonics(only(K)),
+        rho_lower=_brm_hsgp_periodic_rho_lower(only(K)), fits=nothing)
+    isnothing(fits) && error("BRM term preparation: HSGP domain fit is missing")
+    (; axes, harmonics=nothing, rho_lower=_brm_hsgp_rho_lower_data(fits, K, iso), fits)
+end
+
 # `anchor` subtracts the basis row at the anchor from every row, so the term is
 # `f(x) - f(x0)` for the same weights; `mask` zeroes the rows that carry no
 # predictor value (decision 1fk9b29). Both are data-only transforms of `PHI`.
 function _brm_hsgp_basis_state(axes, K, cov, iso, period;
                                fits=nothing, orthogonal=nothing,
                                anchor=nothing, mask=nothing)
+    geometry = _brm_hsgp_basis_geometry(axes, K, cov, iso, period; fits)
     if cov === :periodic
         PHI = _brm_apply_hsgp_periodic(period, only(axes), only(K))
         isnothing(anchor) || (PHI = PHI .- _brm_apply_hsgp_periodic(
             period, [only(anchor)], only(K)))
         isnothing(mask) || (PHI[.!mask, :] .= 0)
-        return (; axes, PHI, harmonics=_brm_hsgp_periodic_harmonics(only(K)),
-                rho_lower=_brm_hsgp_periodic_rho_lower(only(K)), fits=nothing,
+        return (; axes, PHI, geometry.harmonics, geometry.rho_lower, fits=nothing,
                 omega2=nothing)
     end
-    isnothing(fits) && error("BRM term preparation: HSGP domain fit is missing")
     PHI, omega2 = _brm_apply_hsgp(fits, axes, K)
     orthogonal === :linear &&
         (PHI = _brm_orthogonalize_hsgp_linear(PHI, only(axes)))
     isnothing(anchor) || (PHI = PHI .- first(_brm_apply_hsgp(
         fits, Tuple([value] for value in anchor), K)))
     isnothing(mask) || (PHI[.!mask, :] .= 0)
-    (; axes, PHI, harmonics=nothing,
-       rho_lower=_brm_hsgp_rho_lower_data(fits, K, iso), fits, omega2)
+    (; axes, PHI, geometry.harmonics, geometry.rho_lower, fits, omega2)
 end
 
 # Parse the replay/anchor/mask options once and check their combinations; the
@@ -124,7 +135,8 @@ function _brm_prepare_term(term::ExprColumn{typeof(gp)}, target::Symbol, context
     _BRMPreparedTerm(gp, sources, state, sources)
 end
 
-function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, context)
+function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, context;
+                           basis=_brm_hsgp_basis_state)
     kw = getkwargs(term)
     args = getargs(term)
     latent_args = Tuple(arg for arg in args if arg isa NamedColumn &&
@@ -200,14 +212,14 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
             "BRM term preparation: periodic hsgp requires one isotropic axis")
         isnothing(by_state) || error(
             "BRM term preparation: periodic hsgp does not support by")
-        basis = _brm_hsgp_basis_state(axes, K, cov, iso, period; anchor, mask)
-        basis = merge(basis, (; rho_lower=_brm_hsgp_declared_rho_lower(
-            term, target, context, basis.rho_lower,
+        prepared = basis(axes, K, cov, iso, period; anchor, mask)
+        prepared = merge(prepared, (; rho_lower=_brm_hsgp_declared_rho_lower(
+            term, target, context, prepared.rho_lower,
             _brm_hsgp_periodic_floor_geometry(K, period),
             _BRM_HSGP_PERIODIC_FLOOR_REMEDY,
         )))
         state = (; target, latent=false, explicit_domain=false, K, c, centeredness,
-                 cov, iso, period, basis..., by=by_state,
+                 cov, iso, period, prepared..., by=by_state,
                  anchor, extrapolate, support=nothing, rows,
                  _brm_gp_priors(term, target, context)...)
     else
@@ -226,15 +238,14 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
                                    prefix="BRM term preparation")
         _brm_check_hsgp_anchor(domain_fits, anchor; prefix="BRM term preparation")
         orthogonal = _brm_hsgp_orthogonal_to(kw, length(axes))
-        basis = _brm_hsgp_basis_state(axes, K, cov, iso, period;
-                                      fits, orthogonal, anchor, mask)
-        basis = merge(basis, (; rho_lower=_brm_hsgp_declared_rho_lower(
-            term, target, context, basis.rho_lower,
+        prepared = basis(axes, K, cov, iso, period; fits, orthogonal, anchor, mask)
+        prepared = merge(prepared, (; rho_lower=_brm_hsgp_declared_rho_lower(
+            term, target, context, prepared.rho_lower,
             _brm_hsgp_floor_geometry(K, c, fits, !isnothing(domain_fits)),
             _brm_hsgp_floor_remedy(!isnothing(domain_fits)),
         )))
         state = (; target, latent=false, explicit_domain=!isnothing(domain_fits),
-                 K, c, centeredness, cov, iso, period, basis...,
+                 K, c, centeredness, cov, iso, period, prepared...,
                  orthogonal, by=by_state, anchor, extrapolate,
                  support=_brm_hsgp_support(training_axes, fits), rows,
                  _brm_gp_priors(term, target, context)...)

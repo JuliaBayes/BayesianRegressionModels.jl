@@ -400,7 +400,8 @@ Base.@nospecializeinfer function _brm_prepare_predictor_geometry(
         available_predictors=(predictor,), training=nothing,
         tolerant_default::Bool=false, matched_defaults=nothing,
         population_columns=_brm_population_columns,
-        random_effect_columns=_brm_random_effect_columns)
+        random_effect_columns=_brm_random_effect_columns,
+        prepare_term=_brm_prepare_term)
     random_effects = _brm_simple_random_effect_plans(
         brmi, predictor, context; required=true, random_effect_columns)
     op = linear_predictor_op(brmi, predictor)
@@ -414,7 +415,7 @@ Base.@nospecializeinfer function _brm_prepare_predictor_geometry(
             any(old -> old.callable === getf(term), training.terms))
     end
     prepared_terms = if isnothing(training)
-        Tuple(_brm_prepare_term(term, predictor, context)
+        Tuple(prepare_term(term, predictor, context)
               for term in structured_terms)
     else
         length(structured_terms) == length(training.terms) || error(

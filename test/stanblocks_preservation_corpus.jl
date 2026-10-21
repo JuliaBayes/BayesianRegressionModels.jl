@@ -118,10 +118,11 @@ ordinal_df() = (; x=base_df().x, count=[1, 2, 3, 1, 2, 3])
 const RAGGED_KERNEL = @brm begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + (1 | pk | subject)
-    pred ~ kernel(ragged(obs_idx, obs_subject), log_CL) do idxs, lCL
-        exp(lCL) .+ 0.0 .* idxs
+    obs = groups(obs_subject => subject)
+    @plate for i in eachindex(log_CL)
+        pred[i] = exp(log_CL[i]) .+ 0.0 .* obs_idx[obs[i]]
+        obs_y[obs[i]] ~ Normal(pred[i], sigma)
     end
-    ragged(obs_y, obs_subject) ~ Normal(pred, sigma)
 end
 
 ragged_df() = (;

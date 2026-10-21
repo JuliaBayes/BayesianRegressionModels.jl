@@ -392,8 +392,9 @@ rk_density(backend, u) = LogDensityProblems.logdensity(
             end
         end
         # refused: no action at a distance — a model-scope statement does not
-        # set a plate's row order (guiding principle 1mwjios, decision 1pnob5t).
-        @test_throws "@plate for p in groups(probe; order = day)" @eval @brm PANEL begin
+        # set a plate's row order (guiding principle 1mwjios, decision 1pnob5t);
+        # model-scope `ragged` statements are retired (todo 1nfukuv).
+        @test_throws "are retired" @eval @brm PANEL begin
             sigma ~ Exponential(1)
             ragged(y, probe; order = day)
             @plate for p in groups(probe)

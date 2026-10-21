@@ -172,6 +172,46 @@ end
     @test NLMEEXT !== nothing
 end
 
+# The prior reads only θ, σ and ω. Each call used to re-read the coordinate
+# records and round-trip the whole packed point, so on an 80-subject model one
+# prior value cost 30 whole-cohort likelihood values (snag
+# saem-map-fits-nl-a96a4fe5). The model now keeps the prior's coordinate
+# structure after the first call.
+@stestset "the population prior's work stays flat as subjects are added" begin
+    d = NLME_PLATE_DATA
+    ω = [log(0.7), 0.15, log(0.6)]
+    measured = map((3, 9, 27)) do n
+        data = (; subject=["s$j" for j in 1:n],
+            dose=[d.dose[mod1(j, 3)] for j in 1:n],
+            weight=[d.weight[mod1(j, 3)] for j in 1:n],
+            t=[d.t[mod1(j, 3)] for j in 1:n],
+            dv=[d.dv[mod1(j, 3)] for j in 1:n])
+        m = brm_nlme_model(RKBRMI(nlme_plate_pk(data)); ad_backend=NLME_AD)
+        θ, σ = plate_pk_point(m)
+        @test m.prior_structure[] === nothing
+        value() = population_logprior(m, θ, σ, ω)
+        gradient() = population_logprior_and_gradient(m, θ, σ, ω)
+        value(); gradient()
+        structure = m.prior_structure[]
+        @test structure !== nothing
+        value()
+        @test m.prior_structure[] === structure
+        (; value=value(), gradient=gradient(), coordinates=length(m.unit),
+            primal_bytes=minimum(@allocated(value()) for _ in 1:3),
+            gradient_bytes=minimum(@allocated(gradient()) for _ in 1:3))
+    end
+    @test all(x -> isapprox(x.value, measured[1].value; rtol=1e-12), measured)
+    for k in 2:4
+        @test all(x -> isapprox(x.gradient[k], measured[1].gradient[k];
+            rtol=1e-12), measured)
+    end
+    # Only the packed point and its RK gradient grow with the subjects. The
+    # round trip allocated about 67 Float64s per added packed coordinate.
+    added = measured[end].coordinates - measured[1].coordinates
+    @test measured[end].primal_bytes - measured[1].primal_bytes <= 8 * 8added
+    @test measured[end].gradient_bytes - measured[1].gradient_bytes <= 8 * 8added
+end
+
 @stestset "subject-cell population gradient includes estimated HSGP coordinates" begin
     data = (; subject=["a", "b", "c"], t=[-0.8, 0.1, 0.7],
         y=[0.2, -0.1, 0.5])
