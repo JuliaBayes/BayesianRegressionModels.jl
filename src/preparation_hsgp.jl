@@ -309,16 +309,34 @@ _brm_fit_hsgp(raw::AbstractVector{<:Real}, K::Integer, c::Real; anchor=nothing) 
     L = c * deviation
     (mu, L)
 end
-_brm_apply_hsgp(c::Tuple, raw::AbstractVector{<:Real}, K::Integer) = begin
+# A basis row is a function of its axis value alone, so a repeated value is
+# evaluated once and its rows gather that row: the same bits as evaluating
+# every row. `rows` is `nothing` when every value is distinct.
+function _brm_distinct_axis(raw::AbstractVector{<:Real})
+    values = unique!(sort!(collect(raw)))
+    length(values) == length(raw) && return raw, nothing
+    index = Dict(zip(values, eachindex(values)))
+    values, [index[x] for x in raw]
+end
+_brm_gather_rows(PHI, ::Nothing) = PHI
+_brm_gather_rows(PHI, rows) = PHI[rows, :]
+
+function _brm_hsgp_axis_basis(c::Tuple, values::AbstractVector{<:Real}, K::Integer)
     mu, L = c
-    x_c = raw .- mu
+    x_c = values .- mu
     lambda = [(k * pi / (2 * L))^2 for k in 1:K]
-    PHI = zeros(length(raw), K)
+    PHI = zeros(length(values), K)
     inv_sqrt_L = 1 / sqrt(L)
     for k in 1:K, i in eachindex(x_c)
         PHI[i, k] = inv_sqrt_L * sin(sqrt(lambda[k]) * (x_c[i] + L))
     end
     PHI, lambda
+end
+
+_brm_apply_hsgp(c::Tuple, raw::AbstractVector{<:Real}, K::Integer) = begin
+    values, rows = _brm_distinct_axis(raw)
+    PHI, lambda = _brm_hsgp_axis_basis(c, values, K)
+    _brm_gather_rows(PHI, rows), lambda
 end
 
 _brm_fit_hsgp(axes::Tuple, K::Tuple, c::Tuple; anchor=nothing) =
@@ -362,10 +380,17 @@ _brm_hsgp_rho_lowers(fits::Tuple, K::Tuple) =
 _brm_hsgp_rho_lower_data(fits::Tuple, K::Tuple, iso::Bool) =
     iso ? maximum(_brm_hsgp_rho_lowers(fits, K)) : _brm_hsgp_rho_lowers(fits, K)
 
+# One axis is its own basis; a tensor basis multiplies each row's per-axis
+# entries, read from the bases of the distinct values of each axis.
 function _brm_apply_hsgp(fits::Tuple, axes::Tuple, K::Tuple)
     n_axes = length(axes)
     length(fits) == n_axes == length(K) || error("hsgp: internal axis-count mismatch")
-    axis_basis = ntuple(j -> _brm_apply_hsgp(fits[j], axes[j], K[j]), n_axes)
+    if n_axes == 1
+        PHI, lambda = _brm_apply_hsgp(only(fits), only(axes), only(K))
+        return PHI, reshape(lambda, :, 1)
+    end
+    distinct = ntuple(j -> _brm_distinct_axis(axes[j]), n_axes)
+    axis_basis = ntuple(j -> _brm_hsgp_axis_basis(fits[j], distinct[j][1], K[j]), n_axes)
     n_obs = length(first(axes))
     n_basis = prod(K)
     PHI = Matrix{Float64}(undef, n_obs, n_basis)
@@ -374,7 +399,8 @@ function _brm_apply_hsgp(fits::Tuple, axes::Tuple, K::Tuple)
         for i in 1:n_obs
             value = 1.0
             for axis in 1:n_axes
-                value *= axis_basis[axis][1][i, I[axis]]
+                rows = distinct[axis][2]
+                value *= axis_basis[axis][1][isnothing(rows) ? i : rows[i], I[axis]]
             end
             PHI[i, b] = value
         end
@@ -394,13 +420,14 @@ function _brm_apply_hsgp_periodic(period::Real, raw::AbstractVector{<:Real},
     K >= 1 || error("hsgp: k must be >= 1 (got $K)")
     period > 0 || error("hsgp: period must be positive (got $period)")
     w0 = 2pi / period
-    PHI = Matrix{Float64}(undef, length(raw), 2K)
-    for j in 1:K, i in eachindex(raw)
-        angle = w0 * j * raw[i]
+    values, rows = _brm_distinct_axis(raw)
+    PHI = Matrix{Float64}(undef, length(values), 2K)
+    for j in 1:K, i in eachindex(values)
+        angle = w0 * j * values[i]
         PHI[i, j] = cos(angle)
         PHI[i, K + j] = sin(angle)
     end
-    PHI
+    _brm_gather_rows(PHI, rows)
 end
 
 _brm_hsgp_periodic_harmonics(K::Integer) =
