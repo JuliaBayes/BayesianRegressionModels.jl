@@ -11,7 +11,7 @@
 using Test
 using BayesianRegressionModels
 using Random
-using Distributions: Exponential, Normal, LKJCholesky
+using Distributions: Exponential, Normal, LKJCholesky, truncated
 using Statistics: mean
 
 const BRM = BayesianRegressionModels
@@ -416,4 +416,21 @@ end
     @test stan(pruned_z) == stan(priored_z(covariates))
     @test rk_source(pruned_z) == rk_source(priored_z(covariates))
     @test !any(in(keys(pruned_z.operations)), (:mu_loc, :tau))
+    # `Inf` in a kept prior's bound is a name the builder binds too.
+    bounded = @brm begin
+        sigma  ~ Exponential(1)
+        sigma2 ~ Exponential(1)
+        mu ~ 1 + x
+        nu ~ 1 + x
+        effect(mu, x) ~ truncated(Normal(0, 1), 0, Inf)
+        y ~ Normal(mu, sigma)
+        z ~ Normal(nu, sigma2)
+    end
+    bounded_y = @brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x
+        effect(mu, x) ~ truncated(Normal(0, 1), 0, Inf)
+        y ~ Normal(mu, sigma)
+    end
+    @test stan(prune_responses(bounded(observed))) == stan(bounded_y(observed))
 end
