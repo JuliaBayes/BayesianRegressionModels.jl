@@ -374,13 +374,13 @@ function cdc_ww_brm_fixture(; K = 3, nt = 84, uot = 50, ht = 14)
     lab_to_subpop = [i <= 2 ? 2 : min(K, i) for i in 1:n_labs]
     ww_time = Int[]
     ww_subpop = Int[]
-    ww_lab_idx = Int[]
+    ww_obs_lab = Int[]
     ww_lod = Float64[]
     ww_log_conc = Float64[]
     for lab in 1:n_labs, observed_day in 1:7:nt
         push!(ww_time, uot + observed_day)
         push!(ww_subpop, lab_to_subpop[lab])
-        push!(ww_lab_idx, lab)
+        push!(ww_obs_lab, lab)
         lod = log(2.0 + 0.25 * lab + 0.01 * observed_day)
         latent_signal = log(15.0 + 8.0 * exp(-((observed_day - nt / 2) / 15)^2)) +
                         0.08 * lab
@@ -402,44 +402,44 @@ function cdc_ww_brm_fixture(; K = 3, nt = 84, uot = 50, ht = 14)
     count_population = [500000.0, 280000.0]
     count_start = Int[]
     count_stop = Int[]
-    count_stream_idx = Int[]
+    count_obs_stream = Int[]
     count = Int[]
     for observed_day in 1:nt
         push!(count_start, uot + observed_day)
         push!(count_stop, uot + observed_day)
-        push!(count_stream_idx, 1)
+        push!(count_obs_stream, 1)
         push!(count, max(0, round(Int, 20 + 40 * exp(-((observed_day - nt / 2) / 14)^2))))
     end
     for observed_day in 1:7:nt
         width = min(7, nt - observed_day + 1)
         push!(count_start, uot + observed_day)
         push!(count_stop, uot + observed_day + width - 1)
-        push!(count_stream_idx, 2)
+        push!(count_obs_stream, 2)
         push!(count, max(0, round(Int, width * (8 + 14 * exp(-((observed_day - nt / 2) / 16)^2)))))
     end
 
     forecast_count_start = Int[]
     forecast_count_stop = Int[]
-    forecast_count_stream_idx = Int[]
+    forecast_count_obs_stream = Int[]
     for forecast_day in (nt + 1):(nt + ht)
         push!(forecast_count_start, uot + forecast_day)
         push!(forecast_count_stop, uot + forecast_day)
-        push!(forecast_count_stream_idx, 1)
+        push!(forecast_count_obs_stream, 1)
     end
     for forecast_day in (nt + 1):7:(nt + ht)
         width = min(7, nt + ht - forecast_day + 1)
         push!(forecast_count_start, uot + forecast_day)
         push!(forecast_count_stop, uot + forecast_day + width - 1)
-        push!(forecast_count_stream_idx, 2)
+        push!(forecast_count_obs_stream, 2)
     end
 
     forecast_ww_time = Int[]
     forecast_ww_subpop = Int[]
-    forecast_ww_lab_idx = Int[]
+    forecast_ww_obs_lab = Int[]
     for lab in 1:n_labs, forecast_day in (nt + 1):7:(nt + ht)
         push!(forecast_ww_time, uot + forecast_day)
         push!(forecast_ww_subpop, lab_to_subpop[lab])
-        push!(forecast_ww_lab_idx, lab)
+        push!(forecast_ww_obs_lab, lab)
     end
 
     (;
@@ -450,13 +450,13 @@ function cdc_ww_brm_fixture(; K = 3, nt = 84, uot = 50, ht = 14)
         week_grid = collect(1.0:n_weeks),
         week_idx = [min(n_weeks, div(t - 1, 7) + 1) for t in 1:n_total],
         dow = [mod(t - uot - 1, 7) + 1 for t in 1:n_total],
-        ww_lab, lab_to_subpop, ww_time, ww_subpop, ww_lab_idx, ww_lod, ww_log_conc,
-        forecast_ww_time, forecast_ww_subpop, forecast_ww_lab_idx,
+        ww_lab, lab_to_subpop, ww_time, ww_subpop, ww_obs_lab, ww_lod, ww_log_conc,
+        forecast_ww_time, forecast_ww_subpop, forecast_ww_obs_lab,
         count_stream,
         count_week_grid = [collect(1.0:n_weeks) for _ in 1:n_count_streams],
         count_subpop_weights, count_delay, count_population,
-        count_start, count_stop, count_stream_idx, count,
-        forecast_count_start, forecast_count_stop, forecast_count_stream_idx,
+        count_start, count_stop, count_obs_stream, count,
+        forecast_count_start, forecast_count_stop, forecast_count_obs_stream,
         g = g, sh = sh, dl = dl, nsh = length(sh),
         w = subpop_weight,
         uot, nt, ht, n_total, n_weeks, K, n_labs, n_count_streams,
@@ -518,9 +518,9 @@ function cdc_ww_brm_model(df = cdc_ww_brm_fixture())
         effect(log_sigma_ww, Intercept) ~ Normal(log(0.35), 0.5)
         sd(:, ww_scale) ~ Normal(0.0, 0.5)
         sd(:, ww_noise) ~ Normal(0.0, 0.35)
-        ww_mu = ww_expected_log(I_mat, shedding, ww_time, ww_subpop, ww_lab_idx,
+        ww_mu = ww_expected_log(I_mat, shedding, ww_time, ww_subpop, ww_obs_lab,
                                 log_lab_mod, log10_g, mwpd)
-        ww_sigma = gather_exp(log_sigma_ww, ww_lab_idx)
+        ww_sigma = gather_exp(log_sigma_ww, ww_obs_lab)
         ww_log_conc ~ censored(Normal(ww_mu, ww_sigma); lower = ww_lod)
 
         # jurisdiction aggregate infections (population-weighted across subpops)
@@ -546,9 +546,9 @@ function cdc_ww_brm_model(df = cdc_ww_brm_fixture())
         sd(:, count_dispersion) ~ Normal(0.0, 0.5)
         count_mu = count_interval_mean(I_mat, count_subpop_weights, count_delay,
                                        count_rate_daily, count_start, count_stop,
-                                       count_stream_idx, dow, dow_effect,
+                                       count_obs_stream, dow, dow_effect,
                                        count_population)
-        count_phi = gather_exp(log_phi_count, count_stream_idx)
+        count_phi = gather_exp(log_phi_count, count_obs_stream)
         count ~ NegativeBinomial2(count_mu, count_phi)
 
         # Forecast contract: named deterministic carriers use the same fitted
@@ -557,10 +557,10 @@ function cdc_ww_brm_model(df = cdc_ww_brm_fixture())
         forecast_count_mean = count_interval_mean(
             I_mat, count_subpop_weights, count_delay, count_rate_daily,
             forecast_count_start, forecast_count_stop,
-            forecast_count_stream_idx, dow, dow_effect, count_population)
+            forecast_count_obs_stream, dow, dow_effect, count_population)
         forecast_ww_log_mean = ww_expected_log(
             I_mat, shedding, forecast_ww_time, forecast_ww_subpop,
-            forecast_ww_lab_idx, log_lab_mod, log10_g, mwpd)
+            forecast_ww_obs_lab, log_lab_mod, log10_g, mwpd)
     end
 end
 

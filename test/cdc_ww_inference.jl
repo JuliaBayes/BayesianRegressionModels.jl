@@ -108,10 +108,10 @@ end
     @test all(isapprox.(vec(sum(df.count_subpop_weights; dims=1)), 1.0))
     @test all(isapprox.(vec(sum(df.count_delay; dims=1)), 1.0))
     @test all(df.count_start .<= df.count_stop)
-    @test all(df.count_start[df.count_stream_idx .== 1] .==
-              df.count_stop[df.count_stream_idx .== 1])
-    @test any(df.count_start[df.count_stream_idx .== 2] .<
-              df.count_stop[df.count_stream_idx .== 2])
+    @test all(df.count_start[df.count_obs_stream .== 1] .==
+              df.count_stop[df.count_obs_stream .== 1])
+    @test any(df.count_start[df.count_obs_stream .== 2] .<
+              df.count_stop[df.count_obs_stream .== 2])
     @test all(df.forecast_count_start .> df.uot + df.nt)
     @test all(df.forecast_count_stop .<= df.n_total)
     @test all(df.forecast_ww_time .> df.uot + df.nt)
