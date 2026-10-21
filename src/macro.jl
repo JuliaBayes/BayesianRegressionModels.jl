@@ -1322,6 +1322,9 @@ end
 # Julia's printer for any other syntax.
 _brm_print_source(io::IO, x, outer::Int=0; left::Bool=false) = show(io, x)
 _brm_print_source(io::IO, x::Symbol, outer::Int=0; left::Bool=false) = print(io, x)
+# A quoted literal prints as written (`:clamp`); `show` would print the
+# `QuoteNode` itself, `:(:clamp)`.
+_brm_print_source(io::IO, x::QuoteNode, outer::Int=0; left::Bool=false) = print(io, x)
 _brm_print_source(io::IO, x::LineNumberNode, outer::Int=0; left::Bool=false) = nothing
 function _brm_print_source(io::IO, x::Expr, outer::Int=0; left::Bool=false)
     op = _brm_source_infix(x)
@@ -2923,10 +2926,15 @@ Base.show(io::IO, x::ExprColumn) = begin
     end
     for (i, (key, value)) in enumerate(pairs(getkwargs(x)))
         print(io, i == 1 ? "; " : ", ", key, "=")
-        _brm_show_operand(io, value, 0)
+        _brm_show_keyword_value(io, value)
     end
     print(io, ")")
 end
+# A keyword's Symbol value is a literal, as in `extrapolate=:clamp`: a name
+# written as a keyword value is bound like any other read and is never stored
+# as a Symbol, so the value keeps its colon and re-parses to the same keyword.
+_brm_show_keyword_value(io::IO, x) = _brm_show_operand(io, x, 0)
+_brm_show_keyword_value(io::IO, x::Symbol) = show(io, x)
 # A resolved call head prints as the name the user wrote. Julia prints a
 # type/callable binding module-qualified unless it is visible from the
 # display context, so a docs build (whose `Main` never imports

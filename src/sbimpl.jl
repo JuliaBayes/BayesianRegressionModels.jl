@@ -3131,11 +3131,13 @@ resolver finds your locally-defined submodels.
 totals when the exact Gaussian conditional construction is available. It supports
 one grouping structure per predictor, independent random-effect margins, and
 Normal, Flat, or Student-t population priors (Student-t uses its exact Gaussian
-scale mixture). Unmatched fixed effects remain explicit. Original population
+scale mixture). Unmatched fixed effects and `offset(...)` terms remain explicit
+summands. Original population
 coefficients and deviations are recovered in generated quantities. Inspect
 [`total_effect_blocks`](@ref), or use `total_groups=()` for the conventional
-representation. Naming a group explicitly requires eligibility and errors
-otherwise. Correlated, crossed, stratified, multi-membership and R2D2 blocks
+representation. Naming a group explicitly requires every block of that group to
+be eligible and errors otherwise, naming the predictors whose blocks would stay
+conventional. Correlated, crossed, stratified, multi-membership and R2D2 blocks
 retain conventional emission under `:auto`.
 
 `s2z_groups` is an opt-in collection of grouping-factor names (default `()`,
@@ -6726,6 +6728,11 @@ function _sb_emit_prior!(stmts, target, ::typeof(truncated), op)
          getfield(@__MODULE__, token)) : token
     lower = isnothing(spec.lower) ? nothing : _sb_effect_prior_arg(spec.lower)
     upper = isnothing(spec.upper) ? nothing : _sb_effect_prior_arg(spec.upper)
+    # An infinite bound is an open end, as in `Distributions.truncated`.
+    lower isa Real && lower == -Inf && (lower = nothing)
+    upper isa Real && upper == Inf && (upper = nothing)
+    isnothing(lower) && isnothing(upper) &&
+        return (push!(stmts, only(translated)); true)
     producer, arguments = if isnothing(lower)
         StanBlocks.upper_conditioning, (family, upper, rhs.args[2:end]...)
     elseif isnothing(upper)
@@ -7163,7 +7170,9 @@ _sb_prior_arg(x::Symbol) = x
 # Inside an HSGP submodel the term's validity floor is its `rho_lower` input.
 _sb_prior_arg(::_BRMLengthScaleFloor) = :rho_lower
 _sb_prior_arg(x::NamedColumn) = _sb_prior_arg_named(x, parent(x))
-_sb_prior_arg_named(x, ::MissingColumn) = name(x)
+# An unbound `Inf` (a truncation bound) is Julia's number, which StanBlocks
+# renders as Stan's infinity; a bare name would resolve to a Main Float64.
+_sb_prior_arg_named(x, ::MissingColumn) = name(x) === :Inf ? Inf : name(x)
 _sb_prior_arg_named(x, ::DataColumn) = name(x)
 _sb_prior_arg_named(x, ::ExprColumn{typeof(assign)}) = name(x)
 # After a formula-local prior has been parsed, later references carry that

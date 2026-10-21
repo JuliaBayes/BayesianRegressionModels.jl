@@ -5773,50 +5773,52 @@ function _rk_resolve_use_ref(name::Symbol, consts::Dict{Symbol,Float64},
 end
 
 function _rk_walk_assignment_expr!(node, name::Symbol,
-        data::AbstractDict, parameters::Set{Symbol}, assign_names::Set{Symbol})
+        data::AbstractDict, parameters::Set{Symbol}, assign_names::Set{Symbol};
+        origin::String="assignment `$name`")
     prefix = "RK backend"
     node isa Number && return nothing
     if node isa _BRMPreparedRef
         ref = node.name
         if ref in parameters
             node.axis === :scalar || error(
-                "$prefix: assignment `$name` references non-scalar " *
+                "$prefix: $origin references non-scalar " *
                 "parameter `$ref`; slice 1 admits scalar parameters only")
             return nothing
         end
         ref in assign_names && return nothing # scalarity by the callee's walk
         haskey(data, ref) && error(
-            "$prefix: assignment `$name` references data column `$ref` " *
+            "$prefix: $origin references data column `$ref` " *
             "outside a reduction; assignments are scalar in slice 1 " *
             "(precompute the column)")
-        error("$prefix: assignment `$name` references unknown name `$ref`")
+        error("$prefix: $origin references unknown name `$ref`")
     end
     node isa _BRMPreparedExpr || error(
-        "$prefix: assignment `$name` is not a scalar expression; slice 1 " *
+        "$prefix: $origin is not a scalar expression; slice 1 " *
         "admits pure scalar calls over parameters, assignments, and " *
         "whole-column reductions")
     callable = node.callable
     callable in _RK_ASSIGNMENT_CALLABLES || error(
-        "$prefix: assignment `$name` calls `$callable`; slice 1 admits " *
+        "$prefix: $origin calls `$callable`; slice 1 admits " *
         "{+,-,*,/,^,log,log10,log1p,exp,expm1,sqrt,abs,sum,mean,std,var," *
         "minimum,maximum,length} only")
     isempty(node.kwargs) || error(
-        "$prefix: assignment `$name` call keywords are out of slice 1")
+        "$prefix: $origin call keywords are out of slice 1")
     if callable in _RK_ASSIGNMENT_REDUCTIONS
         # Mirrors the thin layer: a reduction takes exactly one bare raw
         # column (no nesting, no scalars) or the plan fails validation.
         length(node.args) == 1 || error(
-            "$prefix: assignment `$name` reduction `$callable` takes " *
+            "$prefix: $origin reduction `$callable` takes " *
             "exactly one whole column")
         arg = only(node.args)
         arg isa _BRMPreparedRef && haskey(data, arg.name) &&
             data[arg.name] isa AbstractVector || error(
-            "$prefix: assignment `$name` reduction `$callable` takes " *
+            "$prefix: $origin reduction `$callable` takes " *
             "exactly one whole column")
         return nothing
     end
     for arg in node.args
-        _rk_walk_assignment_expr!(arg, name, data, parameters, assign_names)
+        _rk_walk_assignment_expr!(arg, name, data, parameters, assign_names;
+            origin)
     end
     nothing
 end
@@ -5877,7 +5879,9 @@ function _rk_plan_parameters!(prepared, data::AbstractDict,
                 if !(key in (:lower, :upper)))...)) : prior
         family, args, support_override = if callable === truncated
             # Keyword bounds are validated inside the truncated gate.
-            _rk_truncated_prior(prior, parameter.name)
+            _rk_truncated_prior(prior, parameter.name, (bound, side) ->
+                _rk_truncation_bound(bound, parameter.name, side, data,
+                    consts, aliases, parameters, assign_names))
         elseif callable === LocationScale
             _rk_locationscale_studentt(family_prior, parameter.name)
         else
@@ -5922,33 +5926,23 @@ function _rk_plan_parameters!(prepared, data::AbstractDict,
                 kind, value = _rk_resolve_use_ref(arg.name, consts, aliases,
                     parameters, assign_names,
                     "parameter `$(parameter.name)` prior")
-                kind === :number && (push!(resolved, value); continue)
-                family in _RK_SAMPLED_LITERAL_ARGS && error(
-                    "$prefix: parameter `$(parameter.name)` prior " *
-                    "`$family` bounds must be numeric literals in slice 1 " *
-                    "(the thin-layer layout derives support from values; " *
-                    "sampled or assigned bounds are out of slice 1)")
+                kind === :number || _rk_gate_literal_args(family, parameter.name)
                 push!(resolved, value)
             else
-                error("$prefix: parameter `$(parameter.name)` prior " *
-                      "hyperparameters must be literals or scalar " *
-                      "references, not expressions (precompute into an " *
-                      "assignment)")
+                value = _rk_prior_argument_expr(arg, parameter.name, data,
+                    consts, aliases, parameters, assign_names)
+                value isa Number || _rk_gate_literal_args(family, parameter.name)
+                push!(resolved, value)
             end
         end
         family === :Uniform &&
             _rk_check_uniform_bounds(resolved, parameter.name)
-        # Mirrors the thin layer: a symmetric half adds log(2), exact
-        # only at location 0 — nonzero literals and references fail
-        # closed here with BRM attribution instead of silently wrong
-        # densities. The location slot is second for StudentT's
-        # `(nu, mu, sigma)` order, first for every other symmetric base.
-        if support_override === :positive || support_override == (:truncated, 0.0, Inf)
-            location = resolved[family === :StudentT ? 2 : 1]
-            location isa Number && location == 0 || error(
-                "$prefix: parameter `$(parameter.name)` symmetric-half " *
-                "location must be the literal 0 (slice 1 supports " *
-                "zero-location halves only)")
+        # A zero-location Normal/Cauchy half keeps its `HalfNormal`/
+        # `HalfCauchy` spelling; both spellings have the normalized density.
+        if (family === :Normal || family === :Cauchy) &&
+                support_override == (:truncated, 0.0, Inf) &&
+                resolved[1] isa Number && resolved[1] == 0
+            support_override = :positive
         end
         push!(specs, _RKSampledParameter(
             parameter.name, family, Tuple(resolved), support_override,
@@ -5957,21 +5951,57 @@ function _rk_plan_parameters!(prepared, data::AbstractDict,
     specs
 end
 
+_rk_gate_literal_args(family::Symbol, name::Symbol) =
+    family in _RK_SAMPLED_LITERAL_ARGS && error(
+        "RK backend: parameter `$name` prior `$family` bounds must be numeric " *
+        "literals in slice 1 (the thin-layer layout derives support from " *
+        "values; sampled or assigned bounds are out of slice 1)")
+
+# A prior hyperparameter written as an expression (`LogNormal(log(0.7), 0.3)`)
+# has the value Julia gives it, as on SBBRMI. One reading only literals and data
+# is that number. One reading a sampled parameter or an assignment is a live
+# scalar expression in the emitted prior, which the RK graph evaluates.
+function _rk_prior_argument_expr(arg, name::Symbol, data::AbstractDict,
+        consts, aliases, parameters, assign_names;
+        origin::String="parameter `$name` prior")
+    rewritten = _rk_rewrite_assignment_refs!(arg, consts, aliases,
+        parameters, assign_names, data, origin)
+    _rk_walk_assignment_expr!(rewritten, name, data, parameters,
+        assign_names; origin)
+    refs = _brm_prepared_references(rewritten)
+    if all(ref -> haskey(data, ref) && !(ref in parameters) &&
+            !(ref in assign_names), refs)
+        value = Float64(_brm_eval_prepared_expr(rewritten,
+            NamedTuple{refs}(map(ref -> data[ref], refs))))
+        isfinite(value) || error(
+            "RK backend: $origin hyperparameters must be finite; " *
+            "`$(_rk_lower_assignment_expr(rewritten, name))` is $value")
+        return value
+    end
+    _rk_lower_assignment_expr(rewritten, name)
+end
+
+# A `truncated` bound: a frozen number (as a declaration bound), or a live
+# scalar expression over sampled values, which RKPPL's normalized truncation
+# reads at every evaluation, as SBBRMI's `truncated` does.
+function _rk_truncation_bound(bound, name, side, data, consts, aliases,
+        parameters, assign_names)
+    frozen = bound === nothing ? nothing : _rk_frozen_bound(bound, name, side,
+        data, consts, aliases, parameters, assign_names)
+    (bound === nothing || frozen isa Real) && return _rk_parameter_bound(bound,
+        name, side, data, consts, aliases, parameters, assign_names)
+    _rk_prior_argument_expr(bound, name, data, consts, aliases, parameters,
+        assign_names; origin="parameter `$name` truncation $side bound")
+end
+
 # Declaration bounds constrain coordinates separately from the family kernel.
 # Data scalars and constant assignments keep the existing frozen-bound
 # contract. Live coordinate bounds need separate BRM preparation acceptance.
 function _rk_parameter_bound(bound, name, side, data, consts, aliases,
         parameters, assign_names)
     bound === nothing && return side === :lower ? -Inf : Inf
-    if bound isa _BRMPreparedRef
-        bound.name === :Inf && return Inf
-        if haskey(data, bound.name)
-            bound = data[bound.name]
-        else
-            _, bound = _rk_resolve_use_ref(bound.name, consts, aliases,
-                parameters, assign_names, "parameter `$name` $side bound")
-        end
-    end
+    bound = _rk_frozen_bound(bound, name, side, data, consts, aliases,
+        parameters, assign_names)
     bound isa Real && !(bound isa Bool) && !isnan(bound) || error(
         "RK backend: parameter `$name` $side bound must be a numeric scalar " *
         "or a frozen scalar reference (sampled or assigned live bounds are unsupported)")
@@ -5980,6 +6010,24 @@ function _rk_parameter_bound(bound, name, side, data, consts, aliases,
         "RK backend: parameter `$name` $side bound has the wrong infinity")
     value
 end
+
+# A bound's number: `Inf`, a data scalar or constant, or literal arithmetic over
+# them (`-Inf`, `log(2)`). A sampled or assigned reference stays a name, which
+# the caller refuses.
+function _rk_frozen_bound(bound::_BRMPreparedRef, name, side, data, consts,
+        aliases, parameters, assign_names)
+    bound.name === :Inf && return Inf
+    haskey(data, bound.name) && return data[bound.name]
+    last(_rk_resolve_use_ref(bound.name, consts, aliases, parameters,
+        assign_names, "parameter `$name` $side bound"))
+end
+function _rk_frozen_bound(bound::_BRMPreparedExpr, args...)
+    isempty(bound.kwargs) || return bound
+    values = map(arg -> _rk_frozen_bound(arg, args...), bound.args)
+    all(value -> value isa Real, values) || return bound
+    bound.callable(values...)
+end
+_rk_frozen_bound(bound, _args...) = bound
 
 const _RK_SLICE1_PRIOR_ARITY_KEYS =
     Tuple(sort!(collect(keys(_RK_SLICE1_PRIOR_ARITY))))
@@ -6163,22 +6211,16 @@ function _rk_check_uniform_bounds(resolved::Vector{Any}, name::Symbol)
     nothing
 end
 
-# General truncated rewrite: `truncated(Base(args...), lo, hi)` plans the
-# base family with its unresolved args plus a `(:truncated, lo, hi)`
-# support Tuple, which the AST splices back verbatim. v1 admits
-# symmetric halves only — a symmetric base
-# (Normal/Cauchy/Laplace/Logistic/StudentT) at literal location 0 with
-# bounds (0, Inf); general bounds and asymmetric bases fail closed
-# (sequenced follow-up). Normal/Cauchy halves keep the legacy
-# `:positive` override (byte-identical `HalfNormal`/`HalfCauchy`
-# emission); the newer halves ride the general Tuple.
-const _RK_TRUNCATED_SYMMETRIC_BASES = Set{Symbol}(
-    [:Normal, :Cauchy, :Laplace, :Logistic, :StudentT])
-
-function _rk_truncated_prior(prior::_BRMPreparedExpr, name::Symbol)
+# `truncated(Base(args...), lo, hi)` (or its `lower`/`upper` keyword form)
+# plans the base family with its unresolved args plus a `(:truncated, lo, hi)`
+# support Tuple, which the AST splices back verbatim: RKPPL's normalized
+# `truncated` over any scalar prior family, with the interval transform Stan
+# uses. A bound is a frozen number (a literal, `Inf`, scalar data, a constant)
+# or a live scalar expression (`_rk_truncation_bound`). A zero-location Normal/Cauchy half keeps the
+# legacy `:positive` override after its arguments resolve (byte-identical
+# `HalfNormal`/`HalfCauchy` emission, `_rk_plan_parameters!`).
+function _rk_truncated_prior(prior::_BRMPreparedExpr, name::Symbol, bound)
     prefix = "RK backend"
-    spelled = "`truncated(Base(location, scale), 0[, Inf])` over a " *
-              "symmetric base, or the keyword form with `lower=0`"
     args, kwargs = prior.args, prior.kwargs
     lower, upper = if length(args) == 3 && isempty(kwargs)
         args[2], args[3]
@@ -6187,13 +6229,15 @@ function _rk_truncated_prior(prior::_BRMPreparedExpr, name::Symbol)
         get(kwargs, :lower, nothing), get(kwargs, :upper, nothing)
     else
         error("$prefix: parameter `$name` truncated prior must be " *
-              "$spelled for a symmetric half; other truncated priors " *
-              "are out of slice 1")
+              "`truncated(Base(args...), lower, upper)` or " *
+              "`truncated(Base(args...); lower, upper)`")
     end
     inner = args[1]
     inner isa _BRMPreparedExpr || error(
         "$prefix: parameter `$name` truncated prior must wrap a " *
         "distribution call in slice 1")
+    admitted = join((k for k in _RK_SLICE1_PRIOR_ARITY_KEYS if k !== :Flat &&
+        k !== :StudentT), ", ") * ", or LocationScale StudentT"
     family, base_args = if inner.callable === LocationScale
         fam, unwrapped, _ = _rk_locationscale_studentt(inner, name)
         (fam, unwrapped)
@@ -6201,14 +6245,12 @@ function _rk_truncated_prior(prior::_BRMPreparedExpr, name::Symbol)
         inner.callable isa Type || error(
             "$prefix: parameter `$name` truncated prior base " *
             "`$(string(inner.callable))` is out of slice 1 (admitted: " *
-            "symmetric halves over Normal, Cauchy, Laplace, Logistic, " *
-            "or LocationScale StudentT)")
+            "$admitted)")
         base = nameof(inner.callable)
-        base in _RK_TRUNCATED_SYMMETRIC_BASES || error(
+        # An improper Flat base has no mass to renormalize.
+        haskey(_RK_SLICE1_PRIOR_ARITY, base) && base !== :Flat || error(
             "$prefix: parameter `$name` truncated prior base `$base` " *
-            "is out of slice 1 (admitted: symmetric halves over " *
-            "Normal, Cauchy, Laplace, Logistic, or LocationScale " *
-            "StudentT)")
+            "is out of slice 1 (admitted: $admitted)")
         isempty(inner.kwargs) || error(
             "$prefix: parameter `$name` prior keywords are out of slice 1")
         expected = _RK_SLICE1_PRIOR_ARITY[base]
@@ -6217,21 +6259,11 @@ function _rk_truncated_prior(prior::_BRMPreparedExpr, name::Symbol)
             "needs $expected argument(s), got $(length(inner.args))")
         (base, inner.args)
     end
-    lower isa Number && lower == 0 || error(
-        "$prefix: parameter `$name` truncated prior must have lower " *
-        "bound 0 for a symmetric half in slice 1 (general bounds are " *
-        "out of slice 1)")
-    # `Inf` arrives as a name (Julia global), not a literal — same as
-    # evidence bounds.
-    upper_is_inf = upper isa Number && upper == Inf ||
-        upper isa _BRMPreparedRef && upper.name === :Inf
-    (isnothing(upper) || upper_is_inf) || error(
-        "$prefix: parameter `$name` truncated prior must have upper " *
-        "bound Inf (or omit it) for a symmetric half in slice 1 " *
-        "(general bounds are out of slice 1)")
-    override = family === :Normal || family === :Cauchy ? :positive :
-        (:truncated, 0.0, Inf)
-    (family, base_args, override)
+    lo, hi = bound(lower, :lower), bound(upper, :upper)
+    !(lo isa Real && hi isa Real) || lo < hi || error(
+        "$prefix: parameter `$name` truncated prior bounds require " *
+        "lower < upper, got [$lo, $hi]")
+    (family, base_args, (:truncated, lo, hi))
 end
 
 # A scalar field of the data (including a resolved `name = constant(expr)`) is a
@@ -6290,13 +6322,24 @@ function _rk_plan_assignments!(kept, exprs::Dict{Symbol,Any},
     specs
 end
 
+# The names a sampled parameter's prior arguments or truncation bounds read: a
+# bare reference or the operands of a live expression (callee heads excluded).
+_rk_argument_symbols!(out, arg::Symbol) = push!(out, arg)
+_rk_argument_symbols!(out, arg::Expr) =
+    (foreach(a -> _rk_argument_symbols!(out, a), arg.args[2:end]); out)
+_rk_argument_symbols!(out, args::Tuple) =
+    (foreach(a -> _rk_argument_symbols!(out, a), args); out)
+_rk_argument_symbols!(out, _arg) = out
+
 function _rk_gate_acyclic!(parameters::AbstractVector,
         assignments::AbstractVector)
     prefix = "RK backend"
     deps = Dict{Symbol,Vector{Symbol}}()
     for parameter in parameters
-        deps[parameter.name] =
-            Symbol[arg for arg in parameter.args if arg isa Symbol]
+        deps[parameter.name] = _rk_argument_symbols!(Symbol[], parameter.args)
+        override = parameter.support_override
+        override isa Tuple &&
+            _rk_argument_symbols!(deps[parameter.name], Base.tail(override))
     end
     for assignment in assignments
         deps[assignment.name] = Symbol[
