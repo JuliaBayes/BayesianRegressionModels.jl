@@ -11262,19 +11262,12 @@ function _sb_emit_r2d2_popefs!(stmts, data, target, X_name, pop_name,
     n_cols == length(spec.labels) || error(
         "sbimpl: internal r2d2 alignment error for `$target`: " *
         "$(length(spec.labels)) population labels for $n_cols design columns")
-    beta_loc = Float64[0.0 for _ in spec.labels]
-    fallback = Float64[1.0 for _ in spec.labels]
+    beta_loc = Any[0.0 for _ in spec.labels]
+    fallback = Any[1.0 for _ in spec.labels]
     if !isnothing(overrides)
         for i in eachindex(overrides)
             isnothing(overrides[i]) && continue
-            loc, scale = _sb_effect_normal_args(overrides[i])
-            (loc isa Real && scale isa Real) || error(
-                "sbimpl: `effect($target, $(spec.labels[i])) ~ Normal(...)` " *
-                "combined with `effect($target, :) ~ r2d2(...)` requires " *
-                "numeric location and scale constants, got " *
-                "$(repr(loc)), $(repr(scale))")
-            beta_loc[i] = Float64(loc)
-            fallback[i] = Float64(scale)
+            beta_loc[i], fallback[i] = _sb_effect_normal_args(overrides[i])
         end
     end
     share_name = Symbol(:r2d2_, target, :_share_idx)
@@ -11283,20 +11276,35 @@ function _sb_emit_r2d2_popefs!(stmts, data, target, X_name, pop_name,
     varx_name  = Symbol(:r2d2_, target, :_varx)
     scale_name = Symbol(:r2d2_, target, :_beta_scale)
     data[share_name] = spec.share_idx
-    data[fall_name]  = fallback
-    data[loc_name]   = beta_loc
     _sb_record_static!(data, share_name)
-    _sb_record_static!(data, fall_name)
-    _sb_record_static!(data, loc_name)
+    fall = _sb_r2d2_prior_vector!(data, fall_name,
+                                  map(_sb_r2d2_prior_entry, fallback))
+    loc = _sb_r2d2_prior_vector!(data, loc_name,
+                                 map(_sb_r2d2_prior_entry, beta_loc))
     push!(stmts, :($varx_name = brm_col_variances(
         $X_name, dims($X_name)[1], dims($X_name)[2])))
     push!(stmts, :($scale_name = brm_r2d2_scale(
-        $share_name, $fall_name, $varx_name, $(names.phi_name),
+        $share_name, $fall, $varx_name, $(names.phi_name),
         $(names.r2_name), $(names.tau_name),
         dims($X_name)[2], $n_phi)))
     push!(stmts, :($pop_name ~ _popefs_normal(;
-        X=$X_name, beta_loc=$loc_name, beta_scale=$scale_name)))
+        X=$X_name, beta_loc=$loc, beta_scale=$scale_name)))
 end
+
+# The loc/scale vectors of an R2D2 predictor's share-0 columns. An all-numeric
+# vector is frozen Stan data, as it always was. An entry naming data -- a
+# `constant(...)`, a scalar data field, or an expression over them -- keeps
+# the vector a Stan expression instead, so the name stays the ordinary Stan
+# data the ordinary population prior path reads, and replays with it.
+_sb_r2d2_prior_entry(x::Real) = Float64(x)
+_sb_r2d2_prior_entry(x) = x
+function _sb_r2d2_prior_vector!(data, name, values::Vector{Float64})
+    data[name] = values
+    _sb_record_static!(data, name)
+    name
+end
+_sb_r2d2_prior_vector!(data, name, values::AbstractVector) =
+    Expr(:vect, values...)
 
 # ---- structured Horseshoe over population coefficients -----------------------
 #

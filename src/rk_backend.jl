@@ -436,6 +436,18 @@ end
 _RKEmittedProgram(defs::Vector{Expr}, main::Expr) =
     _RKEmittedProgram(defs, main, Pair{Symbol,Any}[])
 
+# A value computed once, on first use, under its own lock.
+mutable struct _RKOnce
+    const lock::ReentrantLock
+    value::Any
+end
+_RKOnce() = _RKOnce(ReentrantLock(), nothing)
+_RKOnce(value) = _RKOnce(ReentrantLock(), value)
+_rk_once!(compute, once::_RKOnce) = lock(once.lock) do
+    once.value === nothing && (once.value = compute())
+    once.value
+end
+
 """
     RKBRMI(brmi; held_out=())
     RKBRMI(brmi, plan, built)
@@ -456,17 +468,31 @@ The wrapper retains these exact values; the caller must preserve their common
 provenance and `held_out` selection. Retain the bound program separately for
 queries. This constructor supports coordinate transport and its physical check
 on that existing build.
+
+A backend translates its emitted program (definition module and lowering) and
+binds its data once, on first use; every query reads that one binding.
+[`reprocess`](@ref) replays share the fit's translated program and bind only
+their own data.
 """
 struct RKBRMI{P<:BRMI,PL,M}
     parent::P
     plan::PL
     model::M
+    # Translation is per program, binding per data. `program` (the emitted
+    # source and its definition module) is shared with every `reprocess`
+    # replay that emits the same program with the same callables; `bound` is
+    # this backend's own binding of it. Both are filled by the ReactiveKernels
+    # extension on first use.
+    program::_RKOnce
+    bound::_RKOnce
     # The retained parent is the model the plan lowered: `optional(...)`
     # priors and grouping-column addresses are already resolved
     # (`_brm_resolve_prior_addresses`).
-    function RKBRMI(parent::BRMI, plan, model)
+    function RKBRMI(parent::BRMI, plan, model; program::_RKOnce=_RKOnce(),
+            bound::_RKOnce=_RKOnce())
         parent = _brm_resolve_prior_addresses(parent)
-        new{typeof(parent),typeof(plan),typeof(model)}(parent, plan, model)
+        new{typeof(parent),typeof(plan),typeof(model)}(parent, plan, model,
+            program, bound)
     end
 end
 
@@ -3219,18 +3245,9 @@ function _rk_design_addressee_groups(design, target::Symbol;
     groups, order
 end
 
-# A population-effect prior argument is a number: a numeric literal, or a
-# scalar field of the data (including a resolved `name = constant(expr)`),
-# whose value the graph holds. A model value stays refused.
-function _rk_effect_number(x)
-    x isa NamedColumn && parent(x) isa DataColumn || return _brm_numeric_constant(x)
-    value = parent(parent(x))
-    value isa Real && !(value isa Bool) ? Float64(value) : nothing
-end
-
 # Per-addressee population-effect families (prior-vocab v1, peer contract):
 # real-line Normal/Cauchy/Laplace/Logistic/StudentT + Flat, every arg a
-# number (`_rk_effect_number`). StudentT unwraps from `LocationScale(mu, s, TDist(nu))`
+# number (`_brm_effect_number`). StudentT unwraps from `LocationScale(mu, s, TDist(nu))`
 # into Stan `(nu, mu, sigma)` order (a bare `TDist` stays rejected);
 # `Flat()` takes no args. `Normal`/`Cauchy` keep the historical (0, 1)
 # defaulting (SB mirrors it); Laplace/Logistic need both args (SB has no
@@ -3272,8 +3289,8 @@ function _rk_materialize_effect_prior(expression, target::Symbol, label::Symbol;
         "$prefix: predictor `$target` population-effect prior for " *
         "`$label` needs scalar location and scale; index or reduce an " *
         "array-valued argument explicitly")
-    location = _rk_effect_number(raw[1])
-    scale = _rk_effect_number(raw[2])
+    location = _brm_effect_number(raw[1])
+    scale = _brm_effect_number(raw[2])
     isnothing(location) && error(
         "$prefix: predictor `$target` population-effect `$head` " *
         "location for `$label` must be a numeric constant or a scalar data field")
@@ -3310,9 +3327,9 @@ function _rk_effect_studentt_args(expression::ExprColumn, target::Symbol,
     length(bargs) == 1 || error(
         "$prefix: predictor `$target` population-effect prior for " *
         "`$label` `TDist` base needs one argument; write `TDist(nu)`")
-    nu = _rk_effect_number(only(bargs))
-    mu = _rk_effect_number(mu_raw)
-    s = _rk_effect_number(s_raw)
+    nu = _brm_effect_number(only(bargs))
+    mu = _brm_effect_number(mu_raw)
+    s = _brm_effect_number(s_raw)
     (isnothing(nu) || isnothing(mu) || isnothing(s)) && error(
         "$prefix: predictor `$target` population-effect StudentT " *
         "arguments for `$label` must be numeric constants or scalar data fields")
