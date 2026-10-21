@@ -89,6 +89,20 @@ end
         p ~ truncated(Beta(1.0, 2.0), 0.5, 0.2)
         y ~ Normal(p, 1.0)
     end)
+
+    # Sampled bounds stay live, as SBBRMI's `truncated` keeps them
+    # (test/truncated_priors.jl).
+    live = @brm SPELLING_DATA begin
+        location ~ Normal(0.0, 1.0)
+        bounded ~ truncated(Cauchy(0.2, 0.7); lower=location, upper=location + 2)
+        y ~ Normal(bounded, 1.0)
+    end
+    live_law(q) = logpdf(Normal(), q.location) +
+        logpdf(truncated(Cauchy(0.2, 0.7), q.location, q.location + 2), q.bounded) +
+        interval_jacobian(q.bounded, q.location, q.location + 2) +
+        sum(logpdf.(Normal(q.bounded, 1.0), SPELLING_DATA.y))
+    source = emitted_source(check_prior_spelling(live, "truncated-live"; law=live_law))
+    @test occursin("bounded ~ truncated(Cauchy(0.2, 0.7), location, location + 2", source)
 end
 
 @stestset "random-effect scale priors take declaration bounds" begin

@@ -5879,7 +5879,7 @@ function _rk_plan_parameters!(prepared, data::AbstractDict,
         family, args, support_override = if callable === truncated
             # Keyword bounds are validated inside the truncated gate.
             _rk_truncated_prior(prior, parameter.name, (bound, side) ->
-                _rk_parameter_bound(bound, parameter.name, side, data,
+                _rk_truncation_bound(bound, parameter.name, side, data,
                     consts, aliases, parameters, assign_names))
         elseif callable === LocationScale
             _rk_locationscale_studentt(family_prior, parameter.name)
@@ -5925,17 +5925,13 @@ function _rk_plan_parameters!(prepared, data::AbstractDict,
                 kind, value = _rk_resolve_use_ref(arg.name, consts, aliases,
                     parameters, assign_names,
                     "parameter `$(parameter.name)` prior")
-                kind === :number && (push!(resolved, value); continue)
-                family in _RK_SAMPLED_LITERAL_ARGS && error(
-                    "$prefix: parameter `$(parameter.name)` prior " *
-                    "`$family` bounds must be numeric literals in slice 1 " *
-                    "(the thin-layer layout derives support from values; " *
-                    "sampled or assigned bounds are out of slice 1)")
+                kind === :number || _rk_gate_literal_args(family, parameter.name)
                 push!(resolved, value)
             else
-                push!(resolved, _rk_prior_argument_expr(arg, family,
-                    parameter.name, data, consts, aliases, parameters,
-                    assign_names))
+                value = _rk_prior_argument_expr(arg, parameter.name, data,
+                    consts, aliases, parameters, assign_names)
+                value isa Number || _rk_gate_literal_args(family, parameter.name)
+                push!(resolved, value)
             end
         end
         family === :Uniform &&
@@ -5954,13 +5950,19 @@ function _rk_plan_parameters!(prepared, data::AbstractDict,
     specs
 end
 
+_rk_gate_literal_args(family::Symbol, name::Symbol) =
+    family in _RK_SAMPLED_LITERAL_ARGS && error(
+        "RK backend: parameter `$name` prior `$family` bounds must be numeric " *
+        "literals in slice 1 (the thin-layer layout derives support from " *
+        "values; sampled or assigned bounds are out of slice 1)")
+
 # A prior hyperparameter written as an expression (`LogNormal(log(0.7), 0.3)`)
 # has the value Julia gives it, as on SBBRMI. One reading only literals and data
 # is that number. One reading a sampled parameter or an assignment is a live
 # scalar expression in the emitted prior, which the RK graph evaluates.
-function _rk_prior_argument_expr(arg, family::Symbol, name::Symbol,
-        data::AbstractDict, consts, aliases, parameters, assign_names)
-    origin = "parameter `$name` prior"
+function _rk_prior_argument_expr(arg, name::Symbol, data::AbstractDict,
+        consts, aliases, parameters, assign_names;
+        origin::String="parameter `$name` prior")
     rewritten = _rk_rewrite_assignment_refs!(arg, consts, aliases,
         parameters, assign_names, data, origin)
     _rk_walk_assignment_expr!(rewritten, name, data, parameters,
@@ -5975,11 +5977,20 @@ function _rk_prior_argument_expr(arg, family::Symbol, name::Symbol,
             "`$(_rk_lower_assignment_expr(rewritten, name))` is $value")
         return value
     end
-    family in _RK_SAMPLED_LITERAL_ARGS && error(
-        "RK backend: $origin `$family` bounds must be numeric literals in " *
-        "slice 1 (the thin-layer layout derives support from values; " *
-        "sampled or assigned bounds are out of slice 1)")
     _rk_lower_assignment_expr(rewritten, name)
+end
+
+# A `truncated` bound: a frozen number (as a declaration bound), or a live
+# scalar expression over sampled values, which RKPPL's normalized truncation
+# reads at every evaluation, as SBBRMI's `truncated` does.
+function _rk_truncation_bound(bound, name, side, data, consts, aliases,
+        parameters, assign_names)
+    frozen = bound === nothing ? nothing : _rk_frozen_bound(bound, name, side,
+        data, consts, aliases, parameters, assign_names)
+    (bound === nothing || frozen isa Real) && return _rk_parameter_bound(bound,
+        name, side, data, consts, aliases, parameters, assign_names)
+    _rk_prior_argument_expr(bound, name, data, consts, aliases, parameters,
+        assign_names; origin="parameter `$name` truncation $side bound")
 end
 
 # Declaration bounds constrain coordinates separately from the family kernel.
@@ -6203,8 +6214,8 @@ end
 # plans the base family with its unresolved args plus a `(:truncated, lo, hi)`
 # support Tuple, which the AST splices back verbatim: RKPPL's normalized
 # `truncated` over any scalar prior family, with the interval transform Stan
-# uses. Bounds are frozen numbers (literals, `Inf`, scalar data, constants),
-# as for declaration bounds. A zero-location Normal/Cauchy half keeps the
+# uses. A bound is a frozen number (a literal, `Inf`, scalar data, a constant)
+# or a live scalar expression (`_rk_truncation_bound`). A zero-location Normal/Cauchy half keeps the
 # legacy `:positive` override after its arguments resolve (byte-identical
 # `HalfNormal`/`HalfCauchy` emission, `_rk_plan_parameters!`).
 function _rk_truncated_prior(prior::_BRMPreparedExpr, name::Symbol, bound)
@@ -6248,7 +6259,7 @@ function _rk_truncated_prior(prior::_BRMPreparedExpr, name::Symbol, bound)
         (base, inner.args)
     end
     lo, hi = bound(lower, :lower), bound(upper, :upper)
-    lo < hi || error(
+    !(lo isa Real && hi isa Real) || lo < hi || error(
         "$prefix: parameter `$name` truncated prior bounds require " *
         "lower < upper, got [$lo, $hi]")
     (family, base_args, (:truncated, lo, hi))
@@ -6310,8 +6321,8 @@ function _rk_plan_assignments!(kept, exprs::Dict{Symbol,Any},
     specs
 end
 
-# The names a sampled parameter's prior arguments read: a bare reference or
-# the operands of a live hyperparameter expression (callee heads excluded).
+# The names a sampled parameter's prior arguments or truncation bounds read: a
+# bare reference or the operands of a live expression (callee heads excluded).
 _rk_argument_symbols!(out, arg::Symbol) = push!(out, arg)
 _rk_argument_symbols!(out, arg::Expr) =
     (foreach(a -> _rk_argument_symbols!(out, a), arg.args[2:end]); out)
@@ -6325,6 +6336,9 @@ function _rk_gate_acyclic!(parameters::AbstractVector,
     deps = Dict{Symbol,Vector{Symbol}}()
     for parameter in parameters
         deps[parameter.name] = _rk_argument_symbols!(Symbol[], parameter.args)
+        override = parameter.support_override
+        override isa Tuple &&
+            _rk_argument_symbols!(deps[parameter.name], Base.tail(override))
     end
     for assignment in assignments
         deps[assignment.name] = Symbol[
