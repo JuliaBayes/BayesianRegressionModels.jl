@@ -82,7 +82,11 @@ function _brm_prior_value_dependencies(program::_BRMPreparedProgram, roots)
         name in required && return
         haskey(byname, name) || error("BRM preparation: prior references unknown model value `$name`")
         operation = byname[name]
-        operation.role === :extension && haskey(program.context.data, name) && return
+        # `Inf` in a bound (`truncated(Normal(0, 1), 0, Inf)`) is Julia's
+        # number: the builder binds the unread name to a placeholder, and every
+        # backend reads it as the literal.
+        operation.role === :extension &&
+            (haskey(program.context.data, name) || name === :Inf) && return
         operation.role in (:parameter, :assignment) || error(
             "BRM preparation: model-level prior references `$name`, a $(operation.role); " *
             "it requires a sampled parameter, deterministic model value, or data")
