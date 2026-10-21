@@ -90,8 +90,11 @@ const PINS = [
     # for prediction-only designs; dad59972 extends that to censored,
     # truncated and interval-censored responses (snag
     # rkppl-absent-cen-9af487f3). Both contain f13e68d4 (location-alias
-    # elision renames cell parameters).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "dad59972b3d6b38c610201484de509adc0eed144"),  # main
+    # elision renames cell parameters). ae731d3f + fe85d9f6 keep a location
+    # over a computed design queryable by its authored name, e.g. `mu` over a
+    # completed `mi` covariate (snag rkppl-location-a-2ec8954d); cc50dae0 is
+    # the RK main containing them.
+    ("ReactiveKernels",  "https://github.com/nsiccha/ReactiveKernels.jl.git",   "cc50dae06e9c212fb0d36c11332aeefef1d0e3a5"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.5); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "d16c4efb72b963f45de9d6f632c38d46706c23e1"),  # main
