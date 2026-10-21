@@ -844,13 +844,11 @@ parse!(x::Expr; info) = if x.head == :block
 elseif _is_brm_plate(x)
     groupings = hasproperty(info, :groupings) ? info.groupings : Dict{Symbol,_BRMPlateGrouping}()
     grouped_reads = hasproperty(info, :grouped_reads) ? info.grouped_reads : Set{Symbol}()
-    # `y[p] ~ AR1Normal(...)` is evaluated as the `@scan` it states
-    # (`ar1_normal.jl`); `show` prints the cell as written, and the time checks
-    # run when the model is built.
-    authored = x
-    x, ar1_normal_checks = _brm_expand_cell_ar1_normal(x)
-    checks = ar1_normal_checks
-    kernel = _brm_plate_kernel(x; groupings, grouped_reads, authored, checks)
+    # `y[p] ~ AR1Normal(...)` stays in the cell as written, and each backend
+    # calls its AR(1) submodel (`ar1_normal.jl`); its time checks run when the
+    # model is built.
+    checks = _brm_cell_ar1_normal_checks(x)
+    kernel = _brm_plate_kernel(x; groupings, grouped_reads, checks)
     parsed = parse!(kernel; info)
     isempty(checks) ? parsed : Expr(:block, parsed, checks...)
 elseif _is_brm_ar1_normal(x)

@@ -626,28 +626,22 @@ end
     end
 end
 
-# A derived per-row value that no likelihood reads, computed with `map` over a
-# closure inside the subject cell, needs Enzyme runtime activity. The η
-# Hessian's reverse-over-forward differentiates the same cell, so it takes the
-# runtime activity of the caller's `ad_backend`; with static activity there the
-# Newton posthoc estimator raised `EnzymeRuntimeActivityError`.
-nlme_upper_share(y, μ, s) = map((yi, μi) -> 1 / (1 + exp(-(yi - μi) / s)), y, μ)
-
+# A program whose reverse gradient needs Enzyme runtime activity needs it in
+# the η Hessian's reverse-over-forward and the Gaussian pushforward too, so
+# both take the runtime activity of the caller's `ad_backend` (BRM e6a72328).
+# The model that first raised `EnzymeRuntimeActivityError` there (a derived
+# per-row `map` over a closure that no likelihood reads) differentiates under
+# static activity from ReactiveKernels fef260229, which drops unread plate
+# outputs from the query, so the modes are checked directly.
 @stestset "η Hessian blocks take the caller's runtime activity" begin
-    brmi = @brm NLME_PLATE_DATA begin
-        sigma ~ Exponential(1)
-        log_CL ~ 1 + weight + (1 | pk | subject)
-        log_V ~ 1 + (1 | pk | subject)
-        @plate for i in eachindex(log_CL)
-            CL = exp(log_CL[i])
-            Vc = exp(log_V[i])
-            pred[i] = dose[i] / Vc .* exp.(-(CL / Vc) .* t[i])
-            share[i] = nlme_upper_share(dv[i], pred[i], sigma)
-            dv[i] ~ normal(pred[i], sigma)
-        end
-    end
     ad = AutoEnzyme(; mode=Enzyme.set_runtime_activity(Enzyme.Reverse))
-    m = brm_nlme_model(RKBRMI(brmi); ad_backend=ad)
+    for mode in (Enzyme.Reverse, Enzyme.Forward)
+        @test Enzyme.runtime_activity(BRM._brm_enzyme_mode(mode, ad))
+        @test !Enzyme.runtime_activity(BRM._brm_enzyme_mode(mode, NLME_AD))
+    end
+    @test Enzyme.runtime_activity(BRM._brm_nlme_forward_backend(ad).mode)
+    @test !Enzyme.runtime_activity(BRM._brm_nlme_forward_backend(NLME_AD).mode)
+    m = brm_nlme_model(RKBRMI(nlme_plate_pk(NLME_PLATE_DATA)); ad_backend=ad)
     θ, σ = plate_pk_point(m)
     H = 0.1 .* reshape(collect(1.0:6.0), 2, :) .- 0.2
     blocks = conditional_loglikelihood_hessian_blocks(m, [1, 2, 3], θ, σ, H)
