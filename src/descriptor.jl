@@ -2118,19 +2118,22 @@ function _brm_submodel_pick(d::BRMDescriptor, address, found)
 end
 
 # The names a submodel body binds at its top level, in body order: its `~`
-# declarations and `=` assignments. `nothing` for a named submodel function,
-# whose body is selected by dispatch at trace time.
+# declarations, `=` assignments and bare `x::T` declarations, each LHS read
+# through the planner's own rule (`_sb_plan_param_names`), so a typed
+# `x::ordered[3] ~ …` binds `x` exactly as `x ~ …` does. `nothing` for a named
+# submodel function, whose body is selected by dispatch at trace time.
 function _brm_submodel_bound_names(s::BRMSubmodel)
     s.model isa StanBlocks.SlicModel || return nothing
     body = s.model.model
     statements = Meta.isexpr(body, :block) ? body.args : Any[body]
     names = Symbol[]
     for st in statements
-        if Meta.isexpr(st, :(=)) && st.args[1] isa Symbol
-            push!(names, st.args[1])
-        elseif Meta.isexpr(st, :call) && length(st.args) == 3 && st.args[1] === :~ &&
-               st.args[2] isa Symbol
-            push!(names, st.args[2])
+        if Meta.isexpr(st, :(=), 2)
+            append!(names, _sb_plan_param_names(st.args[1]))
+        elseif Meta.isexpr(st, :call, 3) && st.args[1] === :~
+            append!(names, _sb_plan_param_names(st.args[2]))
+        elseif Meta.isexpr(st, :(::), 2)
+            append!(names, _sb_plan_param_names(st))
         end
     end
     unique!(names)

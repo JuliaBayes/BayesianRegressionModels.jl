@@ -104,6 +104,24 @@ _sb_submodel_rhs!(stmts, data, target::Symbol, ::typeof(noisy), rhs) = begin
     :done
 end
 
+# A submodel whose bindings carry type annotations: a typed `~`, a bare
+# declaration (a flat-prior parameter) and a typed `=`.
+StanBlocks.@deffun toy_mix(x::vector[n], scales::vector[3], weights::vector[3])::vector[n] =
+    exp(-x * scales') * weights
+function mixed end
+const _sb_mixed = StanBlocks.@slic begin
+    log_scales::ordered[3] ~ normal(0.0, 1.0)
+    weights::simplex[3]
+    scales = exp(log_scales)
+    doubled::vector[3] = scales .* 2.0
+    return toy_mix(dose, doubled, weights)
+end
+_sb_submodel_rhs!(stmts, data, target::Symbol, ::typeof(mixed), rhs) = begin
+    (dose_term,) = getargs(rhs)
+    push!(stmts, :($target ~ _sb_mixed(; dose=$(name(dose_term)))))
+    :done
+end
+
 df = (; dose=[0.0, 0.5, 1.0, 1.5, 2.0, 2.5], x=[0.1, -0.2, 0.3, 0.0, 0.5, -0.4],
         g=[1, 1, 2, 2, 3, 3], y=[0.1, 0.3, 0.5, 0.7, 0.8, 0.9],
         z=[0.2, 0.0, 0.4, 0.1, 0.6, -0.1])
@@ -152,6 +170,12 @@ rated_builder = @brm begin
     noisy_effect ~ noisy(dose)
     y ~ Normal(r, sigma)
     z ~ Normal(noisy_effect, sigma)
+end
+
+mixed_builder = @brm begin
+    sigma ~ Exponential(1)
+    m ~ mixed(dose)
+    y ~ Normal(m, sigma)
 end
 end
 
@@ -469,4 +493,24 @@ end
     @test own === only(noisy.outputs)
     @test top !== own
     @test only(brm_outputs(d; logical=:sigma)) === top
+end
+
+@testset "typed bindings resolve like untyped ones" begin
+    d = brm_descriptor(TS.mixed_builder, TS.df; mod=TS, total_groups=(), name=:mixed)
+    s = only(d.submodels)
+    log_scales = brm_output(d, :log_scales; submodel=:m)
+    weights = brm_output(d, :weights; submodel=:m)
+    scales = brm_output(d, :scales; submodel=:m)
+    @test log_scales.name === :m_log_scales && log_scales.kind === :parameter
+    @test weights.name === :m_weights && weights.kind === :parameter
+    @test scales.name === :m_scales
+    @test all(o -> o in s.outputs, (log_scales, weights, scales))
+    @test brm_outputs(d; submodel=:m, logical=(:log_scales, :weights)) ==
+          [log_scales, weights]
+    @test occursin("binds no `nope`; it binds (:log_scales, :weights, :scales, :doubled)",
+                   thrown(() -> brm_output(d, :nope; submodel=:m)))
+    # The typed `=` is bound and emitted as a transformed parameter, but
+    # StanBlocks' `stan_descriptor` lists no output for it (StanBlocks snag
+    # `stan-descriptor-19ef14e6`), so it has no carrier yet.
+    @test_broken any(o -> o.name === :m_doubled, s.outputs)
 end
