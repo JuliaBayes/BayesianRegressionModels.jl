@@ -29,7 +29,16 @@ end
 # a named predictor be read by ordinary Julia functions on its own axis.
 function _rk_value_level_indices(labels, source)
     levels = _rk_grouping_levels(source)
-    Int[findfirst(isequal(label), levels) for label in labels]
+    Int[_rk_value_level_index(levels, label) for label in labels]
+end
+function _rk_value_level_index(levels, label)
+    index = findfirst(isequal(label), levels)
+    index === nothing && error(
+        "RK backend: group label `$label` is not one of the $(length(levels)) " *
+        "fitted levels. A replay keeps the fitted levels of every grouping it " *
+        "does not resample; name the grouping in `resample_groups` to take the " *
+        "new data's own levels.")
+    index
 end
 
 _rk_value_dummy(values, level) = Float64.(isequal.(values, level))
