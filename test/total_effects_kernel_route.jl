@@ -22,10 +22,11 @@ const BRM = BayesianRegressionModels
 kernel_totals_builder = @brm begin
     sigma  ~ Exponential(1)
     log_CL ~ 1 + weight + (1 | p | subject)
-    pred   ~ kernel(ragged(pk_time, pk_subject), log_CL) do ts, lCL
-        exp(-exp(lCL) .* ts)
+    pk = groups(pk_subject => subject)
+    @plate for i in eachindex(log_CL)
+        pred[i] = exp(-exp(log_CL[i]) .* pk_time[pk[i]])
+        pk_y[pk[i]] ~ Normal(pred[i], sigma)
     end
-    ragged(pk_y, pk_subject) ~ Normal(pred, sigma)
 end
 
 kernel_totals_df(; subs, seed = 1) = (;

@@ -42,8 +42,8 @@ plate_ragged_legacy(data) = @brm data begin
     effect(theta, Intercept) ~ Normal(0, 1)
     sd(:, p) ~ Exponential(1)
     loc ~ kernel(theta,
-                 ragged(event_time, event_subject),
-                 ragged(y, event_subject)) do theta, event_time, y
+                 ragged(event_time, event_subject, subject),
+                 ragged(y, event_subject, subject)) do theta, event_time, y
         loc = theta .* event_time
         y ~ normal(loc, sigma)
         loc
@@ -55,9 +55,10 @@ plate_ragged_annotated(data) = @brm data begin
     theta ~ 1 + (1 | p | subject)
     effect(theta, Intercept) ~ Normal(0, 1)
     sd(:, p) ~ Exponential(1)
+    events = groups(event_subject => subject)
     @plate for i in eachindex(theta)
-        loc[i] = theta[i] .* ragged(event_time, event_subject)[i]
-        ragged(y, event_subject)[i] ~ normal(loc[i], sigma)
+        loc[i] = theta[i] .* event_time[events[i]]
+        y[events[i]] ~ normal(loc[i], sigma)
     end
 end
 
@@ -94,19 +95,22 @@ const PLATE_EVENTS = (;
 plate_terminal_top_level_legacy(data) = @brm data begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + weight + (1 | p | subject)
-    loc ~ kernel(log_CL, ragged(obs_time, obs_subject)) do log_CL, obs_time
-        exp.(-exp(log_CL) .* obs_time)
+    loc ~ kernel(log_CL, ragged(obs_time, obs_subject, subject),
+                 ragged(obs_y, obs_subject, subject)) do log_CL, obs_time, obs_y
+        loc = exp.(-exp(log_CL) .* obs_time)
+        obs_y ~ Normal(loc, sigma)
+        loc
     end
-    ragged(obs_y, obs_subject) ~ Normal(loc, sigma)
 end
 
 plate_terminal_top_level_annotated(data) = @brm data begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + weight + (1 | p | subject)
+    obs = groups(obs_subject => subject)
     @plate for i in eachindex(log_CL)
-        loc[i] = exp.(-exp(log_CL[i]) .* ragged(obs_time, obs_subject)[i])
+        loc[i] = exp.(-exp(log_CL[i]) .* obs_time[obs[i]])
+        obs_y[obs[i]] ~ Normal(loc[i], sigma)
     end
-    ragged(obs_y, obs_subject) ~ Normal(loc, sigma)
 end
 
 plate_terminal_anonymous_legacy(data) = @brm data begin
@@ -147,8 +151,8 @@ plate_terminal_named_ragged_legacy(data) = @brm data begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + weight + (1 | p | subject)
     loc ~ kernel(log_CL,
-                 ragged(obs_time, obs_subject),
-                 ragged(obs_y, obs_subject)) do log_CL, obs_time, obs_y
+                 ragged(obs_time, obs_subject, subject),
+                 ragged(obs_y, obs_subject, subject)) do log_CL, obs_time, obs_y
         mu = exp.(-exp(log_CL) .* obs_time)
         obs_y ~ normal(mu, sigma)
         mu
@@ -158,9 +162,10 @@ end
 plate_terminal_named_ragged_annotated(data) = @brm data begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + weight + (1 | p | subject)
+    obs = groups(obs_subject => subject)
     @plate for i in eachindex(log_CL)
-        mu = exp.(-exp(log_CL[i]) .* ragged(obs_time, obs_subject)[i])
-        ragged(obs_y, obs_subject)[i] ~ normal(mu, sigma)
+        mu = exp.(-exp(log_CL[i]) .* obs_time[obs[i]])
+        obs_y[obs[i]] ~ normal(mu, sigma)
         loc[i] = mu
     end
 end
@@ -178,7 +183,7 @@ end
          plate_ragged_annotated(PLATE_RAGGED)),
         ("multiple named outputs", plate_named_outputs_legacy(PLATE_PANEL),
          plate_named_outputs_annotated(PLATE_PANEL)),
-        ("terminal output, top-level ragged observation",
+        ("terminal output, grouped observation in the cell",
          plate_terminal_top_level_legacy(PLATE_EVENTS),
          plate_terminal_top_level_annotated(PLATE_EVENTS)),
         ("terminal output, in-cell observation",
@@ -263,11 +268,10 @@ end
 plate_output_named_grouped(data) = @brm data begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + weight + (1 | p | subject)
-    ragged(obs_time, obs_subject)
-    ragged(obs_y, obs_subject)
+    obs = groups(obs_subject => subject)
     @plate for i in eachindex(log_CL)
-        mu = exp.(-exp(log_CL[i]) .* obs_time[i])
-        obs_y[i] ~ normal(mu, sigma)
+        mu = exp.(-exp(log_CL[i]) .* obs_time[obs[i]])
+        obs_y[obs[i]] ~ normal(mu, sigma)
         loc[i] = mu
     end
 end
@@ -275,11 +279,10 @@ end
 plate_effect_named_grouped(data) = @brm data begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + weight + (1 | p | subject)
-    ragged(obs_time, obs_subject)
-    ragged(obs_y, obs_subject)
+    obs = groups(obs_subject => subject)
     @plate for i in eachindex(log_CL)
-        mu = exp.(-exp(log_CL[i]) .* obs_time[i])
-        obs_y[i] ~ normal(mu, sigma)
+        mu = exp.(-exp(log_CL[i]) .* obs_time[obs[i]])
+        obs_y[obs[i]] ~ normal(mu, sigma)
     end
 end
 

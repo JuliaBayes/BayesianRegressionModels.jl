@@ -28,22 +28,20 @@ const PLATE_DATA = (;
 const PLATE_SOURCE = """
     sigma ~ Exponential(1)
     log_CL ~ 1 + weight + (1 | p | subject)
-    ragged(obs_time, obs_subject)
-    ragged(y, obs_subject)
+    obs_rows = groups(obs_subject => subject)
     @plate for i in eachindex(log_CL)
-        scaled = 2 .* obs_time[i]
+        scaled = 2 .* obs_time[obs_rows[i]]
         loc[i] = exp.(-exp(log_CL[i]) .* scaled)
-        y[i] ~ normal(loc[i], sigma)
+        y[obs_rows[i]] ~ normal(loc[i], sigma)
     end"""
 const PLATE_BUILDER = @brm begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + weight + (1 | p | subject)
-    ragged(obs_time, obs_subject)
-    ragged(y, obs_subject)
+    obs_rows = groups(obs_subject => subject)
     @plate for i in eachindex(log_CL)
-        scaled = 2 .* obs_time[i]
+        scaled = 2 .* obs_time[obs_rows[i]]
         loc[i] = exp.(-exp(log_CL[i]) .* scaled)
-        y[i] ~ normal(loc[i], sigma)
+        y[obs_rows[i]] ~ normal(loc[i], sigma)
     end
 end
 
@@ -316,21 +314,22 @@ end
     end
     @test sb_code(merge(observation, predictor)(FAMILY_DATA)) ==
           sb_code(reversed(FAMILY_DATA))
-    grouping = @brm begin ragged(obs_time, obs_subject); ragged(y, obs_subject) end
+    grouping = @brm begin obs_rows = groups(obs_subject => subject) end
     cell = @brm begin
         sigma ~ Exponential(1)
         log_CL ~ 1 + weight + (1 | p | subject)
         @plate for i in eachindex(log_CL)
-            scaled = 2 .* obs_time[i]
+            scaled = 2 .* obs_time[obs_rows[i]]
             loc[i] = exp.(-exp(log_CL[i]) .* scaled)
-            y[i] ~ normal(loc[i], sigma)
+            y[obs_rows[i]] ~ normal(loc[i], sigma)
         end
     end
     @test sb_code(merge(cell, grouping)(PLATE_DATA)) == sb_code(PLATE_BUILDER(PLATE_DATA))
     @test sb_code(merge(grouping, cell)(PLATE_DATA)) == sb_code(PLATE_BUILDER(PLATE_DATA))
-    # refused: built on its own, a grouping no cell reads leaves `x` ungrouped
-    # (snag plate-body-reads-c69f8a88); only the composed model is checked.
-    @test_throws "no cell reads `obs_time[i]`, `y[i]`" grouping(PLATE_DATA)
+    # refused: built on its own, a binding no cell reads leaves its vectors
+    # ungrouped (snag plate-body-reads-c69f8a88); only the composed model is
+    # checked.
+    @test_throws "no cell reads `obs_rows`" grouping(PLATE_DATA)
     # A merged builder is callable from code compiled before the merge.
     build_merged(df) = merge(predictor, observation)(df)
     @test build_merged(FAMILY_DATA) isa BRMI

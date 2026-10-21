@@ -25,11 +25,12 @@ function start_model(data)
         mu ~ 1 + hsgp(x; k=3, domain=(-1.0, 1.0)) + (1 | p | subject)
         rate ~ 1 + (1 | p | subject)
         unit_shift ~ 0 + (1 | u | unit)
+        obs = groups(obs_subject => subject)
         @plate for i in eachindex(mu)
-            pred[i] = mu[i] .+ rate[i] .* ragged(t, obs_subject)[i] .+
-                ragged(unit_shift, obs_subject)[i]
+            pred[i] = mu[i] .+ rate[i] .* t[obs[i]] .+
+                unit_shift[obs[i]]
+            y[obs[i]] ~ Normal(pred[i], sigma)
         end
-        ragged(y, obs_subject) ~ Normal(pred, sigma)
     end
 end
 

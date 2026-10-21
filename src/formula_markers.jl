@@ -183,18 +183,57 @@ state per cell; observing the cell's own response entry by entry
 conditional density, and with `y` omitted the block draws whole trajectories.
 [`AR1Normal`](@ref) observes a group's series under one such recurrence.
 
-Indexed inputs split by kind. A raw data column on the plate's own
-one-row-per-subject frame is gathered into a per-group slice. A column or
-linear predictor living on a DIFFERENT frame — a dose-event table, say — is
-grouped by a model-scope [`ragged`](@ref) statement and still read as `x[i]`.
+Indexed inputs split by kind. A data vector with one entry per cell is read
+`x[i]`, and a vector of per-cell vectors gives cell `i` its own vector. A
+vector or linear predictor indexed like another grouping vector — dose events,
+say — is read at the cell's indices through a model-scope binding:
+
+```julia
+log_F  ~ 1 + vessel + mo(diet) + hsgp(log_dose)     # one value per dose event
+log_CL ~ 1 + weight + (1 | p | subject)             # one value per subject
+doses = groups(dose_subject => subject)             # each subject's dose indices
+obs = groups(obs_subject => subject)
+
+@plate for i in eachindex(log_CL)
+    effective_dose = dose_amount[doses[i]] .* exp.(log_F[doses[i]])
+    pred[i] = pk_cell(t_obs[obs[i]], effective_dose, log_CL[i])
+    dv[obs[i]] ~ normal(pred[i], sigma)
+end
+```
+
+[`groups`](@ref)`(dose_subject => subject)` is, for each entry of `subject`,
+the indices of `dose_subject` that hold it, so `x[doses[i]]` is `x` at subject
+`i`'s doses, as the same Julia loop reads it. Entries join their cell by label,
+never by position. Every binding one plate reads names the same label vector,
+and under a random-effect predictor that is the predictor's grouping vector.
+When no predictor carries a random effect, the label vector lists the cells:
+a district total observes the summed rate of its facilities,
+
+```julia
+log_lambda ~ 1 + (1 | fac | facility)                # one value per facility
+facilities = groups(fac_district => district)       # each district's facilities
+
+@plate for d in eachindex(Y)                        # Y: one total per district
+    Y[d] ~ Poisson(sum(exp.(log_lambda[facilities[d]])))
+end
+```
+
+and the plate has one cell per entry of `district`, in that order. An index
+vector into another grouping's entries — an event schedule's global read number
+per observation — is read as positions among the cell's indices of that
+grouping, `indexin(obs_read[obs[i]], reads[i])` with
+`reads = groups(read_subject => subject)`; an index that belongs to another
+subject is refused, and `something.(indexin(…), 0)` keeps `0` as "no index".
+A binding no cell reads is refused.
+
 A per-subject linear predictor is passed as that group's scalar value. One
 with random effects over several groupings — Kreise nested in Länder, `(1 |
 land | land) + (1 | kreis | kreis)` — is read on the grouping whose column lists
-one unique label per row; the others are ordinary terms of its value. One
-without a random effect defines no grouping of its own: it is read on the
-subject frame a random-effect predictor defines — or, in a panel with no random
-effects, the frame of the pre-grouped columns — so its data columns must have
-one row per subject.
+one unique label per entry; the others are ordinary terms of its value. One
+without a random effect defines no grouping of its own: it is read per subject
+as a random-effect predictor defines the subjects — or, in a panel with no
+random effects, as the pre-grouped vectors do — so its data vectors must have
+one entry per subject.
 
 `@brm` lowers this annotated-loop surface to the shared kernel IR, so SBBRMI and
 RKBRMI use the same grouping, ragged, observation, and omitted-outcome paths.
@@ -208,118 +247,32 @@ kernel-owned eta vector or positional eta-index contract in the current API.
 function kernel end
 
 """
-    ragged(x, group)
-    ragged(x, group => cells)
-    ragged(idx, group; into=target)
+    kernel(ragged(x, group), ...) do ...
 
-Group a FLAT secondary row axis by a raw data column that names the subject of
-every row. The marker has two formula positions:
+The kernel input that groups a vector by a grouping vector naming the subject
+of each entry. A `@plate for` cell does not write it: it reads `x[rows[i]]`
+through a model-scope `rows = groups(group => labels)` binding (see
+[`kernel`](@ref) and [`groups`](@ref)), which lowers to
+`ragged(x, group, labels)`. The model-scope `ragged(x, group)` statement and the
+in-cell `ragged(x, group)[i]` read are retired and refused with the binding that
+replaces them (todo `1nfukuv`): they changed what `x[i]` means in a cell
+without saying so there.
 
-- As a model-scope statement, `ragged(x, group)` declares that `@plate for`
-  cells read `x[i]` as cell `i`'s ragged per-subject vector. `x` may be a flat
-  data column or an event-axis linear predictor. The declaration emits nothing
-  itself; it may precede or follow the cells, a name is grouped at most once,
-  and a declaration no cell reads is refused. The deprecated in-body read
-  `ragged(x, group)[i]` and the compatibility `kernel(...)` positional lower
-  to exactly the same kernel argument.
-- As an observation LHS, `ragged(y, group) ~ Family(pred, ...)` groups a flat
-  response before applying the top-level likelihood. The referenced
-  `kernel(...)` result supplies the authoritative subject row order, so labels
-  are joined rather than sorted or inferred from first occurrence. The emitted
-  observation keeps the logical name `y` and therefore uses StanBlocks' normal
-  top-level ragged outputs: flat `y_gen`, group-aggregate `y_likelihood`, and
-  descriptor `segments`. This formula-boundary grouping is SBBRMI/sbimpl-only.
+The formula-level observation `ragged(y, group) ~ Family(pred, ...)` is
+retired the same way: observe the response in the cell that computes its
+prediction, `y[rows[i]] ~ Family(pred[i], ...)`. `ragged` remains only as a
+positional of the deprecated `kernel(...) do` spelling: `ragged(x, group)`,
+`ragged(x, group, labels)` or `ragged(idx, group; into = target)`.
 
-For the kernel-positional form, `x` lives on some frame other than the kernel's
-one-row-per-subject frame — a dose-event table, say — and `group` names, for
-every row of that frame, which subject it belongs to. The cell receives `x` as
-a RAGGED per-subject vector.
+ONE VALUE PER ENTRY OF `x` — no expansion happens anywhere. If an event
+schedule stores a compact schedule (one entry per dose OP, carrying an interval
+and a count) then `x` has one value per OP. Grouping requires one `group` key
+per entry of `x` and joins those keys to the kernel's subject labels. That is
+local validation of the grouping operation, not an inner-shape contract between
+cell arguments.
 
-`x` may be either a linear predictor declared in the same `@brm` block, or a raw
-flat data column. It is the same grouping either way:
-
-```julia
-log_F  ~ 1 + vessel + mo(diet) + hsgp(log_dose)     # rows = dose events
-log_CL ~ 1 + weight + (1 | p | subject)             # rows = subjects
-ragged(dose_amount, dose_subject)                   # a flat data column
-ragged(log_F, dose_subject)                         # a linear predictor
-
-@plate for i in eachindex(log_CL)
-    effective_dose = dose_amount[i] .* exp.(log_F[i])
-    pred[i] = pk_cell(t_obs[i], effective_dose, log_CL[i])
-    dv[i] ~ normal(pred[i], sigma)
-end
-```
-
-Only the REALIZATION differs, and the difference is forced: a linear predictor
-is a Stan parameter, so it cannot be gathered on the Julia side — the plate
-takes an index column and the cell fancy-indexes the unsliced predictor
-(`log_F[rows]`). A data column is Julia data, so it is gathered directly into a
-`Vector{Vector{T}}`, which StanBlocks ingests as a ragged column natively —
-exactly what a hand-prepared per-subject view would have been. Wrapping a column
-does not consume the flat original: a term that names it on its own axis
-(`hsgp(log_dose)` above) still sees it.
-
-When no per-subject linear predictor carries a random effect, nothing labels
-the cells for `group` to join against. Name the cell label column then:
-`ragged(x, group => cells)`, where `cells` lists each cell's label once, on the
-cells' own frame. The plate has one cell per row of `cells`, in that row order,
-and every per-cell data column belongs to that frame. A district total observes
-the summed rate of the facilities in its district:
-
-```julia
-log_lambda ~ 1 + (1 | fac | facility)               # rows = facilities
-ragged(log_lambda, fac_district => district)        # rows = districts
-
-@plate for d in eachindex(Y)                        # Y: one total per district
-    Y[d] ~ Poisson(sum(exp.(log_lambda[d])))
-end
-```
-
-Rows join their cell by label, so the totals' frame may list its districts in
-any order. Every `ragged(...)` input of one plate names the same `cells`; their
-`group` columns may differ. Under a random-effect predictor the cells are its
-grouping, so `cells` may be named only as that same column.
-
-A plate with no random-effect predictor and no `cells` is refused: matching rows
-to cells by position cannot be checked against a per-cell column, which would
-then bind to the wrong cells silently. A plate over long-format rows with
-nothing per cell iterates its groups instead,
-`@plate for p in groups(group; order = time)` (see [`groups`](@ref)): one cell
-per distinct label of `group`, each read `x[p]` the group's rows in `time`
-order.
-
-Why the grouping is an explicit argument rather than derived: an ordinary
-per-subject LP is grouped by the random-effect grouping that labels its rows
-(`_sb_kernel_lp_buckets`), but a secondary-axis population LP like
-the one above has no random-effect term at all, and a raw column carries no grouping
-whatsoever. The axis has to be declared, and `group` is that declaration.
-
-ONE VALUE PER ROW OF `x`'s OWN FRAME — no expansion happens anywhere. If the
-event table stores a compact schedule (one row per dose OP, carrying an interval
-and a count) then `x` has one value per OP. Constructing `ragged(x, group)`
-requires one `group` key per row of `x` and joins those keys to the kernel's
-outer subject labels. That is local validation of the grouping operation, not
-an inner-shape contract between cell arguments. Kernel compares no totals or
-per-subject inner lengths across positionals; once each positional supplies one
-outer cell per subject, relationships among the values inside a cell belong to
-the cell body.
-
-INDEX COLUMNS INTO ANOTHER AXIS. `ragged(idx, group; into=target)` declares a
-data column of 1-based row numbers on the flat axis whose subjects `target`
-labels — an event schedule's global read number per observation, say. Each
-value becomes its position among its own subject's rows of `target`, in flat
-order (the order `ragged(x, target)` gathers), so the cell indexes its own
-subject's slice of that axis: `conc[obs_read[i]]` with `conc` computed per
-local read. `0` stays `0` ("no row"). An index outside `target`'s rows, or
-into another subject's rows, is refused; it would otherwise read the wrong
-subject silently. `into=` is model-scope only and data-only: an observation
-LHS takes no keywords.
-
-Dispatch tag only — the model-scope statement is consumed by the `@plate for`
-rewrite (`_brm_plate_kernel`, macro.jl), kernel-argument lowering lives in
-`_sb_kernel_doblock!` (sbimpl), and observation-LHS lowering lives in
-`_sb_sampling!`.
+Dispatch tag only — kernel-argument lowering lives in `_sb_kernel_doblock!`
+(sbimpl) and the RK kernel preparation.
 """
 ragged
 
@@ -327,11 +280,9 @@ ragged
 # header lowers to; it is not written on `ragged` itself.
 _check_term_kwargs(::typeof(ragged), kwargs) =
     all(in((:into, :order)), keys(kwargs)) || error(
-    "@brm: ragged(...) takes only the `into=` keyword, got $(keys(kwargs)). The ",
-    "spelling is `ragged(<linear predictor or flat column>, <grouping column>)`, ",
-    "`ragged(x, group => cells)` with a cell label column `cells`, or ",
-    "`ragged(<index column>, <grouping column>; into=<grouping column of the ",
-    "indexed axis>)`.")
+    "@brm: ragged(...) takes only the `into=` keyword, got $(keys(kwargs)). In a ",
+    "`@plate for` cell, read `x[rows[i]]` with `rows = groups(group => labels)`; ",
+    "an index vector into another grouping is `indexin(idx[rows[i]], target[i])`.")
 
 # Reject the retired keyword surface at CONSTRUCTION — i.e. at the `@brm` /
 # `kernel(...)` call the consumer actually wrote — not merely when the model is

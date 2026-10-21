@@ -407,11 +407,12 @@ ragged_builder = @brm begin
     sigma_y ~ Exponential(1)
     sigma_qt ~ Exponential(1)
     log_scale ~ 1 + (1 | p | subject)
-    pred ~ kernel(ragged(obs_idx, obs_subject), qt_y, log_scale) do idxs, qt_obs, ls
-        qt_obs ~ normal(exp(ls), sigma_qt)
-        idxs .* exp(ls)
+    obs = groups(obs_subject => subject)
+    @plate for i in eachindex(log_scale)
+        qt_y[i] ~ normal(exp(log_scale[i]), sigma_qt)
+        pred[i] = obs_idx[obs[i]] .* exp(log_scale[i])
+        obs_y[obs[i]] ~ normal(pred[i], sigma_y)
     end
-    ragged(obs_y, obs_subject) ~ Normal(pred, sigma_y)
 end
 
 ragged_df = (;
@@ -429,7 +430,7 @@ ragged_df = (;
          exclusive=:sigma_qt, shared=(:sigma_pk,)),
         (label="@plate cell", builder=plate_builder, data=kernel_df, response=:qt_y,
          exclusive=:sigma_qt, shared=(:sigma_pk,)),
-        (label="ragged join", builder=ragged_builder, data=ragged_df, response=:obs_y,
+        (label="grouped observation", builder=ragged_builder, data=ragged_df, response=:obs_y,
          exclusive=:sigma_y, shared=(:sigma_qt,)),
     )
     for case in cases

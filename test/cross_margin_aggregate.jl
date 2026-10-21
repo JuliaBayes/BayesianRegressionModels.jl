@@ -73,9 +73,9 @@ agg_df = (;
 
 agg_builder = @brm begin
     log_lambda ~ 1 + (1 | fac | facility)
-    ragged(log_lambda, fac_district => district)
+    facilities = groups(fac_district => district)
     @plate for d in eachindex(Y)
-        lam_d = sum(exp.(log_lambda[d]))
+        lam_d = sum(exp.(log_lambda[facilities[d]]))
         Y[d] ~ Poisson(lam_d)
     end
 end
@@ -117,10 +117,10 @@ end
     two_views = @brm begin
         log_lambda ~ 1 + (1 | fac | facility)
         log_site ~ 1 + (1 | site | site)
-        ragged(log_lambda, fac_district => district)
-        ragged(log_site, site_district => district)
+        facilities = groups(fac_district => district)
+        sites = groups(site_district => district)
         @plate for d in eachindex(Y)
-            Y[d] ~ Poisson(sum(exp.(log_lambda[d])) + sum(exp.(log_site[d])))
+            Y[d] ~ Poisson(sum(exp.(log_lambda[facilities[d]])) + sum(exp.(log_site[sites[d]])))
         end
     end
     df = (; facility = [1, 2, 3, 4], fac_district = [1, 1, 2, 2],
@@ -149,18 +149,17 @@ end
 
 @testset "label-anchored plate refusals stay loud" begin
     df = (; facility = [1, 2, 3, 4], fac_district = [1, 1, 2, 2], Y = [10, 7])
-    # refused: without a cell label column the totals could bind to cells only
+    # refused: without a cell label vector the totals could bind to cells only
     # by position, which nothing can check (user direction 2026-10-19,
     # BayesianRegressionModels:snag.brm-cross-margin-e5153770 messages 09:01).
-    unlabelled = @brm begin
+    # A binding always names its labels.
+    @test_throws "rows = groups(g => labels)" macroexpand(@__MODULE__, :(@brm begin
         log_lambda ~ 1 + (1 | fac | facility)
-        ragged(log_lambda, fac_district)
+        facilities = groups(fac_district)
         @plate for d in eachindex(Y)
-            Y[d] ~ Poisson(sum(exp.(log_lambda[d])))
+            Y[d] ~ Poisson(sum(exp.(log_lambda[facilities[d]])))
         end
-    end
-    @test_throws "no cell labels" SBBRMI(unlabelled(df); mod = @__MODULE__)
-    @test_throws "no cell labels" rkprob(unlabelled(df))
+    end))
 
     # refused: a total needs exactly one district row to bind to.
     @test_throws "per-cell column" SBBRMI(
@@ -177,10 +176,11 @@ end
     two_cells = @brm begin
         log_lambda ~ 1 + (1 | fac | facility)
         log_other ~ 1 + (1 | fac2 | facility)
-        ragged(log_lambda, fac_district => district)
-        ragged(log_other, fac_district => region)
+        by_district = groups(fac_district => district)
+        by_region = groups(fac_district => region)
         @plate for d in eachindex(Y)
-            Y[d] ~ Poisson(sum(exp.(log_lambda[d])) + sum(exp.(log_other[d])))
+            Y[d] ~ Poisson(sum(exp.(log_lambda[by_district[d]])) +
+                sum(exp.(log_other[by_region[d]])))
         end
     end
     @test_throws "different cell label columns" SBBRMI(
@@ -191,9 +191,9 @@ end
     ranef_cells = @brm begin
         log_lambda ~ 1 + (1 | fac | facility)
         log_d ~ 1 + (1 | dist | district)
-        ragged(log_lambda, fac_district => region)
+        facilities = groups(fac_district => region)
         @plate for d in eachindex(log_d)
-            Y[d] ~ Poisson(exp(log_d[d]) + sum(exp.(log_lambda[d])))
+            Y[d] ~ Poisson(exp(log_d[d]) + sum(exp.(log_lambda[facilities[d]])))
         end
     end
     @test_throws "already labels them" SBBRMI(

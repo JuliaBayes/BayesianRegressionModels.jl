@@ -32,11 +32,11 @@ lp_gather(data) = @brm data begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + weight + (1 | p | subject)
     placebo ~ 0 + p_time
-    ragged(placebo, p_subject)
-    ragged(y, obs_subject)
+    placebo_rows = groups(p_subject => subject)
+    obs = groups(obs_subject => subject)
     @plate for i in eachindex(log_CL)
-        loc[i] = exp(log_CL[i]) + sum(placebo[i])
-        y[i] ~ normal(loc[i], sigma)
+        loc[i] = exp(log_CL[i]) + sum(placebo[placebo_rows[i]])
+        y[obs[i]] ~ normal(loc[i], sigma)
     end
 end
 
@@ -45,10 +45,10 @@ lp_twin(data) = @brm data begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + weight + (1 | p | subject)
     placebo ~ 0 + p_time
-    ragged(y, obs_subject)
+    obs = groups(obs_subject => subject)
     @plate for i in eachindex(log_CL)
         loc[i] = exp(log_CL[i])
-        y[i] ~ normal(loc[i], sigma)
+        y[obs[i]] ~ normal(loc[i], sigma)
     end
 end
 
@@ -57,32 +57,32 @@ intercept_gather(data) = @brm data begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + weight + (1 | p | subject)
     p_offset ~ 1
-    ragged(p_offset, p_subject)
-    ragged(y, obs_subject)
+    placebo_rows = groups(p_subject => subject)
+    obs = groups(obs_subject => subject)
     @plate for i in eachindex(log_CL)
-        loc[i] = exp(log_CL[i]) + sum(p_offset[i])
-        y[i] ~ normal(loc[i], sigma)
+        loc[i] = exp(log_CL[i]) + sum(p_offset[placebo_rows[i]])
+        y[obs[i]] ~ normal(loc[i], sigma)
     end
 end
 
 column_gather(data) = @brm data begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + weight + (1 | p | subject)
-    ragged(p_time, p_subject)
-    ragged(y, obs_subject)
+    placebo_rows = groups(p_subject => subject)
+    obs = groups(obs_subject => subject)
     @plate for i in eachindex(log_CL)
-        loc[i] = exp(log_CL[i]) + sum(p_time[i])
-        y[i] ~ normal(loc[i], sigma)
+        loc[i] = exp(log_CL[i]) + sum(p_time[placebo_rows[i]])
+        y[obs[i]] ~ normal(loc[i], sigma)
     end
 end
 
 column_twin(data) = @brm data begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + weight + (1 | p | subject)
-    ragged(y, obs_subject)
+    obs = groups(obs_subject => subject)
     @plate for i in eachindex(log_CL)
         loc[i] = exp(log_CL[i])
-        y[i] ~ normal(loc[i], sigma)
+        y[obs[i]] ~ normal(loc[i], sigma)
     end
 end
 
@@ -92,26 +92,26 @@ const PLACEBO_RESPONSE = merge(EMPTY_PLACEBO, (; py=Float64[]))
 observed_in_cell(data) = @brm data begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + weight + (1 | p | subject)
-    ragged(p_time, p_subject)
-    ragged(py, p_subject)
-    ragged(y, obs_subject)
+    placebo_rows = groups(p_subject => subject)
+    obs = groups(obs_subject => subject)
     @plate for i in eachindex(log_CL)
         loc[i] = exp(log_CL[i])
-        y[i] ~ normal(loc[i], sigma)
-        py[i] ~ normal(loc[i] .* p_time[i], sigma)
+        y[obs[i]] ~ normal(loc[i], sigma)
+        py[placebo_rows[i]] ~ normal(loc[i] .* p_time[placebo_rows[i]], sigma)
     end
 end
 
-observed_formula(data) = @brm data begin
+# The same response observed against a collected plate output.
+observed_output(data) = @brm data begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + weight + (1 | p | subject)
-    ragged(p_time, p_subject)
-    ragged(y, obs_subject)
+    placebo_rows = groups(p_subject => subject)
+    obs = groups(obs_subject => subject)
     @plate for i in eachindex(log_CL)
-        ploc[i] = exp(log_CL[i]) .* p_time[i]
-        y[i] ~ normal(exp(log_CL[i]), sigma)
+        ploc[i] = exp(log_CL[i]) .* p_time[placebo_rows[i]]
+        y[obs[i]] ~ normal(exp(log_CL[i]), sigma)
+        py[placebo_rows[i]] ~ Normal(ploc[i], sigma)
     end
-    ragged(py, p_subject) ~ Normal(ploc, sigma)
 end
 
 const STAN_DIR = mkpath(joinpath(tempdir(), "brm-plate-empty-axis"))
@@ -189,7 +189,7 @@ end
     # The twin observes only `y`.
     _, twin = stan_problem(column_twin(PLACEBO_RESPONSE), "observed-twin")
     for (model, name) in ((observed_in_cell, "observed-in-cell"),
-                          (observed_formula, "observed-formula"))
+                          (observed_output, "observed-output"))
         _, stan = stan_problem(model(PLACEBO_RESPONSE), name)
         check_stan_twin(stan, twin)
         check_rk_twin(model(PLACEBO_RESPONSE), column_twin(PLACEBO_RESPONSE))

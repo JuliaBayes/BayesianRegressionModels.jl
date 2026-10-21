@@ -250,10 +250,11 @@ end
         log_CL ~ 1 + weight + (1 | p | subject)
         sd(:, p) ~ Normal(0.0, 0.5)
         effect(log_CL, Intercept) ~ Normal(0.0, 2.0)
-        pred ~ kernel(ragged(pk_time, pk_subject), log_CL) do ts, lCL
-            exp(-exp(lCL) .* ts)
+        pk = groups(pk_subject => subject)
+        @plate for i in eachindex(log_CL)
+            pred[i] = exp(-exp(log_CL[i]) .* pk_time[pk[i]])
+            pk_y[pk[i]] ~ Normal(pred[i], sigma)
         end
-        ragged(pk_y, pk_subject) ~ Normal(pred, sigma)
     end
     data = (; subject=["s1", "s2", "s3"], weight=[60.0, 75.0, 90.0],
         pk_subject=["s1", "s1", "s2", "s2", "s3", "s3"], pk_time=[0.5, 1.0, 0.5, 1.0, 0.5, 1.0],

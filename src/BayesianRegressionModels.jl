@@ -4,6 +4,7 @@ module BayesianRegressionModels
 # intermediate: expression tree + column metadata).
 using OrderedCollections
 include("macro.jl")
+include("groups.jl")
 include("ar1_normal.jl")
 
 # Introspection helpers on a BRMI -- outcomes / linear predictors /

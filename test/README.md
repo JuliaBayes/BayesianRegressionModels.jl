@@ -24,13 +24,20 @@ covers interleaved rows, shared random effects, empty groups, raw-data controls
 and preservation of field and keyword names. Run it with
 `julia --project=. test/kernel_ragged_broadcast.jl` or the test environment above.
 
-`plate_grouping.jl` checks the model-scope `ragged(x, group)` statement that
-`@plate for` cells read as `x[i]`: identical Stan source, descriptor outputs
-and RK log density to the deprecated in-body `ragged(x, group)[i]` read, the
-omitted-response path, the boundary refusals, and a per-subject linear
-predictor without a random effect read as `x[i]` (BridgeStan and RK density
-parity with the old one-element ragged gather). Run it with `--depwarn=yes` so
-its deprecation assertion is live.
+`plate_grouping.jl` checks model-scope `rows = groups(group => labels)`
+bindings that `@plate for` cells read as `x[rows[i]]`: `groups` itself,
+identical Stan source, descriptor outputs and RK log density to the legacy
+`kernel(ragged(x, group, labels), …) do` spelling, the omitted-response path,
+the boundary refusals (including the retired `ragged(...)` statement and
+in-cell read), and a per-subject linear predictor without a random effect read
+as `x[i]` (BridgeStan and RK density parity with the old one-element ragged
+gather).
+
+`plate_grouped_response.jl` checks a flat response observed in the cell through
+a binding, `y[obs[i]] ~ …`: density and gradient equal to the response grouped
+by hand, bounds read through the binding (censored, scalar, truncated),
+invalid vectors, the refusal of the retired formula-level `ragged(y, group) ~ …`,
+and replay/resample regathering a grouped response and its bound.
 
 `fixed_ranef_scales.jl` checks random-effect scales and correlations held at
 known values, `sd(lp, ID) = value` and `cor(:, ID) = R`. It covers:
@@ -116,16 +123,17 @@ model's transformed Stan data bit for bit, follows frozen and refitted
 coefficient's name. On RKBRMI the records equal the graph's own transformed
 values, a frozen replay keeps them, and an `&` operand is refused by name.
 
-`plate_index_into.jl` checks `ragged(idx, group; into=target)`, an index column
-of row numbers on another flat axis: the gathered per-subject positions equal
-hand-rebased pre-grouped columns on BridgeStan and RK, `0` stays "no row",
-`reprocess` rebases new data again, and an index that leaves its subject or
-the target axis is refused, as are malformed declarations and `into=` on an
-observation.
+`plate_index_into.jl` checks `indexin(idx[rows[i]], target[i])`, an index
+vector into another grouping's entries: the per-subject positions equal
+hand-rebased pre-grouped columns on BridgeStan and RK,
+`something.(indexin(…), 0)` keeps `0` as "no index" while plain `indexin`
+refuses it, `reprocess` rebases new data again, and an index that leaves its
+subject or the target vector is refused, as are bindings with different labels
+or an `order`.
 
-`plate_empty_axis.jl` checks `ragged(x, group)` over a zero-row `group`
-column: a formula LP, a raw data column and an observed response (in-cell and
-formula-LHS) each give every cell an empty slice. Each model's BridgeStan and
+`plate_empty_axis.jl` checks a `groups(group => labels)` binding over an empty
+`group` vector: a formula LP, a data vector and an observed response (against a
+cell expression or a collected output) each give every cell an empty slice. Each model's BridgeStan and
 RK density and gradient equal a twin that never reads the empty axis.
 `reprocess` moves the same Stan program onto data with rows and back,
 recomputing the row count of a declared axis that sizes an intercept-only
@@ -164,9 +172,9 @@ predictive descriptor and a finite generated draw above the censoring floor.
 (`addprop`) or elementwise arithmetic over a ragged plate or kernel result once
 per subject when it is observed outside the cell. The observation never reads
 the helper over the whole flattened result. It checks BridgeStan density and
-gradient parity with the in-cell spelling. For a `ragged(y, group)` join it
-also checks the omitted response: the same observation statement, the bound
-`y_rows` partition and its replay, and the predictive segments. For the
+gradient parity with the in-cell spelling. For a response observed in the cell
+through a binding it also checks the omitted response, its replay, and the
+predictive segments. For the
 model-scope form over pre-grouped data (`y ~ censored(Normal(loc, addprop(loc,
 …)); lower=lloq)` with `y` omitted, and its uncensored twin) it checks the same
 observation statement, an argument plate over the plate result's own cells,
@@ -263,9 +271,9 @@ oracle with analytic η gradients. It also compares the deprecated
 `kernel(...) do` spelling with the indexed cell's partition, likelihoods and
 η gradients. The single-subject test checks that
 value and gradient allocations stay flat when unrelated subjects grow from
-3 to 9 to 27. A top-level `ragged(y, group)` join of a plate cell's output,
-including a left-censored join with a per-row limit and an `addprop` scale
-beside an in-cell observation, has the same single-subject cell, checked
+3 to 9 to 27. A response observed in the cell through a `groups` binding,
+including a left-censored one with a per-row limit and an `addprop` scale
+beside another in-cell observation, has the same single-subject cell, checked
 against independent oracles. Both joins keep one subject's work flat at 81 and
 243 subjects; the censored join's `addprop` scale is written by the kernel's
 plate, so its cell does not run the kernel for every subject. A completed
@@ -610,9 +618,9 @@ such as `independent` or `log-space` select focused blocks.
 native graph source. Unequal grouped responses, empty subjects, callable
 aliases, top-level assignments and in-cell calls retain normalized densities,
 all ordinary Reverse gradients, censoring and row order against independent
-oracles and compiled same-BRMI Stan. Per-location scales, in the cell and in a
-top-level ragged join (including a scale computed from parameters and per-row
-data), have the same checks. Complete printed source and artifact re-entry are
+oracles and compiled same-BRMI Stan. Per-location scales read in the cell,
+including through a binding and a scale computed from parameters and per-row
+data, have the same checks. Complete printed source and artifact re-entry are
 included; a scalar native-location control is checked separately.
 
 `rk_r2d2_priors.jl` checks shared-margin R2D2M2 and joint population/contrast
