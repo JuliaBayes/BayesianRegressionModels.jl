@@ -19,6 +19,8 @@
 #   - a `name = constant(expr)` keyword keeps its fitted value
 #     (`freeze_constants=false` re-evaluates it), while a value the hook
 #     computes from the data is re-computed;
+#   - a direct twin over a flat event table, which stores its columns under
+#     their own names (one is a grouping column), replays the same way;
 #   - a term whose emitted statement depends on the data (a data-derived
 #     literal baked into the program) is refused instead of replayed;
 #   - an artifact without the records (built before them) still refuses plain
@@ -122,6 +124,59 @@ _sb_submodel_rhs!(stmts, data, target::Symbol, ::typeof(event_exposure), rhs) =
 _sb_submodel_rhs!(stmts, data, target::Symbol, ::typeof(exposure_literal), rhs) =
     _emit_exposure!(stmts, data, target, rhs; literal=true)
 
+# A direct (uncompressed) twin over a flat event table. It stores the columns
+# it reads under their own names, including `subject`, which another formula
+# uses as a grouping column, plus a derived per-event vector.
+StanBlocks.@deffun flat_exposure(obs_time::vector[n], obs_subject::int[n],
+        event_time::vector[m], event_subject::int[m], log_amount::vector[m],
+        rate::real)::vector[n] = begin
+    out::vector[n]
+    for i in 1:n
+        acc = 0.0
+        for j in 1:m
+            if event_subject[j] == obs_subject[i] && event_time[j] < obs_time[i]
+                acc = acc + exp(log_amount[j] - rate * (obs_time[i] - event_time[j]))
+            end
+        end
+        out[i] = acc
+    end
+    out
+end
+const flat_cell = StanBlocks.@slic begin
+    log_rate ~ normal(0, 1)
+    log_potency ~ normal(amount_loc, amount_scale)
+    return baseline + exp(log_potency) * flat_exposure(
+        time, subject, event_time_flat, event_subject, log_amount, exp(log_rate))
+end
+
+function exposure_flat end
+function _sb_submodel_rhs!(stmts, data, target::Symbol, ::typeof(exposure_flat), rhs)
+    subject, time, event_subject, event_time, event_amount =
+        map(c -> parent(parent(c)), getargs(rhs, 5))
+    kw = getkwargs(rhs)
+    log_amount, amount_loc = Symbol(:log_amount_, target), Symbol(:amount_loc_, target)
+    data[:subject] = Int.(subject)
+    data[:time] = Float64.(time)
+    data[:event_subject] = Int.(event_subject)
+    data[:event_time_flat] = Float64.(event_time)
+    data[log_amount] = log.(event_amount)
+    data[amount_loc] = amount_location([event_amount])
+    push!(stmts, :($target ~ $flat_cell(; time=time, subject=subject,
+        event_time_flat=event_time_flat, event_subject=event_subject,
+        log_amount=$log_amount, amount_loc=$amount_loc,
+        amount_scale=$(name(kw[:amount_scale])), baseline=$(name(kw[:baseline])))))
+    :done
+end
+
+flat_builder = @brm begin
+    sigma ~ Exponential(1)
+    amount_scale = constant(maximum(event_amount_flat))
+    baseline ~ 1 + (1 | subject)
+    exposure ~ exposure_flat(subject, time, event_subject, event_time_flat,
+                             event_amount_flat; amount_scale=amount_scale, baseline=baseline)
+    y ~ Normal(exposure, sigma)
+end
+
 builder = @brm begin
     sigma ~ Exponential(1)
     amount_scale = constant(maximum(reduce(vcat, event_amount)))
@@ -171,6 +226,12 @@ future = (;
     y=zeros(5),
 )
 
+# The same frames with the event table flattened (one row per event).
+flat(data) = (; subject=data.subject, time=data.time, y=data.y,
+    event_subject=reduce(vcat, [fill(s, length(ts)) for (s, ts) in enumerate(data.event_time)]),
+    event_time_flat=reduce(vcat, data.event_time),
+    event_amount_flat=reduce(vcat, data.event_amount))
+
 # Julia oracle for the term's value.
 exposure(data, baseline, potency, rate) = let seg = segment_rows(
         data.subject, data.time, data.event_time, data.event_amount)
@@ -211,8 +272,10 @@ end
     @test length(replay.data[:y]) == 12
     @test StanBlocks.stan_code(replay.model) == StanBlocks.stan_code(sb.model)
     @test stanc_ok(replay).ok
-    # The carry-through spelling (the derived keys as replay columns) gives the
-    # same data: re-deriving changes no value, only who computes it.
+    # The old carry-through spelling (the derived keys as replay columns)
+    # changes nothing: the hook's own call supplies them. Without that call it
+    # could not replay this term frozen, because a scalar such as `n_unique`
+    # kept its fitted value.
     carried = merge(HR.dense, NamedTuple{DERIVED}(map(k -> fresh.data[k], DERIVED)))
     by_hand = reprocess(sb, carried)
     @test all(k -> by_hand.data[k] == replay.data[k], keys(replay.data))
@@ -243,6 +306,23 @@ end
     @test replay.data[:amount_scale] == sb.data[:amount_scale]
     @test occursin("segment_exposure(", gq_section(StanBlocks.stan_code(replay.model)))
     @test stanc_ok(replay).ok
+end
+
+@testset "a term storing data under a grouping column's name replays" begin
+    sb = build(HR.flat_builder, HR.flat(HR.train))
+    @test sb.data[:subject] == HR.train.subject
+    for (frame, options) in ((HR.flat(HR.dense), (;)),
+                             (HR.flat(HR.future), (; resample_groups=:subject)))
+        replay = reprocess(sb, frame; options...)
+        fresh = build(HR.flat_builder, frame)
+        for k in (:subject, :time, :event_subject, :event_time_flat, :log_amount_exposure,
+                  :amount_loc_exposure)
+            @test replay.data[k] == fresh.data[k]
+        end
+        @test stanc_ok(replay).ok
+    end
+    @test StanBlocks.stan_code(reprocess(sb, HR.flat(HR.dense)).model) ==
+          StanBlocks.stan_code(sb.model)
 end
 
 @testset "a statement that depends on the data is refused, not replayed" begin
