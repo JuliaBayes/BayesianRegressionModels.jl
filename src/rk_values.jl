@@ -351,9 +351,18 @@ function _rk_ast_value_spline(definitions, term, taken)
     Z = [_rk_ast_fresh_name(string(term.options.id, "_Z", j), taken) for j in 1:nblocks]
     k = term.options.k
     kval = k isa Tuple ? Expr(:tuple, k...) : k
+    fit_columns = get(term.options, :fit_columns, ())
+    stmts = Expr[]
+    if term.options.kind === :t2 && !isempty(fit_columns)
+        # A `t2` basis is fitted once to its fit-role axes, a fitted value of
+        # the program (`brm_fitted_state`), and evaluated at the rows from it.
+        fit = _rk_ast_fresh_name(string(term.options.id, "_fit"), taken)
+        push!(stmts, Expr(:(=), fit, Expr(:call, :brm_t2_fit, fit_columns..., kval)))
+        fit_columns = (fit,)
+    end
     basis = term.options.kind === :t2 ? :brm_t2_basis : :brm_tps_basis
-    stmts = Expr[Expr(:(=), Expr(:tuple, X, Z...),
-        Expr(:call, basis, term.columns..., get(term.options, :fit_columns, ())..., kval))]
+    push!(stmts, Expr(:(=), Expr(:tuple, X, Z...),
+        Expr(:call, basis, term.columns..., fit_columns..., kval)))
     block = _rk_block_body()
     fixed_basis = _rk_block_argument!(block, :X, X)
     penalized = [_rk_block_argument!(block, "Z$j", Zj) for (j, Zj) in enumerate(Z)]
@@ -416,15 +425,16 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
     else
         # A squared-exponential effect reads its axes; its spectral graph
         # composes the basis graph, so the main block names no basis values.
-        floor_read && (floors = _rk_ast_hsgp_floor!(definitions, stmts, term, taken))
+        fit = _rk_hsgp_fitted(term) ? _rk_ast_hsgp_fit!(definitions, stmts, term, taken) :
+            nothing
+        floor_read && (floors = _rk_ast_hsgp_floor!(definitions, stmts, term, taken; fit))
         inputs = Pair{Symbol,Any}[a => c for (a, c) in
             zip(_rk_hsgp_axis_inputs(term), term.columns)]
         # A `rows=` mask follows the axes into the basis graph, then the
-        # fit-role axes and mask an in-graph interval reads.
+        # fitted interval.
         append!(inputs, (formal => actual for (formal, actual) in
             zip(_rk_hsgp_mask_formals(term), _rk_hsgp_mask_actuals(term))))
-        append!(inputs, (formal => actual for (formal, actual) in
-            zip(_rk_hsgp_fit_formals(term), _rk_hsgp_fit_actuals(term))))
+        fit === nothing || push!(inputs, :fit => fit)
         extent = :(1:$(prod(_rk_hsgp_modes(options))))
     end
     if grouped

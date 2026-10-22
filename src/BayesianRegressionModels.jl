@@ -63,6 +63,7 @@ include("rk_structured.jl")
 include("rk_observations.jl")
 include("rk_reprocess.jl")
 include("rk_design_binder.jl")
+include("rk_fitted_state.jl")
 include("vimpl.jl")
 
 # SBBRMI — StanBlocks backend. Lowers a BRMI into a StanBlocks SlicModel
@@ -172,6 +173,7 @@ export truncated, censored, interval_censored
 export rk_translate_artifact
 export rk_artifact_inputs
 export rk_bound_data, rk_bound_plan, rk_design_binder, RKDesignBinder
+export brm_fitted_state, BRMFittedState
 export rkppl_model, rk_model
 # Re-export every Distributions.jl family BRM lowers so
 # `using BayesianRegressionModels` is the only import a model file needs — no

@@ -34,17 +34,45 @@ _rk_ast_data_preparation!(defs, taken, ::Val{:brm_flatten_response}, cells) =
 _rk_ast_data_preparation!(defs, taken, ::Val{:brm_gather_response}, raw, groups) =
     Expr(:ref, raw, Expr(:call, :brm_flatten_cells, groups))
 
-function _rk_ast_data_expr!(defs, statements, bindings, taken, value)
+# A fitted value (an anchor, a level set) that a program computes only from
+# its fit-role inputs (`_rk_fit_twin!`) is its own named data-only definition,
+# emitted once: `age_fit_mean = brm_covariate_mean(age_fit)`. A replay can then
+# bind the fitted values in place of the training columns (`brm_fitted_state`).
+# `fitted` holds the fit-role names and the definitions emitted so far.
+_RKFittedValues(inputs) = (; inputs=Set{Symbol}(inputs), names=Dict{Expr,Symbol}())
+
+_rk_fitted_argument(x::Symbol, inputs) = x in inputs
+_rk_fitted_argument(x::Expr, _inputs) = false
+_rk_fitted_argument(_x, _inputs) = true
+
+_rk_ast_fitted_value!(statements, taken, ::Nothing, recipe, call) = call
+function _rk_ast_fitted_value!(statements, taken, fitted, recipe::Symbol, call)
+    Meta.isexpr(call, :call) || return call
+    inputs = call.args[2:end]
+    fit = findfirst(x -> x isa Symbol, inputs)
+    fit === nothing && return call
+    all(x -> _rk_fitted_argument(x, fitted.inputs), inputs) || return call
+    get!(fitted.names, call) do
+        stem = replace(string(recipe), r"^brm_(covariate_|fit_)?" => "")
+        name = _rk_ast_fresh_name(string(inputs[fit], "_", stem), taken)
+        push!(statements, Expr(:(=), name, call))
+        name
+    end
+end
+
+function _rk_ast_data_expr!(defs, statements, bindings, taken, value; fitted=nothing)
     value isa Expr || return value
     if value.head === :_rk_data_preparation
-        inputs = map(arg -> _rk_ast_data_expr!(defs, statements, bindings, taken, arg),
-            value.args[2:end])
-        return _rk_ast_data_preparation!(defs, taken, Val(first(value.args)), inputs...)
+        inputs = map(arg -> _rk_ast_data_expr!(defs, statements, bindings, taken, arg;
+            fitted), value.args[2:end])
+        recipe = first(value.args)
+        call = _rk_ast_data_preparation!(defs, taken, Val(recipe), inputs...)
+        return _rk_ast_fitted_value!(statements, taken, fitted, recipe, call)
     end
     if value.head === :call && first(value.args) isa _RKDataCall
         recipe = first(value.args)
-        inputs = map(arg -> _rk_ast_data_expr!(defs, statements, bindings, taken, arg),
-            value.args[2:end])
+        inputs = map(arg -> _rk_ast_data_expr!(defs, statements, bindings, taken, arg;
+            fitted), value.args[2:end])
         callee = _rk_value_callee!(bindings, recipe.callable, taken)
         params = [Symbol("input", i) for i in eachindex(inputs)]
         scalar_inputs = params
@@ -70,6 +98,6 @@ function _rk_ast_data_expr!(defs, statements, bindings, taken, value)
         push!(statements, Expr(:(=), result, Expr(:call, model, inputs...)))
         return result
     end
-    Expr(value.head, map(arg -> _rk_ast_data_expr!(defs, statements, bindings, taken, arg),
-        value.args)...)
+    Expr(value.head, map(arg -> _rk_ast_data_expr!(defs, statements, bindings, taken, arg;
+        fitted), value.args)...)
 end
