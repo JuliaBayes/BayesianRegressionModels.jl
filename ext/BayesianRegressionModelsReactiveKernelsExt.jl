@@ -38,13 +38,43 @@ _rk_ode_bdf(f::F, y0, t0, ts, args::Vararg{Any,N}) where {F,N} =
 # the data, with no ordinal or missing-response plan mutations.
 const _RK_PLAN_TYPES = Union{BRM._RKStructuralPlan,BRM._RKKernelPlan,BRM._RKValuePlan,BRM._RKHeldOutPlan,BRM._RKUnconditionedPlan}
 
+# The package whose image this process generates, or `nothing` at run time.
+# ReactiveKernels finds its generated-function cache by the same rule
+# (`_generated_function_cache_module`, ReactiveKernels src/codegen.jl).
+function _rk_image_target()
+    (ccall(:jl_generating_output, Cint, ()) == 0 ||
+     Base.JLOptions().incremental == 0) && return nothing
+    @static if isdefined(Base, :precompilation_target)
+        # Julia 1.10 / 1.11.
+        Base.precompilation_target
+    elseif isdefined(Base, :precompilation_stack)
+        # Julia 1.12+ records nested package precompilation in order.
+        isempty(Base.precompilation_stack) ? nothing : last(Base.precompilation_stack)
+    else
+        error("RK backend: cannot identify the package whose image is being generated")
+    end
+end
+
+# A fresh module for one program's definitions. While a package image is
+# generated, a module made by `Module()` is closed to `eval`, so the module is
+# a child of the package being precompiled instead: Julia's actual target, not
+# the model's author module, since a workload may build a model another
+# package defines, through helpers or submodules. The child is saved in that
+# image with the code compiled for it.
+function _rk_new_module()
+    target = _rk_image_target()
+    target === nothing && return Module(gensym(:RKEmittedModels))
+    Core.eval(Base.root_module(target),
+        Expr(:module, true, gensym(:RKEmittedModels), Expr(:block)))
+end
+
 # Evaluate native functions and explicit `@kernel`/`@rkppl` definitions in a fresh module
 # per lowering. Each build owns its definition namespace even when different
 # programs use the same authored names. The macrocall `Expr`
 # is exactly the parser's shape for `@rkppl sm(args...) = begin ... end`.
 function _rk_emit_module(emitted::BRM._RKEmittedProgram)
     BRM._rk_validate_source_definitions(emitted)
-    mod = Module(gensym(:RKEmittedModels))
+    mod = _rk_new_module()
     Core.eval(mod, :(using ReactiveKernelsPPL))
     Core.eval(mod, :(import ReactiveKernels))
     Core.eval(mod, :(import BayesianRegressionModels))

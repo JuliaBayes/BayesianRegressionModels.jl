@@ -131,6 +131,15 @@ refuses it, `reprocess` rebases new data again, and an index that leaves its
 subject or the target vector is refused, as are bindings with different labels
 or an `order`.
 
+`dose_axis_operation_gather.jl` checks a predictor read only at the doses of an
+operation stream, declared over the dose vectors and placed onto the subject's
+operations in the cell, `vcat(0.0, log_F[doses[i]])` read at
+`something.(indexin(op_dose[events[i]], doses[i]), 0) .+ 1`. Its BridgeStan and
+RK density and gradient equal the same model on the operation stream with its
+read rows filled, with a subject that has no doses. A frozen `reprocess` onto a
+new schedule gives the same density on RK and the same HSGP basis rows at the
+doses on Stan, and both backends replay onto new subjects.
+
 `plate_empty_axis.jl` checks a `groups(group => labels)` binding over an empty
 `group` vector: a formula LP, a data vector and an observed response (against a
 cell expression or a collected output) each give every cell an empty slice. Each model's BridgeStan and
