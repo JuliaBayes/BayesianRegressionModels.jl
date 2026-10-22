@@ -68,6 +68,14 @@ function _rk_new_module()
         Expr(:module, true, gensym(:RKEmittedModels), Expr(:block)))
 end
 
+# The packages emitted source names, as the modules this extension loaded.
+# `using`/`import` by package name would resolve against the active project
+# (or the package whose image is generated), which need not declare them: a
+# library that depends on BRM, ReactiveKernels and ReactiveKernelsPPL builds
+# `RKBRMI` for an application that declares only the library.
+const _RK_SOURCE_PACKAGES = (; ReactiveKernelsPPL, ReactiveKernels,
+    BayesianRegressionModels)
+
 # Evaluate native functions and explicit `@kernel`/`@rkppl` definitions in a fresh module
 # per lowering. Each build owns its definition namespace even when different
 # programs use the same authored names. The macrocall `Expr`
@@ -75,12 +83,13 @@ end
 function _rk_emit_module(emitted::BRM._RKEmittedProgram)
     BRM._rk_validate_source_definitions(emitted)
     mod = _rk_new_module()
-    Core.eval(mod, :(using ReactiveKernelsPPL))
-    Core.eval(mod, :(import ReactiveKernels))
-    Core.eval(mod, :(import BayesianRegressionModels))
+    for (name, package) in pairs(_RK_SOURCE_PACKAGES)
+        Core.eval(mod, Expr(:const, Expr(:(=), name, package)))
+    end
+    Core.eval(mod, :(using .ReactiveKernelsPPL))
     # Callable bindings are named around exactly these imports.
     for (source, names) in pairs(BRM._RK_SOURCE_IMPORTS)
-        Core.eval(mod, Expr(:import, Expr(:(:), Expr(:., source),
+        Core.eval(mod, Expr(:import, Expr(:(:), Expr(:., :., source),
             (Expr(:., name) for name in names)...)))
     end
     for (name, value) in emitted.bindings
