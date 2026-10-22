@@ -10,8 +10,8 @@
 # layered on this one: `RKImageModels` defines public synthetic models;
 # `RKImageConsumer` depends on it and translates them while its own image is
 # generated, up to `build_kernel`; `RKImageWorkload` builds a whole `RKBRMI`
-# there, which still stops in ReactiveKernelsPPL's `build_kernel`
-# (ReactiveKernels snag `rkppl-build-kern-4607ff90`).
+# there, which needs ReactiveKernels 276428589 (snag
+# `rkppl-build-kern-4607ff90`), and a fresh process reads it.
 #
 # Run: julia --startup-file=no --project=test test/rk_precompile_workload.jl
 
@@ -204,11 +204,27 @@ mktempdir() do root
         @test ok
     end
 
+    # Needs ReactiveKernels 276428589 (snag `rkppl-build-kern-4607ff90`): RKPPL's
+    # `build_kernel` evaluates into a child module of the package being built.
     @testset "a whole RKBRMI built while an image is generated" begin
         ok, log = run_julia(env, "using Pkg; Pkg.precompile(\"RKImageWorkload\")")
-        # ReactiveKernels snag `rkppl-build-kern-4607ff90`: RKPPL's
-        # `build_kernel` evaluates into its own `PPLGeneratedModels`.
-        @test_broken ok
-        ok || @test occursin("closed module `PPLGeneratedModels`", log)
+        ok || println(log)
+        @test ok
+        # The image's backend reads what a run-time build reads.
+        ok, log = run_julia(env, """
+            using Test, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
+            using RKImageModels, RKImageWorkload
+            function concentrations(rk)
+                bound = rk_bound_data(rk)
+                query = ReactiveKernels.prepare(rk.model.spec;
+                    have=(:unconstrained, keys(bound)...), want=(:conc,), bound)
+                u = collect(range(-0.6, 0.8; length=rk.model.layout.total))
+                Base.invokelatest(query, u)
+            end
+            fresh = RKBRMI(RKImageModels.provided(RKImageModels.PK))
+            @test concentrations(RKImageWorkload.RK) == concentrations(fresh)
+            """)
+        ok || println(log)
+        @test ok
     end
 end

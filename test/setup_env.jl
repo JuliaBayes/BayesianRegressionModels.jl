@@ -103,7 +103,12 @@ const PINS = [
     # d92d6677 adds ac01d1f1d (`prepare_predictive`) and 2512d6b1c
     # (`predictive_node` / `predictive_targets` for a caller's own vectorized
     # cut), which test/rk_predictive.jl reads through `rk_bound_plan`.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "d92d667752b842f215d71b7efc893441b14d3c05"),  # main
+    # 9af9b197 adds 276428589 (kernel construction for another package's
+    # module inside a downstream package image, so a whole `RKBRMI` builds
+    # in a precompile workload; snag rkppl-build-kern-4607ff90), and contains
+    # a89e08381 (the `bind_data` structural cache) and 74e415976 (a computed
+    # partition drives a per-cell loop).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "9af9b1976c2edb9fa3e7ee49ab420ffea972994c"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.5); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "d16c4efb72b963f45de9d6f632c38d46706c23e1"),  # main
