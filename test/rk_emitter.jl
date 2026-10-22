@@ -5482,19 +5482,32 @@ end
             p2 ~ Beta(2, 2)
             y ~ MixtureModel([Bernoulli(p1), Bernoulli(p2)], [0.5, 0.5])
         end)((; y=[0.0, 1.0, 1.0, 0.0])))
-    # No response-level weights or bounded evidence in mixture v1.
+    # No response-level weights in mixture v1 (no driving case yet).
     @test_throws "out of mixture v1" BRM._brm_rk_plan(
         (@brm begin
             m ~ Normal(0, 1)
             y ~ weighted(MixtureModel([Normal(m, 1), Normal(m, 1)],
                 [0.5, 0.5]), fweights(w))
         end)((; y=[1.0, 2.0], w=[1.0, 1.0])))
-    @test_throws "out of mixture v1" BRM._brm_rk_plan(
+    # Bounded evidence wraps the whole mixture (snag censored-finite-cbe5c30d;
+    # densities in rk_parity.jl "rk parity mixture gaussian evidence").
+    truncated_mixture = BRM._brm_rk_plan(
         (@brm begin
             m ~ Normal(0, 1)
             y ~ truncated(MixtureModel([Normal(m, 1), Normal(m, 1)],
                 [0.5, 0.5]); lower=0.0)
         end)((; y=[1.0, 2.0])))
+    @test only(truncated_mixture.responses).family === :mixture
+    @test only(truncated_mixture.responses).evidence.kind === :truncated
+    # Two complementary weights of one sampled scalar; any other weight
+    # expression is SBBRMI-only (RKPPL shares one weight vector across rows).
+    complement = BRM._brm_rk_plan((@brm dfmix begin
+        w ~ Beta(2, 5)
+        m ~ Normal(0, 1)
+        y ~ MixtureModel([Normal(m, 1), Normal(m, 2)], [1 - w, w])
+    end))
+    @test only(complement.responses).mixture_weights ==
+        BRM._RKMixtureComplement(:w, true)
     # gp mixture predictors fail closed (single-predictor plate range).
     @test_throws "gp mixture predictors" BRM._brm_rk_plan((@brm df begin
         mu ~ 1 + gp(x)
