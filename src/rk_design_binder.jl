@@ -87,10 +87,11 @@ end
 # The data columns of the fit `rk` replays: its own, or on a data-free backend
 # those of the fit its state was exported from.
 _rk_fit_column_names(rk::RKBRMI) = rk.fitted === nothing ?
-    Set{Symbol}(keys(_rk_training_columns(parent(rk)))) : Set{Symbol}(keys(rk.fitted.columns))
+    Set{Symbol}(keys(_rk_training_columns(parent(rk)))) :
+    Set{Symbol}(keys(_rk_fitted_state(rk).columns))
 _rk_fit_constant_names(rk::RKBRMI) = rk.fitted === nothing ?
     Set{Symbol}(c.name for c in last(_brm_resolve_constants(parent(rk)))) :
-    Set{Symbol}(keys(rk.fitted.constants))
+    Set{Symbol}(keys(_rk_fitted_state(rk).constants))
 
 function (binder::RKDesignBinder)(design)
     key = _rk_design_key(binder, design)
@@ -165,7 +166,9 @@ function _rk_design_fitted(rk::RKBRMI, groups)
     names = sort!([name for name in keys(columns) if name in constants ||
         (!frozen && haskey(twins, name) && !(twins[name] in groups))])
     fitted = NamedTuple{Tuple(names)}(Tuple(columns[name] for name in names))
-    frozen ? merge(fitted, rk.fitted.fitted.values) : fitted
+    frozen || return fitted
+    state = _rk_fitted_state(rk)
+    merge(fitted, _rk_frozen_subset(state, _rk_resampled_fit_inputs(state, groups)).values)
 end
 
 function _rk_design_class(binder::RKDesignBinder, replay::RKBRMI, design)
@@ -177,8 +180,10 @@ function _rk_design_class(binder::RKDesignBinder, replay::RKBRMI, design)
     _rk_design_checked(replay.plan) ||
         return _RKDesignClass(Pair{Symbol,Any}[], nothing, Any[], [:plan])
     columns = _rk_source_data_columns(replay.plan, _rk_retained_program(rk))
-    # A data-free replay binds its fitted values frozen, not its fit-role inputs.
-    rk.fitted === nothing || foreach(name -> delete!(columns, name), rk.fitted.fit_inputs)
+    # A data-free replay binds its fitted values frozen, not the fit-role inputs
+    # they are fitted from.
+    replay.fitted === nothing ||
+        foreach(name -> delete!(columns, name), keys(replay.fitted.frozen.inputs))
     twins = _rk_plan_fit_inputs(replay.plan)
     fitted = binder.fitted
     sources = Pair{Symbol,Any}[]

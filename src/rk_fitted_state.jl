@@ -25,6 +25,9 @@ what [`brm_fitted_state`](@ref) returns. It holds
   intervals, …), by the name the program reads them under, as RKPPL's
   `frozen_values` record (`fitted.values`). The record also holds the element
   type and size of each fit-role input, never its values;
+- `fitted_reads` and `fit_twins`: the fit-role inputs each fitted value is
+  fitted from, and the data column each fit-role input copies, so a replay that
+  resamples a grouping refits that grouping's values from its own data;
 - `fits`: the fits the planner computes in Julia (factor and `mo` level sets,
   spline fits), keyed by what they fit;
 - `constants`: the `name = constant(expr)` values;
@@ -44,6 +47,8 @@ struct BRMFittedState
     format::Int
     fitted::Any
     fit_inputs::Vector{Symbol}
+    fitted_reads::Dict{Symbol,Vector{Symbol}}
+    fit_twins::Dict{Symbol,Symbol}
     fits::Dict{Tuple{Symbol,Symbol},Any}
     constants::Dict{Symbol,Any}
     declaration::String
@@ -77,9 +82,10 @@ function brm_fitted_state(rk::RKBRMI)
     end
     emitted = _rk_retained_program(rk)
     fit_inputs = Set{Symbol}(keys(_rk_plan_fit_inputs(rk.plan)))
-    names = _rk_fitted_value_names(emitted, rk.plan, fit_inputs; prefix)
+    names, reads = _rk_fitted_value_names(emitted, rk.plan, fit_inputs; prefix)
     BRMFittedState(_BRM_FITTED_STATE_FORMAT, _rk_frozen_values(rk, names),
-        sort!(collect(fit_inputs)),
+        sort!(collect(fit_inputs)), reads,
+        Dict{Symbol,Symbol}(_rk_plan_fit_inputs(rk.plan)),
         _rk_recorded_fits(rk), _rk_fitted_constants(rk), sprint(show, brm_source(rk)),
         _rk_program_statements(emitted), _rk_layout_coordinate_names(rk),
         Dict{Symbol,Any}(name => value isa AbstractArray ? eltype(value) : typeof(value)
@@ -98,22 +104,23 @@ _rk_fitted_state_boundary(term) = term.kind === :spline && term.options.kind ===
 # fit-role inputs (or other such definitions) and no other data, which a
 # statement of another kind reads. Every other statement must read none of
 # them, so the fitted values are all a replay needs from the training data.
+# Returns their names, and for each the fit-role inputs it is fitted from.
 function _rk_fitted_value_names(emitted, plan, fit_inputs::Set{Symbol}; prefix)
     data = Set{Symbol}(keys(plan.columns))
     for statement in emitted.main.args
         _rk_source_assignments!(data, statement)
         _rk_source_outputs!(data, statement)
     end
-    fitted = Set{Symbol}()
+    fitted = Dict{Symbol,Set{Symbol}}()
     terminal = Symbol[]
     for statement in emitted.main.args
         statement isa Expr || continue
         reads = intersect(_rk_source_symbols!(Set{Symbol}(),
             Meta.isexpr(statement, :(=), 2) ? statement.args[2] : statement), data)
-        derived = union(fit_inputs, fitted)
         if Meta.isexpr(statement, :(=), 2) && statement.args[1] isa Symbol &&
-                !isempty(reads) && issubset(reads, derived)
-            push!(fitted, statement.args[1])
+                !isempty(reads) && all(name -> name in fit_inputs || haskey(fitted, name), reads)
+            fitted[statement.args[1]] = union(intersect(reads, fit_inputs),
+                (fitted[name] for name in reads if haskey(fitted, name))...)
             continue
         end
         direct = intersect(reads, fit_inputs)
@@ -122,11 +129,12 @@ function _rk_fitted_value_names(emitted, plan, fit_inputs::Set{Symbol}; prefix)
             "training data (`$(join(sort!(collect(direct)), "`, `"))`) beside " *
             "other values, so its fitted value cannot be exported yet; replay " *
             "this model with `reprocess(rk, new_data)` on the training fit")
-        for name in intersect(reads, fitted)
-            name in terminal || push!(terminal, name)
+        for name in reads
+            haskey(fitted, name) && !(name in terminal) && push!(terminal, name)
         end
     end
-    sort!(terminal)
+    sort!(terminal), Dict{Symbol,Vector{Symbol}}(name => sort!(collect(fitted[name]))
+        for name in terminal)
 end
 
 # The fits the planner computes in Julia, recorded while it plans the fit's own
@@ -204,6 +212,20 @@ function _rk_brmi_data(brmi::BRMI)
     NamedTuple{names}(Tuple(columns[name] for name in names))
 end
 
+# What a data-free backend binds from its fitted state: the frozen values of the
+# fit, less those a resampled grouping refits from the replay's own data
+# (`frozen`, RKPPL's record), for the groupings it resamples.
+struct _RKFittedReplay
+    state::BRMFittedState
+    frozen::Any
+    resample::Tuple{Vararg{Symbol}}
+end
+_rk_fitted_state(rk::RKBRMI) = rk.fitted === nothing ? nothing : rk.fitted.state
+
+# The fit-role inputs a resampled grouping's values are refitted from.
+_rk_resampled_fit_inputs(state::BRMFittedState, groups) =
+    Set{Symbol}(input for (input, column) in state.fit_twins if column in groups)
+
 # A data-free replay of `new_data`: planned from `state` alone
 # (`_rk_fitted_replay_plan`), bound with the fitted values frozen in place of the
 # fit-role inputs, on the graph of `previous` (a data-free backend this replays)
@@ -214,9 +236,11 @@ function _rk_fitted_replay(template::BRMI, new_data, state::BRMFittedState;
     groups = _rk_resample_group_set(resample_groups; prefix)
     plan, emitted = _rk_fitted_replay_plan(template, new_data, state;
         resample_groups=groups, held_out, prefix)
-    program, bound, model = _rk_fitted_build(emitted, plan, state.fitted, previous)
+    groups = Tuple(sort!(collect(groups)))
+    frozen = _rk_frozen_subset(state, _rk_resampled_fit_inputs(state, groups))
+    program, bound, model = _rk_fitted_build(emitted, plan, frozen, previous)
     backend = RKBRMI(_brm_resolve_optional_priors(template), plan, model;
-        program, bound, source=template, fitted=state)
+        program, bound, source=template, fitted=_RKFittedReplay(state, frozen, groups))
     if isempty(groups)
         names = _rk_layout_coordinate_names(backend)
         names == state.coordinates || error(
@@ -234,6 +258,7 @@ end
 # package extension).
 function _rk_frozen_values end
 function _rk_fitted_build end
+function _rk_frozen_subset end
 
 function Base.show(io::IO, state::BRMFittedState)
     print(io, "BRMFittedState(", length(state.fitted.values), " fitted value",

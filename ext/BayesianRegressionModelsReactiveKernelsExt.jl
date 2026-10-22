@@ -139,7 +139,19 @@ _rk_translated(backend::BRM.RKBRMI) =
     BRM._rk_once!(() -> _rk_bind_program(_rk_program(backend), backend.plan;
         frozen=_rk_frozen(backend)), backend.bound)
 # The fitted values a data-free backend binds frozen.
-_rk_frozen(backend::BRM.RKBRMI) = backend.fitted === nothing ? nothing : backend.fitted.fitted
+_rk_frozen(backend::BRM.RKBRMI) = backend.fitted === nothing ? nothing : backend.fitted.frozen
+
+# A state's frozen values less those fitted from `dropped` fit-role inputs (a
+# resampled grouping's), which the replay binds with its own data.
+function BRM._rk_frozen_subset(state::BRM.BRMFittedState, dropped::Set{Symbol})
+    frozen = state.fitted
+    isempty(dropped) && return frozen
+    keep = [name for name in keys(frozen.values)
+        if isempty(intersect(state.fitted_reads[name], dropped))]
+    inputs = [name for name in keys(frozen.inputs) if !(name in dropped)]
+    FrozenValues(NamedTuple{Tuple(keep)}(Tuple(frozen.values[name] for name in keep)),
+        NamedTuple{Tuple(inputs)}(Tuple(frozen.inputs[name] for name in inputs)))
+end
 
 # The fitted values of `names` in a backend's binding, as RKPPL freezes them.
 BRM._rk_frozen_values(backend::BRM.RKBRMI, names) =

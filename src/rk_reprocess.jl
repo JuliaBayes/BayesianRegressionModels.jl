@@ -63,7 +63,7 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
     freeze_constants || return RKBRMI(_brm_rebind_brmi(parent(rk), new_data); held_out)
     # A data-free backend (`RKBRMI(brmi, state)`) replays from its fitted state.
     rk.fitted === nothing || return _rk_fitted_replay(brm_source(rk), new_data,
-        rk.fitted; resample_groups, held_out, previous=rk, prefix)
+        _rk_fitted_state(rk); resample_groups, held_out, previous=rk, prefix)
     groups = _rk_resample_group_set(resample_groups; prefix)
     training = _rk_training_columns(parent(rk))
     unknown = setdiff(groups, keys(training))

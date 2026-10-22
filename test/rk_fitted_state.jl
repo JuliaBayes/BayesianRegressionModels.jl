@@ -221,9 +221,12 @@ absent(v) = occursin("Absent", string(nameof(typeof(v))))
 # Data-free inputs `free` against a training replay's `replay`: the same values,
 # except that a fit-role input is never bound (or bound absent) and a value RK
 # preparation folds is bound frozen in place of the replay's graph statement.
-function check_inputs(free, replay, state)
+# A resampled grouping's fit-role input holds the design's own values on both.
+function check_inputs(free, replay, state; resample_groups=())
+    dropped = Set(input for input in state.fit_inputs
+        if !(state.fit_twins[input] in resample_groups))
     for name in keys(free)
-        if name in state.fit_inputs
+        if name in dropped
             @test absent(free[name])
         elseif haskey(replay, name)
             @test isequal(free[name], replay[name])
@@ -232,15 +235,15 @@ function check_inputs(free, replay, state)
         end
     end
     for name in keys(replay)
-        name in state.fit_inputs || @test haskey(free, name)
+        name in dropped || @test haskey(free, name)
     end
 end
 
 function check_data_free(build, state, rk, design; resample_groups=(), want=:mu)
     free = RKBRMI(build(design), state; resample_groups)
     replay = reprocess(rk, design; resample_groups)
-    @test free.fitted === state
-    check_inputs(rk_bound_data(free), rk_bound_data(replay), state)
+    @test free.fitted.state === state
+    check_inputs(rk_bound_data(free), rk_bound_data(replay), state; resample_groups)
     if isempty(resample_groups)
         @test BRM._rk_layout_coordinate_names(free) == state.coordinates
         u = point(replay)
@@ -268,10 +271,17 @@ end
         @test isequal(rk_bound_data(RKBRMI(build(rows(TRAIN, 3:9)), back)),
             rk_bound_data(RKBRMI(build(rows(TRAIN, 3:9)), state)))
     end
+end
+
+@stestset "new subjects bind from the fitted state alone" begin
+    # A resampled grouping refits its levels from the design; every other
+    # fitted value stays frozen.
     rk = RKBRMI(FM.grouped(TRAIN))
     state = brm_fitted_state(rk)
     newcomers = merge(rows(TRAIN, 1:8), (; subject=repeat([101, 102], inner=4)))
-    check_data_free(FM.grouped, state, rk, newcomers; resample_groups=[:subject])
+    free = check_data_free(FM.grouped, state, rk, newcomers; resample_groups=[:subject])
+    @test rk_bound_data(free).subject_fit_levels == [101, 102]
+    @test rk_bound_data(free).x_fit_mean == state.fitted.values.x_fit_mean
 end
 
 @stestset "a value RK preparation folds is frozen too" begin
@@ -292,10 +302,12 @@ end
         binder, trained = rk_design_binder(free; resample_groups=groups),
             rk_design_binder(rk; resample_groups=groups)
         @test !any(name -> name in state.fit_inputs, keys(binder.fitted))
+        # A resampled grouping's levels are the design's, never frozen.
+        @test (:subject in groups) != haskey(binder.fitted, :subject_fit_levels)
         # The second and third designs are of the first one's kind: bound into
         # its lowering without planning.
         for design in (rows(TRAIN, 3:9), rows(TRAIN, 11:17), rows(TRAIN, 13:16))
-            check_inputs(binder(design), trained(design), state)
+            check_inputs(binder(design), trained(design), state; resample_groups=groups)
         end
     end
 end
