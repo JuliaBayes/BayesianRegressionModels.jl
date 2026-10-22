@@ -394,6 +394,12 @@ BRM._rk_built_coordinate_names(built) = collect(Symbol, coordinate_names(built.l
 BRM._rk_cut_target(built, plan; ad_backend) = RKLogDensityProblem(
     prepare_sampler(built, plan, zeros(Float64, built.layout.total); backend=ad_backend))
 
+# A backend's summed observation log density at an unconstrained point.
+function BRM._rk_likelihood_reader(rk::BRM.RKBRMI)
+    query = prepare_query(rk.model, _rk_translated(rk), :likelihood)
+    u -> Base.invokelatest(query, Vector{Float64}(u))
+end
+
 # Graph values of a backend at an unconstrained point, from one prepared query.
 function BRM._rk_value_reader(rk::BRM.RKBRMI, names::Tuple{Vararg{Symbol}})
     bound = BRM.rk_bound_data(rk)

@@ -100,6 +100,7 @@ function brm_cut_family(joint::RKBRMI, upstream::RKBRMI, U::AbstractMatrix;
             "cannot be pinned yet; for a model whose stages fuse, build the " *
             "explicit cut, brm_cut_family(inputs, downstream, data, upstream, U).")
     end
+    _brm_cut_check_block_margins(upstream, up_names, U; prefix)
     pinned = Set{Int}(i for name in keys(up_entries) for i in joint_entries[name])
     free = [i for i in eachindex(joint_names) if !(i in pinned)]
     restored = rk_restore_draws(upstream, U)
@@ -255,6 +256,40 @@ function _brm_cut_entries(rk::RKBRMI, names)
     entries
 end
 
+# A group block whose margins split across the stages: when stage 1 keeps a
+# margin that no upstream likelihood reads, that margin is sampled from its
+# prior there, and pinning the block would fix a downstream random effect at a
+# prior draw. A margin is read when moving its standardized effects
+# (`<block>.z.<level>.<margin>`) moves the upstream likelihood; an unread one
+# leaves it bit-identical.
+function _brm_cut_check_block_margins(upstream::RKBRMI, names, U; prefix)
+    columns = Dict{Tuple{String,String},Vector{Int}}()
+    for (i, n) in enumerate(names)
+        parts = split(string(n), '.')
+        k = findlast(==("z"), parts)
+        (k === nothing || k == 1 || length(parts) != k + 2) && continue
+        push!(get!(columns, (join(parts[1:k-1], '.'), parts[end]), Int[]), i)
+    end
+    isempty(columns) && return nothing
+    likelihood = _rk_likelihood_reader(upstream)
+    bases = (U[:, 1], size(U, 2) > 1 ? U[:, end] : U[:, 1] .+ 0.1)
+    reference = map(likelihood, bases)
+    unread = Dict{String,Vector{String}}()
+    for ((block, margin), positions) in sort!(collect(columns))
+        moved = any(eachindex(bases)) do b
+            u = copy(bases[b]); u[positions] .+= 0.5
+            likelihood(u) != reference[b]
+        end
+        moved || push!(get!(unread, block, String[]), margin)
+    end
+    isempty(unread) && return nothing
+    error("$prefix: " * join(("the group block `$block` has margin(s) $(join(m, ", ")) " *
+        "that no upstream likelihood reads" for (block, m) in sort!(collect(unread))), "; ") *
+        ". Stage 1 samples them from their prior, so pinning the block would fix " *
+        "downstream random effects at prior draws. A block whose margins split across " *
+        "the stages is not supported yet.")
+end
+
 # Draw `k` of one restored declaration: numeric arrays hold draws in their last
 # axis, otherwise one array per draw.
 _brm_cut_draw(v::AbstractVector{<:Number}, k) = v[k]
@@ -311,3 +346,4 @@ function _rk_build_plan end
 function _rk_built_coordinate_names end
 function _rk_cut_target end
 function _rk_value_reader end
+function _rk_likelihood_reader end

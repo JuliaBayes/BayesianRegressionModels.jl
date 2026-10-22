@@ -54,6 +54,19 @@ pd_rates(d) = @brm d begin
         y_pd[i] ~ Normal(E0 .+ exp(log_Emax) .* c_pd ./ (exp(log_EC50) .+ c_pd), sigma_pd)
     end
 end
+# Stage 1 (PK: log_k, log_V) and stage 2 (E0) share one correlated block.
+shared(d) = @brm d begin
+    sigma_pk ~ Exponential(1)
+    sigma_pd ~ Exponential(1)
+    log_k ~ 1 + (1 | p | subject)
+    log_V ~ 1 + (1 | p | subject)
+    E0 ~ 1 + (1 | p | subject)
+    sd(:, p) ~ Exponential(1)
+    @plate for i in eachindex(log_k)
+        y_pk[i] ~ Normal(log(dose[i]) .- log_V[i] .- exp(log_k[i]) .* t_pk[i], sigma_pk)
+        y_pd[i] ~ Normal(E0[i] .+ 0.5 .* exp(-exp(log_k[i])), sigma_pd)
+    end
+end
 # A model sharing no declaration with the joint one.
 unrelated(d) = @brm d begin
     s_other ~ Exponential(1)
@@ -191,6 +204,17 @@ end
     other = RKBRMI(CutModels.unrelated((; z=[0.1, -0.2])))
     @test_throws "`s_other` is not a declaration of the joint model" brm_cut_family(
         JOINT, other, zeros(1, 1); ad_backend=AD)
+end
+
+@stestset "a group block split across the stages is refused" begin
+    joint = RKBRMI(CutModels.shared(DATA))
+    up = RKBRMI(CutModels.shared(STAGE1))
+    draws = zeros(length(BRM._rk_layout_coordinate_names(up)), 2)
+    draws[:, 2] .= 0.2
+    # refused: pinning the block would fix E0's random effects at prior draws
+    # (shared blocks across the stages: todo `0fdu7mc`).
+    @test_throws "`b_p_subject` has margin(s) 3 that no upstream likelihood reads" brm_cut_family(
+        joint, up, draws; ad_backend=AD)
 end
 
 @stestset "a cut fits with independent fits per conditional" begin
