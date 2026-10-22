@@ -1,5 +1,8 @@
-# test/rk_precompile_workload.jl — RK translation while a downstream package
-# image is generated (snag `rkbrmi-inside-a-140a7cf4`).
+# test/rk_precompile_workload.jl — RK translation in downstream environments:
+# while a downstream package image is generated (snag
+# `rkbrmi-inside-a-140a7cf4`), and for an application or package that reaches
+# BRM, ReactiveKernels and ReactiveKernelsPPL only through a dependency (snag
+# `rkbrmi-resolves-4b269923`).
 #
 # While Julia generates a package image it refuses `eval` into every module
 # but the package being precompiled and the modules created during its
@@ -92,6 +95,35 @@ end
 const TRANSLATED = (provided=translated(RKImageModels.provided),
     native=translated(RKImageModels.native))
 const WAS_PRECOMPILED = ccall(:jl_generating_output, Cint, ()) != 0
+# A whole backend built at run time, for a caller that need not load any of
+# the packages it uses.
+fit(name::Symbol) = RKBRMI(getfield(RKImageModels, name)(RKImageModels.PK))
+# A backend's image program, bound and built at run time.
+function bound_backend(t)
+    bound = EXT._rk_bind_program(t.program, t.plan)
+    BRM.RKBRMI(t.brmi, t.plan, build_kernel(bound);
+        program=BRM._RKOnce(t.program), bound=BRM._RKOnce(bound), source=t.brmi)
+end
+function concentrations(rk)
+    bound = rk_bound_data(rk)
+    query = ReactiveKernels.prepare(rk.model.spec;
+        have=(:unconstrained, keys(bound)...), want=(:conc,), bound)
+    u = collect(range(-0.6, 0.8; length=rk.model.layout.total))
+    Base.invokelatest(query, u)
+end
+end
+"""
+
+# The emission module once required BRM, ReactiveKernels and
+# ReactiveKernelsPPL by name, which resolves against the active project, or
+# against the package whose image is generated, rather than against what is
+# loaded. `RKImageIndirect` declares none of the three and translates while its
+# image is generated; an application environment that declares only
+# `RKImageConsumer` builds a whole `RKBRMI` through it at run time.
+const INDIRECT_SOURCE = """
+module RKImageIndirect
+import RKImageConsumer, RKImageModels
+const TRANSLATED = RKImageConsumer.translated(RKImageModels.native)
 end
 """
 
@@ -112,10 +144,9 @@ function write_package(root, name, uuid, deps, source)
     dir
 end
 
-# This environment's project and manifest, with every developed path made
-# absolute, so the copy resolves exactly what this one does.
-function copy_environment(env)
-    project = Base.active_project()
+# An environment's project and manifest, with every developed path made
+# absolute, so the copy resolves exactly what that one does.
+function copy_environment(env, project=Base.active_project())
     source = dirname(project)
     cp(project, joinpath(env, "Project.toml"))
     manifest = TOML.parsefile(joinpath(source, "Manifest.toml"))
@@ -125,9 +156,9 @@ function copy_environment(env)
     open(io -> TOML.print(io, manifest), joinpath(env, "Manifest.toml"), "w")
 end
 
-function run_julia(env, code)
+function run_julia(env, code; vars...)
     cmd = addenv(`$(Base.julia_cmd()) --startup-file=no --project=$env -e $code`,
-        "JULIA_PKG_PRECOMPILE_AUTO" => "0")
+        "JULIA_PKG_PRECOMPILE_AUTO" => "0", (string(k) => v for (k, v) in vars)...)
     out = IOBuffer()
     process = run(pipeline(ignorestatus(cmd); stdout=out, stderr=out))
     process.exitcode == 0 && process.termsignal == 0, String(take!(out))
@@ -135,7 +166,8 @@ end
 
 const UUIDS = Dict("RKImageModels" => "5a1c7e2b-6d3f-4b8a-9c41-2e7f0d6b3a11",
     "RKImageConsumer" => "5a1c7e2b-6d3f-4b8a-9c41-2e7f0d6b3a12",
-    "RKImageWorkload" => "5a1c7e2b-6d3f-4b8a-9c41-2e7f0d6b3a13")
+    "RKImageWorkload" => "5a1c7e2b-6d3f-4b8a-9c41-2e7f0d6b3a13",
+    "RKImageIndirect" => "5a1c7e2b-6d3f-4b8a-9c41-2e7f0d6b3a14")
 dep(name) = name => string(Base.identify_package(name).uuid)
 
 @testset "a cell's names are read without eval" begin
@@ -160,48 +192,77 @@ mktempdir() do root
         imports, CONSUMER_SOURCE)
     workload = write_package(root, "RKImageWorkload", UUIDS["RKImageWorkload"],
         imports, WORKLOAD_SOURCE)
+    indirect = write_package(root, "RKImageIndirect", UUIDS["RKImageIndirect"],
+        Dict(name => UUIDS[name] for name in ("RKImageModels", "RKImageConsumer")),
+        INDIRECT_SOURCE)
     ok, log = run_julia(env, """
         using Pkg
-        Pkg.develop([PackageSpec(path=p) for p in $(repr([models, consumer, workload]))])
+        Pkg.develop([PackageSpec(path=p) for p in
+            $(repr([models, consumer, workload, indirect]))])
         """)
     ok || println(log)
     @test ok
+    # What the consumer's backend computes where the environment declares
+    # every package it uses.
+    declared = nothing
 
     @testset "an RK program translated while an image is generated" begin
-        ok, log = run_julia(env, "using Pkg; Pkg.precompile(\"RKImageConsumer\")")
-        ok || println(log)
-        @test ok
+        for package in ("RKImageConsumer", "RKImageIndirect")
+            ok, log = run_julia(env, "using Pkg; Pkg.precompile(\"$package\")")
+            ok || println(log)
+            @test ok
+        end
         ok, log = run_julia(env, """
             using Test, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
-            using RKImageModels, RKImageConsumer
+            using RKImageModels, RKImageConsumer, RKImageIndirect
             const BRM = BayesianRegressionModels
             const C = RKImageConsumer
             const EXT = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
-            function concentrations(rk)
-                bound = rk_bound_data(rk)
-                query = ReactiveKernels.prepare(rk.model.spec;
-                    have=(:unconstrained, keys(bound)...), want=(:conc,), bound)
-                u = collect(range(-0.6, 0.8; length=rk.model.layout.total))
-                Base.invokelatest(query, u)
-            end
             @test C.WAS_PRECOMPILED
-            for (name, t) in pairs(C.TRANSLATED)
-                # The definitions live in a module of the consumer's image ...
-                @test parentmodule(t.program.mod) === C
+            for (owner, name, t) in ((C, :provided, C.TRANSLATED.provided),
+                    (C, :native, C.TRANSLATED.native),
+                    (RKImageIndirect, :native, RKImageIndirect.TRANSLATED))
+                # The definitions live in a module of the image that
+                # translated them ...
+                @test parentmodule(t.program.mod) === owner
                 # ... and run after loading: the image's program binds and
                 # computes what a run-time translation does.
-                bound = EXT._rk_bind_program(t.program, t.plan)
-                image = BRM.RKBRMI(t.brmi, t.plan, build_kernel(bound);
-                    program=BRM._RKOnce(t.program), bound=BRM._RKOnce(bound),
-                    source=t.brmi)
-                fresh = RKBRMI(getfield(RKImageModels, name)(RKImageModels.PK))
+                fresh = C.fit(name)
                 # At run time a translation's module stays anonymous.
                 @test parentmodule(EXT._rk_program(fresh).mod) === Main
-                @test concentrations(image) == concentrations(fresh)
+                @test C.concentrations(C.bound_backend(t)) == C.concentrations(fresh)
             end
+            println("CONCENTRATIONS=", repr(C.concentrations(C.fit(:provided))))
             """)
         ok || println(log)
         @test ok
+        declared = match(r"CONCENTRATIONS=(.*)", log)
+    end
+
+    @testset "a library's RKBRMI built for an application that declares only the library" begin
+        # The application reaches BRM, ReactiveKernels and ReactiveKernelsPPL
+        # only through the consumer, and its load path has no other
+        # environment that could declare them.
+        app = mkpath(joinpath(root, "app"))
+        copy_environment(app, joinpath(env, "Project.toml"))
+        ok, log = run_julia(app, """
+            using Pkg
+            Pkg.rm(["BayesianRegressionModels", "ReactiveKernels", "ReactiveKernelsPPL"])
+            """)
+        ok || println(log)
+        @test ok
+        ok, log = run_julia(app, """
+            using Test, RKImageConsumer
+            @test all(isnothing ∘ Base.identify_package, ("BayesianRegressionModels",
+                "ReactiveKernels", "ReactiveKernelsPPL"))
+            println("CONCENTRATIONS=", repr(RKImageConsumer.concentrations(
+                RKImageConsumer.fit(:provided))))
+            """; JULIA_LOAD_PATH="@:@stdlib")
+        ok || println(log)
+        @test ok
+        built = match(r"CONCENTRATIONS=(.*)", log)
+        @test built !== nothing && declared !== nothing &&
+            only(built.captures) == only(declared.captures)
     end
 
     # Needs ReactiveKernels 276428589 (snag `rkppl-build-kern-4607ff90`): RKPPL's
