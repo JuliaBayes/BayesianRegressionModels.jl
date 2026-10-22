@@ -585,8 +585,8 @@ end
     brm_columns(builder::BRMBuilder) -> Tuple{Vararg{Symbol}}
 
 The data columns a model reads, sorted, without any data: predictors, grouping
-factors, `@plate` cell reads and the columns they capture, `ragged(...)`
-groupings, bound and weight columns, imputed covariates, the inputs of
+factors, `@plate` cell reads and the columns they capture, the columns a
+`groups(...)` binding reads, bound and weight columns, imputed covariates, the inputs of
 `name = constant(expr)` that are not Julia values in the builder's scope, and
 observed responses. A `~` statement whose name no other statement reads is an
 observed response; one that another statement reads is a parameter or
@@ -603,7 +603,7 @@ brm_columns(b::BRMBuilder) = b.columns
 
 One builder whose source is the fragments' statements in order, exactly as if
 they had been written in one `@brm` block: a fragment may read names another
-defines, and a `@plate` cell may read a `ragged(...)` grouping declared in
+defines, and a `@plate` cell may read a `groups(...)` binding declared in
 another fragment. A statement repeated across fragments is a duplicate, as in
 one block. To replace a built model's statements by address, `merge` the
 built [`BRMI`](@ref)s instead.
@@ -857,8 +857,7 @@ elseif _is_brm_ar1_normal(x)
         "`@plate for p in groups(g; order = t)` with " *
         "`y[p] ~ AR1Normal(mu[p], sigma, phi; time = t[p])` in its cell; got " *
         "`$(sprint(Base.show_unquoted, x))`")
-elseif _is_brm_plate_grouping(x) ||
-       isxcall(x, :~) && isxcall(x.args[2], :ragged)
+elseif _is_brm_plate_grouping(x) || _brm_lhs_reads_ragged(x)
     error(_brm_retired_ragged(x))
 elseif _is_brm_plate_binding(x)
     # Collected by `_brm_plate_groupings` before parsing and read by the
@@ -1004,6 +1003,13 @@ const _BRMPlateGrouping =
 
 _is_brm_plate_grouping(x) = isxcall(x, :ragged)
 _is_brm_plate_binding(x) = Meta.isexpr(x, :(=), 2) && isxcall(x.args[2], :groups)
+# A `ragged(...)` anywhere in a statement's LHS, bare or wrapped
+# (`mi(ragged(y, g)) ~ …`, `log(ragged(y, g)) ~ …`).
+_brm_lhs_reads_ragged(x) =
+    isxcall(x, :~) ? _brm_reads_ragged(x.args[2]) :
+    Meta.isexpr(x, :(=), 2) && _brm_reads_ragged(x.args[1])
+_brm_reads_ragged(x) = false
+_brm_reads_ragged(x::Expr) = isxcall(x, :ragged) || any(_brm_reads_ragged, x.args)
 
 function _brm_retired_ragged(x, i=:i)
     "@brm: `$(sprint(Base.show_unquoted, x))`: `ragged(...)` statements and reads " *
@@ -2201,19 +2207,7 @@ end
 xassignable(x::Symbol) = x
 xassignable(x::Expr) = if Meta.isexpr(x, (:tuple, :vect))
     Expr(x.head, xassignable.(x.args)...)
-elseif isxcall(x, :ragged) && length(x.args) >= 2
-    # `ragged(y, group) ~ family(...)` is an observation decorator, not a
-    # two-argument assignment target. Keep the formula operation keyed by the
-    # logical response (`y`); sbimpl groups its flat backing at the likelihood
-    # boundary. This mirrors the one-argument link/decorator spelling below,
-    # while retaining `group` on the parsed LHS for backend validation.
-    # `into=` rebases an index column a plate cell reads; a response has none.
-    any(a -> Meta.isexpr(a, (:parameters, :kw)), x.args) && error(
-        "@brm: an observation `ragged(y, group) ~ …` takes no keywords; " *
-        "`into=` belongs to a model-scope `ragged(idx, group; into=target)` " *
-        "declaration of an index column; got `$(repr(x))`")
-    xassignable(x.args[2])
-elseif x.head == :call 
+elseif x.head == :call
     if length(x.args) == 2
         xassignable(x.args[2])
     else
@@ -2948,8 +2942,6 @@ function _nested_observed_values(lhs::ExprColumn)
     args = getargs(lhs)
     length(args) == 1 ? _nested_observed_values(only(args)) : nothing
 end
-_nested_observed_values(lhs::ExprColumn{typeof(ragged)}) =
-    _nested_observed_values(first(getargs(lhs)))
 _nested_observed_values(_) = nothing
 
 function _nested_rewrite_categorical!(target, lhs, rhs, pending, occupied)

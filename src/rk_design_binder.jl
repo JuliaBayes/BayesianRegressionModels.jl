@@ -93,17 +93,22 @@ _rk_fit_constant_names(rk::RKBRMI) = rk.fitted === nothing ?
     Set{Symbol}(c.name for c in last(_brm_resolve_constants(parent(rk)))) :
     Set{Symbol}(keys(_rk_fitted_state(rk).constants))
 
-function (binder::RKDesignBinder)(design)
+(binder::RKDesignBinder)(design) = _rk_plan_columns(_rk_design_plan(binder, design))
+
+# A design's RKPPL plan: bound into the lowered program of its kind, or the
+# planned replay's own binding for the first design of a kind and for a kind
+# whose inputs BRM derives in Julia.
+function _rk_design_plan(binder::RKDesignBinder, design)
     key = _rk_design_key(binder, design)
     class = lock(() -> get(binder.classes, key, nothing), binder.lock)
     class === nothing && return _rk_design_first!(binder, key, design)
-    _rk_design_planned(class) && return rk_bound_data(_rk_design_replay(binder, design))
+    _rk_design_planned(class) && return rk_bound_plan(_rk_design_replay(binder, design))
     for check in class.checks
         check(design)
     end
     columns = Dict{Symbol,Any}(name => _rk_design_input(source, design)
         for (name, source) in class.sources)
-    _rk_bind_design(class.lowering, columns)
+    _rk_bind_design_plan(class.lowering, columns)
 end
 
 _rk_design_replay(binder::RKDesignBinder, design) = reprocess(binder.rk, design;
@@ -129,10 +134,10 @@ _rk_design_holds_arrays(value::AbstractArray) = !(eltype(value) <: Number) &&
 
 function _rk_design_first!(binder::RKDesignBinder, key, design)
     replay = _rk_design_replay(binder, design)
-    bound = rk_bound_data(replay)
+    plan = rk_bound_plan(replay)
     class = _rk_design_class(binder, replay, design)
     lock(() -> get!(binder.classes, key, class), binder.lock)
-    bound
+    plan
 end
 
 # The fit-role inputs of a plan, by the column each one twins.
@@ -259,8 +264,9 @@ end
 # A kernel's per-cell inputs and its cell label column must agree on the cell
 # count, its cell labels must be unique and each ragged join's labels and axis
 # lengths must hold, as `_rk_prepare_kernel_value` requires: a plate iterating
-# a shorter input would silently drop cells. The joins are checked by the
-# function the graph computes their partitions with.
+# a shorter input would silently drop cells. Each join is checked as the graph
+# checks it when it computes the partition, without building the partition,
+# which binding never reads: the graph computes it once the design is bound.
 function _rk_design_cell_check(kernel, design)
     has(column) = column !== nothing && _brm_df_has_column(design, column)
     per_cell = unique!(Symbol[input.column for input in kernel.inputs
@@ -279,11 +285,10 @@ function _rk_design_cell_check(kernel, design)
             "RK backend: kernel `$name` positional inputs disagree on subject count")
         column(c) = _brm_df_column(design, c)
         for entry in joins
-            rows = _brm_ragged_rows_graph(entry.x, entry.group, column(entry.group),
+            _brm_check_ragged_rows(entry.x, entry.group, column(entry.group),
                 entry.cell, column(entry.cell), entry.axes,
-                Tuple(column(axis) for axis in entry.axes))
-            entry.order === nothing || _brm_kernel_order_rows!(rows, column(entry.order),
-                entry.order, entry.group, length(column(entry.group)); prefix="RK backend")
+                Tuple(column(axis) for axis in entry.axes); entry.order,
+                times=entry.order === nothing ? nothing : column(entry.order))
         end
         nothing
     end
@@ -292,7 +297,8 @@ end
 
 # Lowering and binding live in the ReactiveKernels extension.
 function _rk_design_lowering end
-function _rk_bind_design end
+function _rk_bind_design_plan end
+function _rk_plan_columns end
 
 function Base.show(io::IO, binder::RKDesignBinder)
     classes = lock(() -> collect(values(binder.classes)), binder.lock)

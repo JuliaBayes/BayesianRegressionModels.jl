@@ -68,6 +68,14 @@ function _rk_new_module()
         Expr(:module, true, gensym(:RKEmittedModels), Expr(:block)))
 end
 
+# The packages emitted source names, as the modules this extension loaded.
+# `using`/`import` by package name would resolve against the active project
+# (or the package whose image is generated), which need not declare them: a
+# library that depends on BRM, ReactiveKernels and ReactiveKernelsPPL builds
+# `RKBRMI` for an application that declares only the library.
+const _RK_SOURCE_PACKAGES = (; ReactiveKernelsPPL, ReactiveKernels,
+    BayesianRegressionModels)
+
 # Evaluate native functions and explicit `@kernel`/`@rkppl` definitions in a fresh module
 # per lowering. Each build owns its definition namespace even when different
 # programs use the same authored names. The macrocall `Expr`
@@ -75,12 +83,13 @@ end
 function _rk_emit_module(emitted::BRM._RKEmittedProgram)
     BRM._rk_validate_source_definitions(emitted)
     mod = _rk_new_module()
-    Core.eval(mod, :(using ReactiveKernelsPPL))
-    Core.eval(mod, :(import ReactiveKernels))
-    Core.eval(mod, :(import BayesianRegressionModels))
+    for (name, package) in pairs(_RK_SOURCE_PACKAGES)
+        Core.eval(mod, Expr(:const, Expr(:(=), name, package)))
+    end
+    Core.eval(mod, :(using .ReactiveKernelsPPL))
     # Callable bindings are named around exactly these imports.
     for (source, names) in pairs(BRM._RK_SOURCE_IMPORTS)
-        Core.eval(mod, Expr(:import, Expr(:(:), Expr(:., source),
+        Core.eval(mod, Expr(:import, Expr(:(:), Expr(:., :., source),
             (Expr(:., name) for name in names)...)))
     end
     for (name, value) in emitted.bindings
@@ -289,7 +298,8 @@ end
 # numbers and arrays per index, rkppl-use §1).
 BRM._rk_design_lowering(replay::BRM.RKBRMI) =
     first(_rk_lower_program(_rk_program(replay), replay.plan; frozen=_rk_frozen(replay)))
-BRM._rk_bind_design(lowering, columns) = _rk_bound_inputs(bind_data(lowering, columns))
+BRM._rk_bind_design_plan(lowering, columns) = bind_data(lowering, columns)
+BRM._rk_plan_columns(plan) = _rk_bound_inputs(plan)
 
 function BRM.rk_restore_draws(backend::BRM.RKBRMI, U::AbstractMatrix)
     restore_draws(backend.model.layout, U)
@@ -409,5 +419,43 @@ function BRM._rk_observation_pushforward(backend::BRM.RKBRMI,
 end
 BRM._rk_observation_value_and_pushforward(bundle, u::AbstractVector) =
     ad_value_and_pushforward(bundle.query, bundle.directions, u)
+
+# Cut posteriors (`src/cut.jl`). The coordinate cut lowers the joint program
+# with its upstream declarations pinned (RKPPL `merge`, scoped names such as
+# `b_p_subject.tau`) once, and binds each draw's pins as data.
+function BRM._rk_cut_lowering(joint::BRM.RKBRMI, pins::NamedTuple)
+    program = _rk_program(joint)
+    columns = BRM._rk_source_data_columns(joint.plan, program.emitted)
+    model = Core.eval(program.mod, Expr(:macrocall, Symbol("@rkppl"),
+        LineNumberNode(0), program.emitted.main))
+    lowered = lower_rkppl(Base.merge(model, pins), columns;
+        conditioned=BRM._rk_observed_names(joint.plan))
+    (; lowered, columns)
+end
+BRM._rk_cut_bind(lowering, pins::NamedTuple) = bind_data(lowering.lowered,
+    merge(Dict{Symbol,Any}(lowering.columns), Dict{Symbol,Any}(pairs(pins))))
+BRM._rk_build_plan(plan) = build_kernel(plan)
+BRM._rk_built_coordinate_names(built) = collect(Symbol, coordinate_names(built.layout))
+BRM._rk_cut_target(built, plan; ad_backend) = RKLogDensityProblem(
+    prepare_sampler(built, plan, zeros(Float64, built.layout.total); backend=ad_backend))
+
+# A backend's summed observation log density at an unconstrained point.
+function BRM._rk_likelihood_reader(rk::BRM.RKBRMI)
+    query = prepare_query(rk.model, _rk_translated(rk), :likelihood)
+    u -> Base.invokelatest(query, Vector{Float64}(u))
+end
+
+# Graph values of a backend at an unconstrained point, from one prepared query.
+function BRM._rk_value_reader(rk::BRM.RKBRMI, names::Tuple{Vararg{Symbol}})
+    bound = BRM.rk_bound_data(rk)
+    query = ReactiveKernels.prepare(rk.model.spec;
+        have=(:unconstrained, keys(bound)...), want=names, bound)
+    function read(u)
+        values = Base.invokelatest(query, Vector{Float64}(u))
+        length(names) == 1 && return NamedTuple{names}((values,))
+        values isa NamedTuple ? NamedTuple{names}(Tuple(values[n] for n in names)) :
+            NamedTuple{names}(Tuple(values))
+    end
+end
 
 end

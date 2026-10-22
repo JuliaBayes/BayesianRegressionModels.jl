@@ -3051,6 +3051,18 @@ _sb_frozen_preproc(data) = let ctx = get(data, _SB_PREPROC_KEY, nothing)
     ctx isa _SBPreprocContext ? ctx.frozen : nothing
 end
 
+# Scratch data for a label walker (`_sb_popcoefnames`, `_sb_id_bucket_margins`,
+# the interaction address map) that drives the emitter's own column builders.
+# A frozen re-emission names its columns from the same fitted records the
+# emitter reads, so a replay frame with one subject or a subset of levels never
+# refits `zscale(x)` or re-derives a `mo(c)` level set here.
+function _sb_label_scratch(frozen_preproc)
+    scratch = Dict{Symbol,Any}()
+    isnothing(frozen_preproc) || (scratch[_SB_PREPROC_KEY] =
+        _SBPreprocContext(Dict{Symbol,PreprocEntry}(), frozen_preproc))
+    scratch
+end
+
 function _sb_frozen_preproc_entry(data, key::Symbol, kind::Symbol, raw_ref)
     ctx = get(data, _SB_PREPROC_KEY, nothing)
     ctx isa _SBPreprocContext || return nothing
@@ -3357,7 +3369,7 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing, provenan
         # `nothing` for a binding that is not a population formula at all
         # (a scalar prior, a `kernel(...)` binding): there is nothing to name.
         try
-            popcoefnames(brmi, lp)
+            _sb_popcoefnames(brmi, lp; frozen_preproc)
         catch err
             # `popcoefnames` covers the standard fixed-effect surface and errors
             # on shapes that need full model context (`hsgp(x, by=g)`, ...).
@@ -3416,8 +3428,8 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing, provenan
         try
             # A design-coded string column's block address fans out over its
             # level columns exactly like an interaction term over its columns.
-            merge(_sb_interaction_address_map(brmi, lp),
-                  _sb_design_block_address_map(brmi, lp))
+            merge(_sb_interaction_address_map(brmi, lp; frozen_preproc),
+                  _sb_design_block_address_map(brmi, lp; frozen_preproc))
         catch err
             haskey(unresolved, lp) || (unresolved[lp] = sprint(showerror, err))
             Dict{Symbol,Vector{Symbol}}()
@@ -3881,7 +3893,8 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
                                                     frozen_preproc=_frozen_preproc)
     r2d2_overrides = _sb_r2d2_overrides(brmi, id_buckets, effect_overrides;
                                         frozen_preproc=_frozen_preproc)
-    hs_overrides = _sb_horseshoe_overrides(brmi, effect_overrides, r2d2_overrides)
+    hs_overrides = _sb_horseshoe_overrides(brmi, effect_overrides, r2d2_overrides;
+                                           frozen_preproc=_frozen_preproc)
     data[_SB_HS_PLANS_KEY] = hs_overrides
     total_plans = _sb_plan_totals(brmi,prepared,effect_overrides,id_buckets,
         ranef_effect_overrides,total_groups; cv_groups,centered_groups,r2d2_overrides,ranef_r2d2_overrides,
@@ -5557,30 +5570,13 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             new_data[n_name] = length(levels)
             push!(handled, n_name)
         end
-    elseif e.kind === :ragged_gather
-        # A gathered ragged response or its data-backed censoring/truncation
-        # bound. Re-gather the flat source column into the kernel's per-subject
-        # row order — the same operation `_sb_ragged_lhs_layout` performed at fit
-        # time. No fitted constant, so `freeze` is irrelevant; the subject axis
-        # comes from the new DataFrame's own kernel frame (which is how a
-        # resample re-emission and a same-subject replay stay consistent).
-        source = e.raw_ref
-        raw = _sb_df_column(df, source)
-        if raw isa AbstractVector{<:AbstractVector}
-            new_data[key] = raw   # already per-subject ragged: pass through
-        else
-            (; rows, nrows) = _sb_replay_group_rows(df, key, e.const_)
-            nrows == length(raw) || error(
-                "sbimpl: reprocess: ragged source `$source` has $(length(raw)) " *
-                "rows but grouping column `$(e.const_.group_col)` has " *
-                "$nrows; they must describe the same observation axis.")
-            new_data[key] = [raw[r] for r in rows]
-        end
-        new_preproc[key] = e
-    elseif e.kind === :ragged_rows
-        # An omitted join's row partition, regrouped from the new frame.
-        new_data[key] = _sb_replay_group_rows(df, key, e.const_).rows
-        new_preproc[key] = e
+    elseif e.kind === :ragged_gather || e.kind === :ragged_rows
+        # Written only by the formula-level `ragged(y, group) ~ …` observation,
+        # which `@brm` refuses since 570403f6 (todo `1nfukuv`).
+        error("sbimpl: reprocess: `$key` was gathered by a formula-level " *
+            "`ragged(y, group) ~ …` observation, a spelling BRM retired in " *
+            "570403f6; this model was built by an older BRM. Rebuild it with the " *
+            "observation in its `@plate` cell (`y[rows[i]] ~ …`) and refit.")
     elseif e.kind === :rw
         # `rw(time)`: the grid may gain new steps; each row reads its own point.
         raw = _sb_df_column(df, e.raw_ref)
@@ -5787,10 +5783,7 @@ Covered: the Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
 `mo`/`s`/`t2`/`gp`/`hsgp`), interval-censored predictor splits,
 `protect`/implicit-fn columns (re-materialised on `new_df`), typed `mm(...)`
 and ordinary plain/`|ID|` random-effect group
-indices, `kernel(...)` subject counts and `ragged(x, group)` columns,
-formula-boundary `ragged(response, group)` observations and their data-backed
-`censored`/`truncated`/`interval_censored` bounds (both re-gathered from the
-flat source column into the kernel's per-subject row order), continuous
+indices, `kernel(...)` subject counts and `ragged(x, group)` columns, continuous
 × continuous interaction columns, typed observation weights, categorical
 outcomes, and pass-through raw columns (plain data, `me` obs values, `ar`
 time). A consumer `_sb_submodel_rhs!` term is called again on `new_df`, and
@@ -6198,13 +6191,11 @@ end
 # land | land_d) + (1 | kreis | ags_d)` — is labelled by the one whose column
 # lists one unique label per row; the others are ordinary terms that already
 # add to each row's predictor. Several such columns label the same rows in
-# the same order: a `ragged(x, group => cells)` input names one, otherwise
-# the first in the formula serves, except where `ragged(...)` rows or a
-# `label_join` (a flat response aligned to the kernel result) join cells by
-# label. LPs that share no grouping keep their own, and the callers refuse
-# the disagreement.
-function _sb_kernel_lp_buckets(lp_cols; ragged_cols=(),
-                               label_join=!isempty(ragged_cols))
+# the same order: the labels of a `rows = groups(group => labels)` binding the
+# cell reads name one, otherwise the first in the formula serves, except where
+# the cell's `ragged(...)` inputs join its rows to cells by label. LPs that
+# share no grouping keep their own, and the callers refuse the disagreement.
+function _sb_kernel_lp_buckets(lp_cols; ragged_cols=())
     per_lp = map(_sb_kernel_lp_groupings, lp_cols)
     candidates = map(zip(lp_cols, per_lp)) do (lp_col, groupings)
         (groupings === nothing || length(groupings) == 1) && return groupings
@@ -6226,13 +6217,13 @@ function _sb_kernel_lp_buckets(lp_cols; ragged_cols=(),
         named = filter(g -> name(g.column) in cells, shared)
         if length(named) == 1
             shared = named
-        elseif label_join
+        elseif !isempty(ragged_cols)
             error(
                 "sbimpl: kernel(...) grouping columns ",
                 join(("`$(name(g.column))`" for g in shared), ", "), " each list ",
                 "one unique label per row, so each could label the plate's cells, ",
-                "and its rows are joined to cells by label. Name the cell label ",
-                "column at model scope: `ragged(x, group => cells)`.")
+                "and its rows are joined to cells by label. Name the cell labels ",
+                "in the binding the cell reads: `rows = groups(group => labels)`.")
         end
     end
     map(candidates) do c
@@ -7429,8 +7420,8 @@ function _sb_prior_arg_named(x, op::ExprColumn{typeof(~)})
     # the dataframe) lower its predictor-backed arguments instead of refusing:
     # the statement emits verbatim and StanBlocks forward-simulates the
     # unbound LHS. Data-backed observations referenced as args behave exactly
-    # as in likelihoods. Decorated responses (`mi`/`ragged`/joint) stay
-    # refused: they have no plain emitted name to reference.
+    # as in likelihoods. Decorated responses (`mi`/joint) stay refused: they
+    # have no plain emitted name to reference.
     inner = _sb_prior_arg_declared_name(lhs_raw)
     if !isnothing(inner) && inner === name(x)
         return name(x)
@@ -7726,257 +7717,6 @@ _sb_kernel_declaration(_decl) = nothing
 _sb_kernel_declaration(decl::ExprColumn{typeof(~)}) = _sb_kernel_call(last(getargs(decl, 2)))
 _sb_kernel_call(_rhs) = nothing
 _sb_kernel_call(rhs::ExprColumn{typeof(kernel)}) = rhs
-
-# Find the per-subject group column of every `kernel(...)` result referenced by
-# a likelihood RHS. The formula node retains the producer declaration on the
-# referenced NamedColumn, so the observation boundary can align a flat response
-# to the kernel's ROW-ordered subject axis without guessing from first-seen or
-# sorted labels.
-_sb_ragged_rhs_kernel_groups!(_acc, _x) = nothing
-function _sb_ragged_rhs_kernel_groups!(acc, x::NamedColumn)
-    producer_rhs = _sb_kernel_producer(x)
-    isnothing(producer_rhs) && return nothing
-
-    lps = Any[]
-    ragged_cols = Any[]
-    for arg in getargs(producer_rhs)
-        arg isa ExprColumn && getf(arg) === ragged && (push!(ragged_cols, arg); continue)
-        arg isa NamedColumn || continue
-        arg_decl = parent(arg)
-        arg_decl isa ExprColumn && getf(arg_decl) === (~) || continue
-        push!(lps, arg)
-    end
-    buckets = [b for b in _sb_kernel_lp_buckets(lps; ragged_cols, label_join=true)
-               if b !== nothing]
-    isempty(buckets) && return nothing
-    groups = unique(b.key for b in buckets)
-    length(groups) == 1 || error(
-        "sbimpl: kernel result `$(name(x))` has no single subject grouping; " *
-        "its per-subject predictors name groups $(collect(groups)).")
-    push!(acc, (name(x), first(buckets).column))
-    nothing
-end
-function _sb_ragged_rhs_kernel_groups!(acc, x::ExprColumn)
-    foreach(a -> _sb_ragged_rhs_kernel_groups!(acc, a), getargs(x))
-    foreach(v -> _sb_ragged_rhs_kernel_groups!(acc, v), values(getkwargs(x)))
-    nothing
-end
-
-# Partition flat observation rows into per-subject groups using the kernel's
-# ROW-ordered subject axis. Shared by `_sb_ragged_lhs_layout` (emission) and the
-# `:ragged_gather` reprocess handler so a replayed frame is aligned to the
-# kernel exactly as it was at fit time.
-function _sb_ragged_group_rows(key::Symbol, group::Symbol,
-                               group_values::AbstractVector,
-                               subject_values::AbstractVector)
-    positions = Dict{Any,Int}(v => i for (i, v) in enumerate(subject_values))
-    rows = [Int[] for _ in subject_values]
-    unknown = Any[]
-    for (row, label) in enumerate(group_values)
-        i = get(positions, label, 0)
-        i == 0 ? push!(unknown, label) : push!(rows[i], row)
-    end
-    isempty(unknown) || error(
-        "sbimpl: `ragged($key, $group)` contains label(s) " *
-        "$(unique(unknown)) that name no subject in the referenced kernel.")
-    rows
-end
-
-# The same partition of a replay frame's rows, and its row count.
-function _sb_replay_group_rows(df, key::Symbol, grouping)
-    (; group_col, subject_col) = grouping
-    subject_values = _sb_kernel_subject_values(
-        _sb_df_column(df, subject_col), subject_col)
-    group_values = collect(_sb_group_values(_sb_df_column(df, group_col)))
-    (; rows=_sb_ragged_group_rows(key, group_col, group_values, subject_values),
-       nrows=length(group_values))
-end
-
-_sb_ragged_response_values(_key, _group, ::MissingColumn) = nothing
-function _sb_ragged_response_values(key, group, response::DataColumn)
-    raw = _brm_data_vec(key, parent(response))
-    raw isa AbstractVector{<:AbstractVector} && error(
-        "sbimpl: `ragged($key, $group)` observation LHS received an " *
-        "ALREADY-ragged response; write `$key ~ <family>(...)` directly.")
-    raw
-end
-
-function _sb_ragged_lhs_layout(key::Symbol, lhs::ExprColumn, rhs)
-    args = getargs(lhs)
-    length(args) == 2 || error(
-        "sbimpl: `ragged(...)` observation LHS takes exactly two arguments — " *
-        "the flat response and its grouping column — got $(length(args)).")
-    response, group = args
-    response isa NamedColumn && parent(response) isa Union{DataColumn,MissingColumn} || error(
-        "sbimpl: `ragged(...)` observation LHS needs a flat response column " *
-        "as its first argument; got $(typeof(response)).")
-    name(response) === key || error(
-        "sbimpl: `ragged(...)` observation LHS is keyed as `$key` but names " *
-        "response `$(name(response))`.")
-    group isa NamedColumn && parent(group) isa DataColumn || error(
-        "sbimpl: `ragged($key, ...)` observation LHS needs a raw data grouping " *
-        "column as its second argument; got $(typeof(group)).")
-
-    raw = _sb_ragged_response_values(key, name(group), parent(response))
-    group_values = collect(parent(parent(group)))
-    isnothing(raw) || length(group_values) == length(raw) || error(
-        "sbimpl: `ragged($key, $(name(group)))` has $(length(raw)) response rows " *
-        "but $(length(group_values)) grouping rows. The grouping column must name " *
-        "the subject of every response row.")
-    # A zero-row axis observes nothing: every subject's slice is empty.
-    any(ismissing, group_values) && error(
-        "sbimpl: `ragged($key, $(name(group)))` needs a grouping column " *
-        "with no missing labels.")
-
-    producers = Tuple{Symbol,Any}[]
-    _sb_ragged_rhs_kernel_groups!(producers, rhs)
-    isempty(producers) && error(
-        "sbimpl: `ragged($key, $(name(group))) ~ ...` needs a `kernel(...)` result " *
-        "on the likelihood RHS so BRM can align groups to the kernel's subject " *
-        "row order without guessing.")
-    subject_values = collect(parent(parent(first(producers)[2])))
-    for (producer, subject_col) in producers[2:end]
-        candidate = collect(parent(parent(subject_col)))
-        candidate == subject_values || error(
-            "sbimpl: `ragged($key, $(name(group)))` combines kernel result " *
-            "`$producer` with a different subject row order. Every kernel result " *
-            "in one likelihood must describe the same subjects in the same order.")
-    end
-    (!isempty(subject_values) && !any(ismissing, subject_values) &&
-     length(unique(subject_values)) == length(subject_values)) || error(
-        "sbimpl: `ragged($key, $(name(group)))` needs the referenced kernel's " *
-        "subject column to contain one non-missing unique label per row; got " *
-        "$(subject_values).")
-
-    rows = _sb_ragged_group_rows(key, name(group), group_values, subject_values)
-    (; values=isnothing(raw) ? nothing : [raw[r] for r in rows],
-       rows, nrows=length(group_values),
-       group_col=name(group), subject_col=name(first(producers)[2]))
-end
-
-# A data-backed bound on a ragged formula-LHS lives on the same flat observed
-# frame as the response. Group it through the LHS's already-validated row map,
-# but bind it under a likelihood-local derived key: the original flat column may
-# still be used by another formula term on its native axis.
-function _sb_ragged_bound(data, key::Symbol, label::Symbol, bound, layout)
-    bound isa NamedColumn && parent(bound) isa DataColumn || return bound
-    parent(parent(bound)) isa Real && return bound
-    raw = _brm_data_vec(name(bound), parent(parent(bound)))
-    grouped = if raw isa AbstractVector{<:AbstractVector}
-        length.(raw) == length.(layout.rows) || error(
-            "sbimpl: `$key` $label bound `$(name(bound))` has " *
-            "group lengths $(length.(raw)); expected $(length.(layout.rows))")
-        raw
-    else
-        length(raw) == layout.nrows || error(
-            "sbimpl: `$(key)` $label bound `$(name(bound))` has $(length(raw)) " *
-            "rows but the flat response has $(layout.nrows)")
-        [raw[r] for r in layout.rows]
-    end
-    derived = Symbol(key, :_, label, :_, name(bound), :_ragged)
-    if haskey(data, derived)
-        data[derived] == grouped || error(
-            "sbimpl: derived ragged-bound data key `$derived` collides with " *
-            "different observed data")
-    else
-        data[derived] = grouped
-        # Same provenance the gathered response carries (`_sb_sampling!`): a
-        # data-backed censoring/truncation bound is re-gathered from its flat
-        # column + the shared grouping on `reprocess`.
-        _sb_record_preproc!(data, derived, PreprocEntry(
-            :ragged_gather,
-            (; group_col=layout.group_col, subject_col=layout.subject_col),
-            name(bound), true))
-    end
-    NamedColumn(derived, DataColumn(grouped))
-end
-
-_sb_ragged_argument(data, key, argument, layout) = argument
-function _sb_ragged_argument(data, key, argument::NamedColumn, layout)
-    parent(argument) isa DataColumn || return argument
-    raw = parent(parent(argument))
-    raw isa Real && return argument
-    raw isa AbstractVector && length(raw) == 1 && return argument
-    _sb_ragged_bound(data, key, :argument, argument, layout)
-end
-# A row-local callable (`addprop`) keeps its rows aligned, so its per-row data
-# arguments are grouped like the law's own.
-function _sb_ragged_argument(data, key, argument::ExprColumn, layout)
-    f = getf(argument)
-    (haskey(_RK_DERIVED_BINOPS, f) || haskey(_RK_DERIVED_CMP, f) ||
-        haskey(_RK_DERIVED_MATH, f) || _rk_rowwise_callable(f)) || return argument
-    ExprColumn(f, map(a -> _sb_ragged_argument(data, key, a, layout),
-        getargs(argument))...; getkwargs(argument)...)
-end
-
-function _sb_ragged_likelihood_rhs(stmts, data, key::Symbol, rhs::ExprColumn, layout)
-    f = getf(rhs)
-    if f === truncated || f === censored
-        lower, upper = _sb_wrapper_bounds(f, getargs(rhs), getkwargs(rhs))
-        lower = _sb_ragged_bound(data, key, :lower, lower, layout)
-        upper = _sb_ragged_bound(data, key, :upper, upper, layout)
-        base = _sb_ragged_likelihood_rhs(stmts, data, key, first(getargs(rhs)), layout)
-        return ExprColumn(f, base; lower, upper)
-    elseif f === interval_censored && length(getargs(rhs)) == 1 &&
-           keys(getkwargs(rhs)) == (:upper,)
-        upper = _sb_ragged_bound(
-            data, key, :upper, getkwargs(rhs).upper, layout)
-        base = _sb_ragged_likelihood_rhs(stmts, data, key, first(getargs(rhs)), layout)
-        return ExprColumn(f, base; upper)
-    end
-    ExprColumn(f, map(enumerate(getargs(rhs))) do (index, argument)
-        grouped = _sb_ragged_argument(data, key, argument, layout)
-        # A bound response groups its computed arguments when it is observed
-        # (`_sb_grouped_argument!`). An omitted one has no values, so its
-        # arguments are grouped here over the join's row partition, under the
-        # same names: the observation reads them as it does when bound.
-        isnothing(layout.values) || return grouped
-        ports = _sb_grouped_ports(grouped, length.(layout.rows))
-        isnothing(ports) ? grouped : _sb_grouped_argument_plate!(stmts, data, key,
-            _sb_ragged_rows!(data, key, layout), grouped, index, ports)
-    end...; getkwargs(rhs)...)
-end
-_sb_ragged_likelihood_rhs(_stmts, _data, _key, rhs, _layout) = rhs
-
-# An omitted join's row partition, one array of flat row numbers per kernel
-# subject, bound under the name RKBRMI gives the same port.
-function _sb_ragged_rows!(data, key::Symbol, layout)
-    rows_key = Symbol(key, :_rows)
-    if haskey(data, rows_key)
-        data[rows_key] == layout.rows || error(
-            "sbimpl: derived ragged-row data key `$rows_key` collides with " *
-            "different observed data")
-    else
-        data[rows_key] = layout.rows
-        _sb_record_preproc!(data, rows_key, PreprocEntry(
-            :ragged_rows,
-            (; group_col=layout.group_col, subject_col=layout.subject_col),
-            layout.group_col, true))
-    end
-    rows_key
-end
-
-# Formula-boundary grouping for a flat observed frame. The emitted likelihood
-# keeps the logical response name (`key`), so StanBlocks' existing top-level
-# RaggedVector path owns the flat predictive draw, group-aggregate likelihood,
-# and descriptor `segments` exactly as it does for a pre-grouped response.
-function _sb_sampling!(stmts, data, key,
-                       lhs::ExprColumn{typeof(ragged)}, rhs;
-                       id_lookup=_sb_empty_id_lookup(), kwargs...)
-    layout = _sb_ragged_lhs_layout(key, lhs, rhs)
-    if !isnothing(layout.values)
-        data[key] = layout.values
-        # Only a bound response needs gather provenance. An omitted response
-        # stays absent from both data and replay inputs; its retained kernel
-        # arguments and bounds carry the ragged layout.
-        _sb_record_preproc!(data, key, PreprocEntry(
-            :ragged_gather,
-            (; group_col=layout.group_col, subject_col=layout.subject_col),
-            key, true))
-    end
-    grouped_rhs = _sb_ragged_likelihood_rhs(stmts, data, key, rhs, layout)
-    _sb_likelihood!(stmts, key, grouped_rhs, data)
-end
 
 _sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs;
                      id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(),
@@ -8642,7 +8382,14 @@ it: `effect(lhs, a & b)` sets one shared Normal prior over every `beta_pop`
 column the term emits, in either operand order; a direct `int_…` label
 address refines it on that column alone.
 """
-function popcoefnames(brmi::BRMI, lhs::Symbol)
+popcoefnames(brmi::BRMI, lhs::Symbol) = _sb_popcoefnames(brmi, lhs)
+
+# `frozen_preproc` is the fitted record a frozen re-emission
+# (`reprocess(...; freeze_constants=true, resample_groups=...)`) builds its
+# columns from. Every emission-time prior resolver passes it, so its labels
+# count the fitted `mo(c)` levels and string-categorical level columns rather
+# than the replay rows' own (snag reprocess-resamp-0a765fc0).
+function _sb_popcoefnames(brmi::BRMI, lhs::Symbol; frozen_preproc=nothing)
     op = linear_predictor_op(brmi, lhs)
     isnothing(op) && return nothing
     _, rhs = getargs(op, 2)
@@ -8654,8 +8401,9 @@ function popcoefnames(brmi::BRMI, lhs::Symbol)
     labels = Symbol[]
     # Scratch data/stmts: `_sb_pop_cols!` materialises columns into these as a
     # side effect; we only read back the pushed column reference(s) as labels.
-    scratch = Dict{Symbol,Any}(); scratch_stmts = Any[]
-    design_columns = _sb_design_coded_columns(pop_terms)
+    scratch = _sb_label_scratch(frozen_preproc); scratch_stmts = Any[]
+    design_columns = _sb_design_coded_columns(pop_terms;
+        population_columns=_sb_population_columns(scratch))
     for (t, coded) in zip(pop_terms, design_columns)
         # The intercept is always exactly one all-ones column; skip the
         # emitter's length probe (irrelevant to naming) and label it directly.
@@ -9547,7 +9295,7 @@ end
 # so a transformed operand's columns stay reachable only through their
 # `int_…` labels. Duplicate identical terms append: both emit, both are
 # claimed.
-function _sb_interaction_address_map(brmi::BRMI, lhs::Symbol)
+function _sb_interaction_address_map(brmi::BRMI, lhs::Symbol; frozen_preproc=nothing)
     out = Dict{Symbol,Vector{Symbol}}()
     op = linear_predictor_op(brmi, lhs)
     isnothing(op) && return out
@@ -9556,7 +9304,7 @@ function _sb_interaction_address_map(brmi::BRMI, lhs::Symbol)
     for t in _sb_terms(rhs)
         _sb_classify_term!(t, pop_terms, ran_terms, direct_terms)
     end
-    scratch = Dict{Symbol,Any}(); scratch_stmts = Any[]
+    scratch = _sb_label_scratch(frozen_preproc); scratch_stmts = Any[]
     for t in pop_terms
         te = _as_expr_column(t)
         (isnothing(te) || getf(te) !== (&)) && continue
@@ -9576,20 +9324,22 @@ end
 # string column: its level indicators, `<c>_lvl_<k>`), aligned with
 # `pop_terms`, `nothing` elsewhere. SBBRMI emits such a predictor through
 # `_brm_population_design`, so its labels and block addresses come from the
-# same columns, with the design's own cell-means choice.
-function _sb_design_coded_columns(pop_terms)
+# same columns, with the design's own cell-means choice. `population_columns`
+# is the emitter's column hook (`_sb_population_columns`), so a frozen
+# re-emission codes the fitted level set.
+function _sb_design_coded_columns(pop_terms; population_columns=_brm_population_columns)
     flags = _brm_cellmeans_term_flags(Tuple(pop_terms))
     map(pop_terms, flags) do t, cellmeans
         t isa NamedColumn && parent(t) isa DataColumn &&
             _brm_is_string_categorical_data(parent(parent(t))) || return nothing
-        _brm_population_columns(t; cellmeans)
+        population_columns(t; cellmeans)
     end
 end
 
 # block address -> the ordered `beta_pop` labels of a design-coded categorical
 # term, for one linear predictor: `effect(lp, c)` claims every level column of
 # a bare string column `c`, and `effect(lp, c_lvl_<k>)` refines one of them.
-function _sb_design_block_address_map(brmi::BRMI, lhs::Symbol)
+function _sb_design_block_address_map(brmi::BRMI, lhs::Symbol; frozen_preproc=nothing)
     out = Dict{Symbol,Vector{Symbol}}()
     op = linear_predictor_op(brmi, lhs)
     isnothing(op) && return out
@@ -9598,7 +9348,8 @@ function _sb_design_block_address_map(brmi::BRMI, lhs::Symbol)
     for t in _sb_terms(rhs)
         _sb_classify_term!(t, pop_terms, ran_terms, direct_terms)
     end
-    for coded in _sb_design_coded_columns(pop_terms)
+    population_columns = _sb_population_columns(_sb_label_scratch(frozen_preproc))
+    for coded in _sb_design_coded_columns(pop_terms; population_columns)
         isnothing(coded) && continue
         for c in coded, address in c.effect_addresses
             address === c.label || push!(get!(out, address, Symbol[]), c.label)
@@ -10508,11 +10259,7 @@ end
 
 function _sb_id_bucket_margins(bucket; frozen_preproc=nothing)
     out = NamedTuple[]
-    scratch_data = Dict{Symbol,Any}()
-    # A frozen re-emission names its columns from the same fitted records the
-    # emitter reads, so a one-subject replay never refits `zscale(x)` here.
-    isnothing(frozen_preproc) || (scratch_data[_SB_PREPROC_KEY] =
-        _SBPreprocContext(Dict{Symbol,PreprocEntry}(), frozen_preproc))
+    scratch_data = _sb_label_scratch(frozen_preproc)
     scratch_stmts = Any[]
     for (predictor, terms) in _sb_bucket_target_terms(bucket)
         for t in terms
@@ -10786,7 +10533,8 @@ end
 # is the whole-predictor form's silent version of exactly that), so the
 # statement has to say which prior it means. Intercepts stay outside and keep
 # their ordinary or explicitly overridden prior.
-function _sb_ranef_r2d2_joint(brmi::BRMI, id, margins, include, effect_overrides)
+function _sb_ranef_r2d2_joint(brmi::BRMI, id, margins, include, effect_overrides;
+                              frozen_preproc=nothing)
     n_margins = length(margins)
     lps = unique(Symbol[m.predictor for m in margins])
     whole = Set{Symbol}(spec.predictor for spec in r2d2_priors(brmi)
@@ -10808,7 +10556,7 @@ function _sb_ranef_r2d2_joint(brmi::BRMI, id, margins, include, effect_overrides
                   "it contributes $(length(hits)) margins to `|$id|` and none " *
                   "is its intercept")
         resolved = try
-            popcoefnames(brmi, lp)
+            _sb_popcoefnames(brmi, lp; frozen_preproc)
         catch err
             error("sbimpl: `sd(:, $id) ~ r2d2(...; include=...)` cannot " *
                   "resolve the population columns of `$lp`: " *
@@ -10833,7 +10581,7 @@ function _sb_ranef_r2d2_joint(brmi::BRMI, id, margins, include, effect_overrides
         end
         cats = NamedTuple[]
         if include.contrasts
-            entries = _sb_cat_entries(brmi, lp)
+            entries = _sb_cat_entries(brmi, lp; frozen_preproc)
             cat_overrides = _sb_cat_effect_overrides(effect_overrides, lp)
             for e in (isnothing(entries) ? NamedTuple[] : entries)
                 haskey(cat_overrides, e.emitted) && error(
@@ -10850,8 +10598,7 @@ function _sb_ranef_r2d2_joint(brmi::BRMI, id, margins, include, effect_overrides
                     "coded there (`$lp` has no intercept). Give `$lp` an intercept, " *
                     "keep the factor treatment-coded with `factor($(e.address); " *
                     "cmc=false)`, or leave `:contrasts` out of `include=`")
-                n_levels, _ = _sb_level_index(_sb_cat_levels(e.term))
-                n_contrasts = n_levels - 1
+                n_contrasts = e.n_levels - 1
                 push!(cats, (; emitted=e.emitted, address=e.address,
                               n_contrasts, phi_start=cursor))
                 cursor += n_contrasts
@@ -10934,7 +10681,7 @@ Base.@nospecializeinfer function _sb_ranef_r2d2_overrides(@nospecialize(brmi::BR
             end
             if !isnothing(base.include)
                 joint = _sb_ranef_r2d2_joint(brmi, id, margins, base.include,
-                                             effect_overrides)
+                                             effect_overrides; frozen_preproc)
             end
             push!(groups, (; indices=collect(eachindex(margins)), references,
                             r2_prior=base.r2_prior,
@@ -11101,7 +10848,7 @@ Base.@nospecializeinfer function _sb_r2d2_overrides(@nospecialize(brmi::BRMI), i
     isempty(specs) && return Dict{Symbol,NamedTuple}()
 
     lp_names = Symbol[x.name for x in linear_predictors(brmi)]
-    labels_of(lp) = try popcoefnames(brmi, lp) catch; nothing end
+    labels_of(lp) = try _sb_popcoefnames(brmi, lp; frozen_preproc) catch; nothing end
 
     out = Dict{Symbol,NamedTuple}()
     for spec in specs
@@ -11400,7 +11147,8 @@ function _sb_hs_literal_sibling_args!(expr, spelling)
     nothing
 end
 
-Base.@nospecializeinfer function _sb_horseshoe_overrides(@nospecialize(brmi::BRMI), effect_overrides, r2d2_overrides)
+Base.@nospecializeinfer function _sb_horseshoe_overrides(@nospecialize(brmi::BRMI), effect_overrides, r2d2_overrides;
+                                                         frozen_preproc=nothing)
     for spec in ranef_effect_priors(brmi)
         spec.family === Horseshoe || continue
         spelling = spec.class === :sd ? "sd" : "cor"
@@ -11429,7 +11177,7 @@ Base.@nospecializeinfer function _sb_horseshoe_overrides(@nospecialize(brmi::BRM
             "sbimpl: predictor `$lp` combines `effect($lp, :) ~ r2d2(...)` " *
             "with `~ Horseshoe(...)`; one predictor takes one structured " *
             "prior in v1 (drop one of them)")
-        labels = try popcoefnames(brmi, lp) catch; nothing end
+        labels = try _sb_popcoefnames(brmi, lp; frozen_preproc) catch; nothing end
         isnothing(labels) && error(
             "sbimpl: `effect($lp, ...) ~ Horseshoe(...)` names no linear " *
             "predictor with population coefficients")
@@ -13995,8 +13743,6 @@ end
 # An omitted model-scope response has no groups of its own. Its computed
 # argument runs over the cells of a value it reads: a kernel result's, which
 # are the cells that value was computed on, else grouped data's.
-# An omitted `ragged(y, group)` join grouped its arguments over its row
-# partition already (`_sb_ragged_likelihood_rhs`); they are read in place here.
 function _sb_grouped_argument!(stmts, data, target, ::Nothing, argument, index)
     ports = _sb_grouped_ports(argument, nothing)
     isnothing(ports) && return argument
@@ -14007,8 +13753,7 @@ function _sb_grouped_argument!(stmts, data, target, ::Nothing, argument, index)
 end
 
 # Evaluate a computed observation argument one group at a time, in a plate over
-# the observed `cells` (the bound response, or an omitted join's row partition)
-# and the argument's grouped ports. When `cells` names one of those ports (an
+# the observed `cells` (the bound response) and the argument's grouped ports. When `cells` names one of those ports (an
 # omitted model-scope response), that port's cell is the observed cell.
 function _sb_grouped_argument_plate!(stmts, data, target, cells, argument, index, ports)
     expression = _sb_scalar_expr(argument, data)
@@ -14735,8 +14480,7 @@ end
 
 function _sb_validate_bounds(wrapper, target, lower, upper, data; check_order=true)
     # An unbound observation has no response values to validate. Its bounds
-    # still need ordinary type/order checks; ragged LHS layout validation
-    # checks their row and group lengths before reaching this shared path.
+    # still need ordinary type/order checks.
     raw_y = get(data, target, nothing)
     y = _sb_composed_values(raw_y)
     for (label, bound) in ((:lower, lower), (:upper, upper))

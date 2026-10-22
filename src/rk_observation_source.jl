@@ -9,9 +9,8 @@ the scalar graph route, define a fresh explicit `ReactiveKernels.@kernel`
 any preceding child graph definitions and separately named numerical leaves,
 and return a non-`nothing` value. `args` are the original constructor's
 arguments on the observation cell's axis. A shared scalar broadcasts; grouped
-row arguments follow their response's subject partition, and flat row arguments
-follow an explicit ragged response join. Original data ports remain available
-to other consumers. Prepare history-dependent row values
+row arguments follow their response's subject partition. Original data ports
+remain available to other consumers. Prepare history-dependent row values
 before invoking this entry. The provider receives no model values or AD state.
 
 BRM calls the provider once per observation statement, each time with a fresh

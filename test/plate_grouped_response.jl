@@ -178,6 +178,14 @@ end
     end)
     @test_throws "are retired" macroexpand(@__MODULE__, retired)
     @test_throws "y[rows[i]] ~" macroexpand(@__MODULE__, retired)
+    # refused: wrapping the retired LHS does not reach a backend (todo `1nfukuv`).
+    for lhs in (:(mi(ragged(obs_y, obs_subject))), :(log(ragged(obs_y, obs_subject))))
+        wrapped = :(@brm begin
+            sigma ~ Exponential(1)
+            $lhs ~ Normal(0, sigma)
+        end)
+        @test_throws "are retired" macroexpand(@__MODULE__, wrapped)
+    end
 end
 
 # snag reprocess-ragged-ea8c7e42 (reported by a downstream PKPD consumer): a

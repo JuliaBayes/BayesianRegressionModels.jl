@@ -770,23 +770,14 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
         o = _rk_prepare_missing_value!(value_columns, taken, original, program, completions, derived)
         o.weight === nothing || error(
             "RK backend: value-based response `$(o.name)` weights need an authored response")
-        layout = isempty(kernels) ?
-            (; values=o.response, rows=nothing, lengths=nothing) :
-            _rk_kernel_observed_layout(o, kernels)
-        raw_response = o.lhs isa ExprColumn && getf(o.lhs) === ragged ?
-            parent(parent(first(getargs(o.lhs)))) : o.response
-        nested = isempty(kernels) ? nothing :
+        layout = isempty(kernels) ? (; values=o.response, lengths=nothing) :
+            _rk_observed_layout(o.response)
+        cells = isempty(kernels) ? nothing :
             _rk_nested_kernel_cells(o, layout, kernels, value_columns, parameter_names)
-        if nested !== nothing
+        if cells !== nothing
             # One array per subject, observed per subject (RKPPL nested plates).
-            _rk_validate_nested_bounds(o, raw_response, context.data)
-            cells = if layout.rows === nothing
-                value_columns[o.name] = o.response
-                nested.cells
-            else
-                _rk_prepare_nested_join!(value_columns, taken, o, layout, nested,
-                    raw_response)
-            end
+            _rk_validate_nested_bounds(o, o.response, context.data)
+            value_columns[o.name] = o.response
             return _RKNestedObservation(o, cells)
         end
         modifier = _rk_kernel_response_modifier!(value_columns, taken, derived, o, layout)
@@ -802,7 +793,7 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
             end
         end
         _rk_prepare_kernel_observed_values!(value_columns, taken, derived,
-            o.name, layout, raw_response; port=_rk_kernel_input_port(kernels, o.name))
+            o.name, layout, o.response; port=_rk_kernel_input_port(kernels, o.name))
         _BRMPreparedObservation(o.name, o.lhs, o.distribution, o.response,
             modifier, o.weight, o.missing_response)
     end
