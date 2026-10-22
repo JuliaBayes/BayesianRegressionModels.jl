@@ -92,22 +92,14 @@ end
 function _brm_kernel_ragged_partition(a_name::Symbol, grp_name::Symbol,
                                      ev_vals::AbstractVector,
                                      subject_vals::AbstractVector; prefix="BRM kernel preparation")
-    _brm_has_missing(ev_vals) && error(
-        "$prefix: kernel(...) `ragged($a_name, $grp_name)`: `$grp_name` must be a " *
-        "column with no missing labels.")
+    _brm_kernel_check_missing_labels(a_name, grp_name, ev_vals; prefix)
     cell = _brm_label_positions(ev_vals, subject_vals)
     counts = zeros(Int, length(subject_vals))
     for i in cell
         i == 0 || (counts[i] += 1)
     end
-    if sum(counts) != length(cell)
-        unknown = Any[v for (v, i) in zip(ev_vals, cell) if i == 0]
-        error(
-            "$prefix: kernel(...) `ragged($a_name, $grp_name)`: label(s) " *
-            "$(unique(unknown)) in `$grp_name` name no subject in the kernel's " *
-            "per-subject frame. Every event row must belong to a subject this " *
-            "kernel walks.")
-    end
+    sum(counts) == length(cell) ||
+        _brm_kernel_unknown_labels(a_name, grp_name, ev_vals, cell; prefix)
     rows = [Vector{Int}(undef, n) for n in counts]
     fill!(counts, 0)
     for (r, i) in enumerate(cell)
@@ -116,39 +108,80 @@ function _brm_kernel_ragged_partition(a_name::Symbol, grp_name::Symbol,
     rows
 end
 
+# Refuses what `_brm_kernel_ragged_partition` refuses, with the same messages,
+# without building the partition: it only confirms that every row's label
+# names a cell. The RK design binder validates each design this way, and the
+# graph builds the partition itself.
+function _brm_kernel_check_ragged_partition(a_name::Symbol, grp_name::Symbol,
+                                           ev_vals::AbstractVector,
+                                           subject_vals::AbstractVector; prefix="BRM kernel preparation")
+    _brm_kernel_check_missing_labels(a_name, grp_name, ev_vals; prefix)
+    _brm_labels_name_cells(ev_vals, subject_vals) || _brm_kernel_unknown_labels(
+        a_name, grp_name, ev_vals, _brm_label_positions(ev_vals, subject_vals); prefix)
+    nothing
+end
+
+_brm_kernel_check_missing_labels(a_name, grp_name, ev_vals; prefix) =
+    _brm_has_missing(ev_vals) && error(
+        "$prefix: kernel(...) `ragged($a_name, $grp_name)`: `$grp_name` must be a " *
+        "column with no missing labels.")
+function _brm_kernel_unknown_labels(a_name, grp_name, ev_vals, cell; prefix)
+    unknown = Any[v for (v, i) in zip(ev_vals, cell) if i == 0]
+    error(
+        "$prefix: kernel(...) `ragged($a_name, $grp_name)`: label(s) " *
+        "$(unique(unknown)) in `$grp_name` name no subject in the kernel's " *
+        "per-subject frame. Every event row must belong to a subject this " *
+        "kernel walks.")
+end
+
 _brm_has_missing(values::AbstractVector) = Missing <: eltype(values) && any(ismissing, values)
 
 # The position of each value's label in `labels` (`0` when none matches, the
-# last match when a label repeats), compared by `isequal`. Machine-integer
-# labels over a compact range index a dense table; any others a hash table
-# keyed by the labels' own element type.
-function _brm_label_positions(values::AbstractVector{<:Base.BitInteger},
-                              labels::AbstractVector{<:Base.BitInteger})
-    isempty(labels) && return zeros(Int, length(values))
+# last match when a label repeats), compared by `isequal`.
+function _brm_label_positions(values::AbstractVector, labels::AbstractVector)
+    positions = Vector{Int}(undef, length(values))
+    _brm_each_label_position((r, i) -> positions[r] = i, values, labels)
+    positions
+end
+# Whether every value's label is in `labels`, without recording positions.
+function _brm_labels_name_cells(values::AbstractVector, labels::AbstractVector)
+    unknown = Ref(false)
+    _brm_each_label_position((_, i) -> i == 0 && (unknown[] = true), values, labels)
+    !unknown[]
+end
+
+# Calls `f(row, position)` for each value. Machine-integer labels over a
+# compact range index a dense table; any others a hash table keyed by the
+# labels' own element type.
+function _brm_each_label_position(f, values::AbstractVector{<:Base.BitInteger},
+                                  labels::AbstractVector{<:Base.BitInteger})
+    if isempty(labels)
+        for r in eachindex(values)
+            f(r, 0)
+        end
+        return
+    end
     lo, hi = extrema(labels)
     span = Int128(hi) - Int128(lo) + 1
-    span <= 4 * length(labels) + 64 || return _brm_label_positions_hashed(values, labels)
+    span <= 4 * length(labels) + 64 || return _brm_each_label_position_hashed(f, values, labels)
     table = zeros(Int, Int(span))
     for (i, v) in enumerate(labels)
         table[Int(Int128(v) - lo) + 1] = i
     end
-    positions = Vector{Int}(undef, length(values))
     for (r, v) in enumerate(values)
-        positions[r] = lo <= v <= hi ? table[Int(Int128(v) - lo) + 1] : 0
+        f(r, lo <= v <= hi ? table[Int(Int128(v) - lo) + 1] : 0)
     end
-    positions
 end
-_brm_label_positions(values::AbstractVector, labels::AbstractVector) =
-    _brm_label_positions_hashed(values, labels)
+_brm_each_label_position(f, values::AbstractVector, labels::AbstractVector) =
+    _brm_each_label_position_hashed(f, values, labels)
 # Rows usually arrive grouped by label, so a row repeating the previous row's
 # label reuses its lookup.
-function _brm_label_positions_hashed(values, labels)
+function _brm_each_label_position_hashed(f, values, labels)
     position = Dict{eltype(labels),Int}()
     for (i, v) in enumerate(labels)
         position[v] = i
     end
-    positions = Vector{Int}(undef, length(values))
-    isempty(values) && return positions
+    isempty(values) && return
     previous = first(values)
     at = get(position, previous, 0)
     for (r, v) in enumerate(values)
@@ -156,9 +189,8 @@ function _brm_label_positions_hashed(values, labels)
             previous = v
             at = get(position, v, 0)
         end
-        positions[r] = at
+        f(r, at)
     end
-    positions
 end
 
 # `ragged(x, group)` or `ragged(x, group, cells)` — the kernel positional a
@@ -326,29 +358,51 @@ function brm_ragged_rows_ordered(names, groups, cells, order, axes...)
         prefix="RK backend")
 end
 function _brm_ragged_rows_graph(x, group, groups, cell, cells, axis_names, axes)
+    ev_vals, labels = _brm_ragged_rows_labels(x, group, groups, cell, cells, axis_names, axes)
+    _brm_kernel_ragged_partition(x, group, ev_vals, labels; prefix="RK backend")
+end
+# Refuses what `brm_ragged_rows` refuses (`brm_ragged_rows_ordered` given
+# `order` and its `times`), with the same messages, without building the
+# partition.
+function _brm_check_ragged_rows(x, group, groups, cell, cells, axis_names, axes;
+                               order=nothing, times=nothing)
+    ev_vals, labels = _brm_ragged_rows_labels(x, group, groups, cell, cells, axis_names, axes)
+    _brm_kernel_check_ragged_partition(x, group, ev_vals, labels; prefix="RK backend")
+    order === nothing ||
+        _brm_kernel_check_order(times, order, group, length(groups); prefix="RK backend")
+    nothing
+end
+# The join's row labels and its cells' labels, once the cell labels and the
+# join's axis lengths are checked.
+function _brm_ragged_rows_labels(x, group, groups, cell, cells, axis_names, axes)
     prefix = "RK backend"
     labels = _brm_kernel_subject_values(cells, cell; prefix)
     ev_vals = _brm_group_values(groups)
     _brm_kernel_check_ragged_axis(x, group,
         Tuple{Symbol,Int}[(nm, length(a)) for (nm, a) in zip(axis_names, axes)],
         length(ev_vals); prefix)
-    _brm_kernel_ragged_partition(x, group, ev_vals, labels; prefix)
+    ev_vals, labels
 end
 
 # `ragged(x, group; order=time)`: each cell's rows in ascending `time`, ties in
 # row order.
 function _brm_kernel_order_rows!(rows, times, order::Symbol, group::Symbol, nrows;
                                  prefix="BRM kernel preparation")
+    _brm_kernel_check_order(times, order, group, nrows; prefix)
+    for cell in rows
+        sort!(cell; by=r -> times[r], alg=Base.Sort.DEFAULT_STABLE)
+    end
+    rows
+end
+function _brm_kernel_check_order(times, order::Symbol, group::Symbol, nrows;
+                                prefix="BRM kernel preparation")
     got = times isa AbstractVector ? "$(length(times)) rows" : typeof(times)
     times isa AbstractVector && length(times) == nrows || error(
         "$prefix: kernel(...) `ragged(…, $group; order=$order)`: `$order` must be a ",
         "column on `$group`'s $nrows rows; got $got.")
     any(ismissing, times) && error(
         "$prefix: kernel(...) `ragged(…, $group; order=$order)`: `$order` has missing values.")
-    for cell in rows
-        sort!(cell; by=r -> times[r], alg=Base.Sort.DEFAULT_STABLE)
-    end
-    rows
+    nothing
 end
 
 # The `into=` target and `order=` column of a `ragged(...)` kernel positional,

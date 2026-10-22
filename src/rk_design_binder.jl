@@ -241,8 +241,9 @@ end
 # A kernel's per-cell inputs and its cell label column must agree on the cell
 # count, its cell labels must be unique and each ragged join's labels and axis
 # lengths must hold, as `_rk_prepare_kernel_value` requires: a plate iterating
-# a shorter input would silently drop cells. The joins are checked by the
-# function the graph computes their partitions with.
+# a shorter input would silently drop cells. Each join is checked as the graph
+# checks it when it computes the partition, without building the partition,
+# which binding never reads: the graph computes it once the design is bound.
 function _rk_design_cell_check(kernel, design)
     has(column) = column !== nothing && _brm_df_has_column(design, column)
     per_cell = unique!(Symbol[input.column for input in kernel.inputs
@@ -261,11 +262,10 @@ function _rk_design_cell_check(kernel, design)
             "RK backend: kernel `$name` positional inputs disagree on subject count")
         column(c) = _brm_df_column(design, c)
         for entry in joins
-            rows = _brm_ragged_rows_graph(entry.x, entry.group, column(entry.group),
+            _brm_check_ragged_rows(entry.x, entry.group, column(entry.group),
                 entry.cell, column(entry.cell), entry.axes,
-                Tuple(column(axis) for axis in entry.axes))
-            entry.order === nothing || _brm_kernel_order_rows!(rows, column(entry.order),
-                entry.order, entry.group, length(column(entry.group)); prefix="RK backend")
+                Tuple(column(axis) for axis in entry.axes); entry.order,
+                times=entry.order === nothing ? nothing : column(entry.order))
         end
         nothing
     end

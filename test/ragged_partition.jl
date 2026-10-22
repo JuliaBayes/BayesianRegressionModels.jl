@@ -6,6 +6,10 @@
 # before filling it. Oracle: the original partition, a `Dict{Any,Int}` lookup
 # and `push!` per row, on every label kind; the same refusals.
 #
+# The RK design binder validates each design's joins without building their
+# partitions (snag `rk-design-binder-9d6b7561`): `_brm_check_ragged_rows`
+# refuses exactly what `brm_ragged_rows` refuses, with the same message.
+#
 # Run: julia --startup-file=no --project=test test/ragged_partition.jl
 using Test
 using BayesianRegressionModels
@@ -68,4 +72,59 @@ end
     @test_throws "label(s) Any[1] in `g` name no subject" partition([1], Int[])
     @test_throws "must be a column with no missing labels" partition([1, missing], [1])
     @test_throws "must be a column with no missing labels" partition(Any[missing], [1])
+end
+
+outcome(f) = try f(); :ok catch e; sprint(showerror, e) end
+
+@testset "a join is validated as its partition validates it, without building it" begin
+    rng = Xoshiro(9)
+    # Every row's label names a cell exactly when its position is nonzero.
+    for cells in (collect(1:7), [1, 10^9, 7], ["s1", "s2"], Any[1, "a"], Int[]),
+            ev in (isempty(cells) ? Int[] : cells[rand(rng, eachindex(cells), 30)],
+                [cells; 42], Any["zz"], Int[])
+        @test BRM._brm_labels_name_cells(ev, cells) ==
+            all(!iszero, BRM._brm_label_positions(ev, cells))
+    end
+    # brm_ragged_rows(names, groups, cells, axes...) against the binder's check,
+    # on accepted joins and on each refusal.
+    joins = [
+        ([3, 1, 3, 2], [1, 2, 3], ([0.1, 0.2, 0.3, 0.4],)),          # accepted
+        (["b", "a", "b"], ["a", "b"], ()),                            # accepted, no axis
+        (Int[], [1, 2], (Float64[],)),                                # zero-row axis
+        ([1, 42, 42], [1, 2], ([0.1, 0.2, 0.3],)),                    # unknown label
+        (["a", "zz"], ["a"], ([0.1, 0.2],)),
+        ([1, missing], [1, 2], ([0.1, 0.2],)),                        # missing label
+        ([1, 2, 1], [1, 2], ([0.1, 0.2],)),                           # axis length
+        ([1, 2], [1, 1], ([0.1, 0.2],)),                              # repeated cell label
+        ([1, 2], [1, missing], ([0.1, 0.2],)),                        # missing cell label
+    ]
+    for (groups, cells, axes) in joins
+        names = [:x, :g, :c, (:a for _ in axes)...]
+        built = outcome(() -> BRM.brm_ragged_rows(names, groups, cells, axes...))
+        @test built == outcome(() -> BRM._brm_check_ragged_rows(:x, :g, groups, :c, cells,
+            names[4:end], axes))
+        # The ordered join, with an order column of the right length, too short,
+        # and holding a missing value.
+        length(groups) < 2 && continue
+        for times in ([reverse(eachindex(groups))...], Int[9], [missing; ones(length(groups) - 1)])
+            ordered = outcome(() -> BRM.brm_ragged_rows_ordered([:x, :g, :c, :t, names[4:end]...],
+                groups, cells, times, axes...))
+            @test ordered == outcome(() -> BRM._brm_check_ragged_rows(:x, :g, groups, :c, cells,
+                names[4:end], axes; order=:t, times))
+        end
+    end
+    @test outcome(() -> BRM._brm_check_ragged_rows(:x, :g, [1, 42], :c, [1], [], ())) ==
+        "RK backend: kernel(...) `ragged(x, g)`: label(s) Any[42] in `g` name no subject " *
+        "in the kernel's per-subject frame. Every event row must belong to a subject this " *
+        "kernel walks."
+    # The check builds no partition: on a 24,000-row join it allocates less
+    # than one integer per row (the cell labels and a lookup table).
+    for (groups, cells) in ((fill(7, 24_000), [7]), (repeat(1:400; inner=60), collect(1:400)),
+            (repeat(["n$(j)" for j in 1:400]; inner=60), ["n$(j)" for j in 1:400]))
+        axis = (zeros(length(groups)),)
+        check() = BRM._brm_check_ragged_rows(:x, :g, groups, :c, cells, [:a], axis)
+        build() = BRM.brm_ragged_rows([:x, :g, :c, :a], groups, cells, axis...)
+        check(); build()
+        @test @allocated(check()) < 8 * length(groups) < @allocated(build())
+    end
 end

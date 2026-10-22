@@ -47,6 +47,31 @@ pk(d) = @brm d begin
         conc[i] = mu
     end
 end
+# Dose rows read in dose order (`order=dose_rank`), whatever order a design
+# lists them in.
+function ordered_curve(t, dose_time, log_k, log_F)
+    k = exp(log_k)
+    map(t) do ti
+        c = 0.0
+        for (j, td) in enumerate(dose_time)
+            ti > td && (c += exp(log_F[j] - k * (ti - td)))
+        end
+        c
+    end
+end
+pk_ordered(d) = @brm d begin
+    sigma ~ Exponential(1)
+    log_k ~ 1 + (1 | subject)
+    log_F ~ 0 + vessel
+    effect(log_k, Intercept) ~ Normal(0, 1)
+    effect(log_F, :) ~ Normal(0, 0.5)
+    doses = groups(dose_subject => subject; order=dose_rank)
+    @plate for i in eachindex(log_k)
+        mu = ordered_curve(t[i], dose_time[i], log_k[i], log_F[doses[i]])
+        y[i] ~ Normal(mu, sigma)
+        conc[i] = mu
+    end
+end
 # A flat model: a string factor, an automatic HSGP interval and a zscale.
 flat(d) = @brm d begin
     sigma ~ Exponential(1)
@@ -142,6 +167,16 @@ function pk_data(rng, n, reads; labels=["s$(j)" for j in 1:n], responses=true)
         diet=categorical(rand(rng, 1:3, n * doses); levels=1:3, ordered=true),
         base_subject=repeat(labels; inner=bases),
         base_time=repeat([-1.0, 1.0], n))
+    responses || return data
+    merge(data, (; y=[0.02 .+ abs.(randn(rng, reads)) for _ in 1:n]))
+end
+# Three dose rows per subject, listed out of dose order.
+function ordered_data(rng, n, reads; labels=["s$(j)" for j in 1:n], responses=true)
+    data = (; subject=labels, t=[sort!(48 .* rand(rng, reads)) for _ in 1:n],
+        dose_time=[[0.0, 12.0, 24.0] for _ in 1:n],
+        dose_subject=repeat(labels; inner=3),
+        dose_rank=reduce(vcat, [shuffle(rng, 1:3) for _ in 1:n]),
+        vessel=Float64.(rand(rng, 0:1, 3n)))
     responses || return data
     merge(data, (; y=[0.02 .+ abs.(randn(rng, reads)) for _ in 1:n]))
 end
@@ -279,6 +314,22 @@ end
     @test_throws "not one of the" frozen(merge(fitted,
         (; subject=["s1", "zz"], dose_subject=repeat(["s1", "zz"]; inner=3),
            base_subject=repeat(["s1", "zz"]; inner=2))))
+end
+
+@stestset "an ordered join is checked per design as reprocess checks it" begin
+    rng = Xoshiro(17)
+    rk = RKBRMI(BM.pk_ordered(ordered_data(rng, 5, 4)))
+    designs = [without(ordered_data(rng, n, r; labels=labels), :y)
+        for (n, r, labels) in ((2, 3, ["s2", "s5"]), (3, 6, ["s1", "s3", "s4"]), (1, 2, ["s3"]))]
+    binder = check_binder(rk, designs; want=:conc)
+    # The partition is a graph value of the bound order column, so one
+    # lowering serves every design.
+    @test length(binder.classes) == 1 && !occursin("replayed in full", sprint(show, binder))
+    @test :dose_rank in keys(binder(designs[1]))
+    base = designs[1]
+    @test_throws "must be a column on" reprocess(rk, merge(base, (; dose_rank=base.dose_rank[1:end-1])))
+    @test_throws "must be a column on" binder(merge(base, (; dose_rank=base.dose_rank[1:end-1])))
+    @test_throws "name no subject" binder(merge(base, (; dose_subject=[base.dose_subject[1:end-1]; "zz"])))
 end
 
 @stestset "an input planned from the design replays every design" begin
