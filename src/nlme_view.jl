@@ -453,32 +453,6 @@ function _brm_nlme_unit_point(backend::RKBRMI, view::BRMNLMEView;
     u
 end
 
-# Which subject each pointwise density element belongs to, per observed name:
-# a `ragged(y, g)` axis whose labels are subject labels, or else one element
-# per row of the grouping column (flat rows on the grouping axis, or one in-cell
-# array per plate cell). Anything else is refused rather than attributed by
-# position.
-_brm_nlme_ragged_labels(plan, name) = nothing
-_brm_nlme_ragged_labels(plan::_RKHeldOutPlan, name) =
-    _brm_nlme_ragged_labels(plan.parent, name)
-# A ragged join gathers its response cell by cell (`_rk_kernel_observed_layout`),
-# so its densities follow the row partition, not the flat row order: the labels
-# are gathered by the same partition. A join observed per subject
-# (`_RKNestedObservation`) instead has one density array per kernel subject,
-# which is one row of the grouping column.
-function _brm_nlme_ragged_labels(plan::_RKValuePlan, name)
-    for o in plan.observations
-        o.name === name || continue
-        o isa _RKNestedObservation && return nothing
-        lhs = o.lhs
-        lhs isa ExprColumn && getf(lhs) === ragged || return nothing
-        kernels = Tuple(a for a in plan.assignments if a isa _RKPreparedKernelAssignment)
-        layout = _rk_kernel_observed_layout(o, kernels)
-        return parent(parent(getargs(lhs)[2]))[brm_flatten_cells(layout.rows)]
-    end
-    nothing
-end
-
 _brm_nlme_gaussian_plan(plan::_RKHeldOutPlan) =
     isempty(plan.held_out) && _brm_nlme_gaussian_plan(plan.parent)
 _brm_nlme_gaussian_plan(plan::_RKStructuralPlan) =
@@ -618,7 +592,6 @@ function _brm_nlme_attribution(backend::RKBRMI, view::BRMNLMEView, fields)
     end
     any(iszero, row_subject) && error(
         "brm_nlme_model: internal: a row of `$(view.group)` belongs to no subject")
-    index = Dict(_brm_transport_level(l) => i for (i, l) in enumerate(view.levels))
     attribution = Pair{Symbol,Vector{Int}}[]
     for (name, values) in pairs(fields)
         m = length(values)
@@ -630,27 +603,14 @@ function _brm_nlme_attribution(backend::RKBRMI, view::BRMNLMEView, fields)
             push!(attribution, name => row_subject[completion_rows])
             continue
         end
-        # A ragged axis is attributed by its labels even when its length
-        # happens to equal the grouping column's.
-        labels = _brm_nlme_ragged_labels(backend.plan, name)
-        if labels === nothing
-            m == L || _brm_nlme_error(
-                "brm_nlme_model: observation `$name` has $m pointwise densities, neither " *
-                "one per row of `$(view.group)` ($L) nor a `ragged(..., group)` axis; its " *
-                "densities cannot be attributed to subjects")
-            push!(attribution, name => row_subject)
-            continue
-        end
-        length(labels) == m || _brm_nlme_error(
-            "brm_nlme_model: observation `$name` has $m pointwise densities but its " *
-            "ragged grouping column has $(length(labels)) labels")
-        subjects = map(labels) do label
-            get(index, _brm_transport_level(label)) do
-                _brm_nlme_error("brm_nlme_model: label $(repr(label)) of observation " *
-                    "`$name` is not a level of `$(view.group)`")
-            end
-        end
-        push!(attribution, name => subjects)
+        # One density element per row of the grouping column: flat rows on the
+        # grouping axis, or one in-cell array per plate cell. Anything else is
+        # refused rather than attributed by position.
+        m == L || _brm_nlme_error(
+            "brm_nlme_model: observation `$name` has $m pointwise densities, not " *
+            "one per row of `$(view.group)` ($L); its densities cannot be " *
+            "attributed to subjects")
+        push!(attribution, name => row_subject)
     end
     attribution
 end
@@ -709,8 +669,7 @@ end
 # A subject's conditional density is a sum of RK query cells, in groups that
 # share cell positions. The subject plate group holds the observations with one
 # cell per subject row: in-cell observations and formula observations of kernel
-# output observed per subject (`_RKNestedObservation`, including a ragged
-# join). Each completed covariate's observed values form one group whose
+# output observed per subject (`_RKNestedObservation`). Each completed covariate's observed values form one group whose
 # entries belong to the subject rows they were observed on. A flat grouped
 # observation has no such cell: its model remains available through lockstep
 # evaluation only. Returns `(; names, positions)` per group, `positions[i]`

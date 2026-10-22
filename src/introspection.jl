@@ -84,13 +84,9 @@ _data_backed_or_nothing(_) = nothing
 _data_backed_inner(x, ::DataColumn) = x
 _data_backed_inner(_x, _) = nothing
 
-# Observation decorators whose LHS carries structural arguments still own the
-# inner data-backed response. Keep this deliberately narrower than a generic
-# call peel: ordinary unary calls on the LHS are link declarations for a linear
-# predictor, whereas `ragged(y, group)` is explicitly a likelihood boundary.
+# The observed response a `~` LHS names. Narrower than a generic call peel:
+# a unary call on the LHS is a link declaration for a linear predictor.
 _observed_lhs_or_nothing(x) = _data_backed_or_nothing(x)
-_observed_lhs_or_nothing(x::ExprColumn{typeof(ragged)}) =
-    _data_backed_or_nothing(first(getargs(x)))
 function _observed_lhs_or_nothing(x::JointResponseColumn)
     all(c -> c isa NamedColumn && parent(c) isa DataColumn,
         joint_response_columns(x)) ? x : nothing

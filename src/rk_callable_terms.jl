@@ -26,7 +26,7 @@ end
 
 # A data preparation recipe is a named statistical kernel over its inputs.
 # Data-only responses instead use direct definitions, which RKPPL evaluates
-# once, at binding, including a ragged join observed through LogDensity.
+# once, at binding.
 _rk_ast_data_preparation!(defs, taken, ::Val{recipe}, inputs...) where {recipe} =
     _rk_ast_statistical_call!(defs, taken, recipe, inputs...; kernel=true)
 _rk_ast_data_preparation!(defs, taken, ::Val{:brm_flatten_response}, cells) =

@@ -252,9 +252,6 @@ _brm_register_sampling_lhs!(_, @nospecialize(_lhs)) = nothing
 _brm_register_sampling_lhs!(ctx::AbstractDict,
                             lhs::ExprColumn{typeof(mi)}) =
     _brm_register_skipped_inner!(ctx, only(getargs(lhs)))
-_brm_register_sampling_lhs!(ctx::AbstractDict,
-                            lhs::ExprColumn{typeof(ragged)}) =
-    _brm_register_skipped_inner!(ctx, first(getargs(lhs)))
 
 _brm_register_skipped_inner!(_, _) = nothing
 _brm_register_skipped_inner!(ctx::AbstractDict, inner::NamedColumn) =

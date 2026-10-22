@@ -245,10 +245,8 @@ function _rk_kernel_observation_modifier(observation, distribution, bound_names)
         bound(:lower), bound(:upper))
 end
 
-# A ragged join's values in partition order, and grouped per subject. An
-# absent replay response stays absent.
-_rk_join_values(raw, rows) = raw[brm_flatten_cells(rows)]
-_rk_join_values(raw::_BRMAbsentResponse, rows) = raw
+# Values grouped per subject by a row partition. An absent replay response
+# stays absent.
 _rk_gather_rows(values, rows) = [values[r] for r in rows]
 _rk_gather_rows(values::_BRMAbsentResponse, rows) = values
 
@@ -519,11 +517,8 @@ end
 # subject is observed per subject when every value its law and bounds read is
 # either per subject (a kernel's cells, grouped data with one array per
 # subject) or shared (a number, scalar data, a scalar parameter), through BRM's
-# elementwise arithmetic and row-local callables. A ragged join (`ragged(y, g)`
-# over one flat column) is observed per subject too: its response, and every
-# data column with one value per joined row, are grouped by the join's row
-# partition (`gathered`). Returns the per-subject cells and those gathered
-# columns, or `nothing` to keep the flattened route: weights, missing entries,
+# elementwise arithmetic and row-local callables. Returns the per-subject
+# cells, or `nothing` to keep the flattened route: weights, missing entries,
 # keyword laws and other callables.
 function _rk_nested_kernel_cells(observation, layout, kernels, columns, parameters)
     layout.lengths === nothing && return nothing
@@ -534,36 +529,19 @@ function _rk_nested_kernel_cells(observation, layout, kernels, columns, paramete
         _brm_prepare_expr(modifier.base)
     distribution isa _BRMPreparedExpr && isempty(distribution.kwargs) || return nothing
     cells = Dict{Symbol,Symbol}()
-    gathered = Set{Symbol}()
     context = (; kernels, columns, parameters, name=observation.name,
-        lengths=layout.lengths, joined=layout.rows === nothing ? nothing :
-            sum(length, layout.rows; init=0), gathered)
+        lengths=layout.lengths)
     _rk_nested_law_cells!(cells, distribution.callable, distribution, context) || return nothing
-    modifier === nothing && return (; cells, gathered)
+    modifier === nothing && return cells
     all(bound -> bound === nothing ||
             _rk_nested_cells!(cells, _brm_prepare_expr(bound), context),
         (modifier.lower, modifier.upper)) || return nothing
-    (; cells, gathered)
-end
-
-# Bind a ragged join's per-subject cells: the response and each gathered
-# column are grouped by the join's row partition, as data. The partition is
-# BRM's own preparation of the authored rows, so new data rebinds through the
-# same planning; RKPPL observes a bounded (censored, truncated) response only
-# from a bound column, never from a derived definition.
-function _rk_prepare_nested_join!(columns, taken, observation, layout, nested, raw)
-    columns[observation.name] = _rk_gather_rows(raw, layout.rows)
-    for name in sort!(collect(nested.gathered))
-        key = _rk_ast_fresh_name(string(observation.name, "_cells_", name), taken)
-        columns[key] = _rk_gather_rows(columns[name], layout.rows)
-        nested.cells[name] = key
-    end
-    nested.cells
+    cells
 end
 
 # Data bounds read per subject are validated as the flattened route validates
-# them, on their concatenated values. `response` holds the observed values in
-# the bounds' row order: one array per subject, or a join's flat column.
+# them, on their concatenated values. `response` holds one array of observed
+# values per subject, in the bounds' row order.
 # An absent replay response has no values to compare with its bounds; RKPPL
 # still validates the bounds themselves.
 _rk_validate_nested_bounds(observation, ::_BRMAbsentResponse, data) = nothing
@@ -604,13 +582,6 @@ function _rk_nested_cells!(cells, value::_BRMPreparedRef, context)
     data = get(context.columns, value.name, nothing)
     if data isa AbstractVector{<:AbstractVector}
         _rk_check_argument_groups(context.name, value.name, data, context.lengths)
-        cells[value.name] = value.name
-        return true
-    end
-    # One value per joined row: grouped by the join's partition.
-    if context.joined !== nothing && data isa AbstractVector && length(data) != 1 &&
-            length(data) == context.joined
-        push!(context.gathered, value.name)
         cells[value.name] = value.name
         return true
     end
@@ -760,34 +731,21 @@ function _rk_kernel_input_port(kernels, column)
     isempty(ports) ? nothing : first(ports)
 end
 
-function _rk_kernel_observed_layout(observation, kernels)
-    lhs = observation.lhs
-    if lhs isa ExprColumn && getf(lhs) === ragged
-        value, group = getargs(lhs)
-        matches = [kernel for kernel in kernels if kernel.group_values !== nothing &&
-            kernel.name in _brm_prepared_references(observation.distribution)]
-        length(matches) == 1 || error(
-            "RK backend: response `$(observation.name)` needs one kernel subject axis for its ragged join")
-        partition = _brm_kernel_ragged_rows(value, group, only(matches).group_values; prefix="RK backend")
-        values = _rk_join_values(parent(parent(value)), partition.rows)
-        return (; values, rows=partition.rows, lengths=length.(partition.rows))
-    end
-    _rk_observed_layout(observation.response)
-end
-_rk_observed_layout(response) = (; values=response, rows=nothing, lengths=nothing)
+# A kernel-observed response: its flat values, and its per-subject lengths
+# when it holds one array per subject.
+_rk_observed_layout(response) = (; values=response, lengths=nothing)
 _rk_observed_layout(response::AbstractVector{<:AbstractVector}) =
-    (; values=brm_flatten_cells(response), rows=nothing, lengths=length.(response))
+    (; values=brm_flatten_cells(response), lengths=length.(response))
 # An absent array-per-index response keeps the fitted nested route; each cell
 # takes its shape from the data it reads, so it has no lengths to check.
 _rk_observed_layout(response::_BRMAbsentResponse{<:AbstractVector}) =
-    (; values=response, rows=nothing, lengths=response)
+    (; values=response, lengths=response)
 
-# The partition fixes likelihood geometry; its values are produced from the
-# original response port by the emitted numerical graph. A ragged join's row
-# partition (one group of response rows per kernel subject) is data, so it is
-# a bound port like a kernel's ragged input rows, never a literal in source.
-# A kernel port already holding the raw response (`port`) is that source, so
-# the nested values enter the graph once.
+# The per-subject lengths fix likelihood geometry; the flat values are produced
+# from the original response port by the emitted numerical graph. A flat bound
+# of a per-subject response is one group of rows. A kernel port already holding
+# the raw response (`port`) is that source, so the nested values enter the
+# graph once.
 function _rk_prepare_kernel_observed_values!(columns, taken, derived, name, layout, raw;
         port=nothing)
     columns[name] = layout.values
@@ -795,11 +753,11 @@ function _rk_prepare_kernel_observed_values!(columns, taken, derived, name, layo
     source = port !== nothing && isequal(get(columns, port, nothing), raw) ? port :
         _rk_ast_fresh_name(string(name, "_raw_response"), taken)
     columns[source] = raw
-    expression = if layout.rows === nothing && raw isa AbstractVector{<:AbstractVector}
+    expression = if raw isa AbstractVector{<:AbstractVector}
         Expr(:_rk_data_preparation, :brm_flatten_response, source)
     else
         groups = _rk_ast_fresh_name(string(name, "_rows"), taken)
-        columns[groups] = layout.rows === nothing ? [collect(eachindex(raw))] : layout.rows
+        columns[groups] = [collect(eachindex(raw))]
         Expr(:_rk_data_preparation, :brm_gather_response, source, groups)
     end
     push!(derived, _RKDerivedSpec(name, expression, name))
@@ -807,16 +765,15 @@ function _rk_prepare_kernel_observed_values!(columns, taken, derived, name, layo
 end
 
 # The bound port whose groups fix a kernel-observed response's rows: its
-# per-subject cells, or its ragged-join partition. Argument readers derive
-# their row geometry from it, so new data of the same body rebinds it.
+# per-subject cells. Argument readers derive their row geometry from it, so new
+# data of the same body rebinds it.
 function _rk_observation_geometry_port(plan, observation)
     expressions = [spec.expression for spec in plan.regression.derived
         if spec.name === observation.name && spec.expression.head === :_rk_data_preparation]
     length(expressions) == 1 || error(
         "RK backend: internal: response `$(observation.name)` needs one row-geometry preparation")
-    recipe, source, groups... = only(expressions).args
+    recipe, source = only(expressions).args
     recipe === :brm_flatten_response && return source
-    recipe === :brm_gather_response && return only(groups)
     error("RK backend: internal: response `$(observation.name)` row geometry " *
         "comes from unknown preparation `$recipe`")
 end
@@ -864,21 +821,6 @@ function _rk_observation_argument_rows!(defs, statements, taken, observation, la
     _BRMPreparedRef(name, :whole)
 end
 
-function _rk_observation_argument_rows!(defs, statements, taken, observation, layout,
-        geometry, argument, raw::AbstractVector)
-    layout.rows === nothing && return argument
-    length(raw) == 1 && return argument
-    length(raw) == length(layout.values) || error(
-        "RK backend: response `$(observation.name)` argument `$(argument.name)` " *
-        "has $(length(raw)) rows; expected $(length(layout.values))")
-    name = _rk_ast_fresh_name("$(observation.name)_rows_$(argument.name)", taken)
-    # The original response join partitions these rows; the bound partition
-    # port orders them and the argument gather stays in the graph.
-    push!(statements, Expr(:(=), name, Expr(:ref, argument.name,
-        Expr(:call, :brm_flatten_cells, geometry()))))
-    _BRMPreparedRef(name, :whole)
-end
-
 _rk_align_observation_argument!(defs, statements, taken, columns, observation, layout,
     geometry, aligned, argument) = argument
 
@@ -910,7 +852,7 @@ function _rk_align_kernel_observation_arguments!(defs, statements, bindings, tak
         observation, distribution)
     kernels = Tuple(a for a in plan.assignments if a isa _RKPreparedKernelAssignment)
     isempty(kernels) && return distribution
-    layout = _rk_kernel_observed_layout(observation, kernels)
+    layout = _rk_observed_layout(observation.response)
     layout.lengths === nothing && return distribution
     # Prepare the constructor's arguments together in authored source. A
     # data-only model assignment is evaluated by RKPPL at binding; keeping
@@ -1001,16 +943,13 @@ function _rk_kernel_response_modifier!(columns, taken, derived, observation, lay
             length(raw) == length(layout.values) || error(
                 "RK backend: response `$(observation.name)` $label bound has " *
                 "$(length(raw)) rows; expected $(length(layout.values))")
-            layout.rows === nothing ? collect(raw) :
-                raw[brm_flatten_cells(layout.rows)]
+            collect(raw)
         end
         # Keep the flat bound available on its original axis for other formula
         # terms. Only this likelihood consumes the gathered bound column.
         key = _rk_ast_fresh_name(
             "$(observation.name)_$(label)_$(name(bound))_grouped", taken)
-        bound_layout = (; values=grouped,
-            rows=raw isa AbstractVector{<:AbstractVector} ? nothing : layout.rows,
-            lengths=layout.lengths)
+        bound_layout = (; values=grouped, lengths=layout.lengths)
         _rk_prepare_kernel_observed_values!(columns, taken, derived, key, bound_layout, raw)
         NamedColumn(key, DataColumn(grouped))
     end
