@@ -334,7 +334,7 @@ end
 _brm_observation_link_ok(lhs) =
     _data_backed_or_nothing(lhs) !== nothing
 function _brm_observation_link_ok(lhs::ExprColumn)
-    (getf(lhs) === mi || getf(lhs) === ragged) || return false
+    getf(lhs) === mi || return false
     args = getargs(lhs)
     isempty(args) && return false
     _brm_observation_link_ok(first(args))

@@ -552,7 +552,7 @@ end
 function _brm_powerscale_gate_likelihood!(key::Symbol, lhs, rhs)
     plain = lhs isa NamedColumn && parent(lhs) isa DataColumn
     plain || error("brm_powerscale_inputs: response `$key` has a decorated " *
-                   "LHS (link / `mi` / `ragged` / joint), outside the " *
+                   "LHS (link / `mi` / joint), outside the " *
                    "covered surface. Use the refit comparison instead.")
     rhs isa ExprColumn && getf(rhs) in _BRM_POWERSCALE_LIKELIHOODS || error(
         "brm_powerscale_inputs: response `$key` uses " *

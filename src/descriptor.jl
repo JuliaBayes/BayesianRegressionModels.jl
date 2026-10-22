@@ -631,10 +631,10 @@ _brm_preproc_column(::Val{:total_basis}, _) = nothing
 _brm_preproc_column(::Val{:total_group_design}, _) = nothing
 
 # The dataframe columns an observation's `data_source` key holds. A plain
-# response IS its column. A joint response names its member columns. A ragged
-# response read by a cell (`ragged(y, g)` beside `@plate`, or a `kernel(...)`
-# positional) is gathered from its flat column `y` into a derived key such as
-# `kernel_<cell>_y_ragged`, which no dataframe has.
+# response IS its column. A joint response names its member columns. A
+# response a `kernel(...)` positional reads as `ragged(y, g, …)` (what `@plate`
+# lowers a cell's `y[rows[i]]` to) is gathered from its flat column `y` into a
+# derived key such as `kernel_<cell>_y_ragged`, which no dataframe has.
 _brm_response_columns(source, ::Nothing) = (source,)
 _brm_response_columns(source, e::PreprocEntry) =
     _brm_response_columns(source, Val(e.kind), e.raw_ref)
