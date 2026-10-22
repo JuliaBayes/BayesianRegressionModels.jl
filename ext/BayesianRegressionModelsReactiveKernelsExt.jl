@@ -115,16 +115,20 @@ end
 _RKProgram(emitted::BRM._RKEmittedProgram) = _RKProgram(emitted, _rk_emit_module(emitted))
 
 # Lowering reads the data values' shapes (rkppl-use §1), so each binding
-# lowers; the definitions are evaluated once per program.
-function _rk_lower_program(program::_RKProgram, plan::_RK_PLAN_TYPES)
+# lowers; the definitions are evaluated once per program. A data-free plan
+# (`RKBRMI(brmi, state)`) lowers with its fitted values `frozen` and without the
+# fit-role inputs they were fitted from, which RKPPL binds absent.
+function _rk_lower_program(program::_RKProgram, plan::_RK_PLAN_TYPES; frozen=nothing)
     columns = BRM._rk_source_data_columns(plan, program.emitted)
-    unbound = lower_rkppl(program.emitted.main,
-        columns; mod=program.mod,
-        conditioned=BRM._rk_observed_names(plan))
-    unbound, columns
+    conditioned = BRM._rk_observed_names(plan)
+    frozen === nothing && return lower_rkppl(program.emitted.main, columns;
+        mod=program.mod, conditioned), columns
+    foreach(name -> delete!(columns, name), keys(frozen.inputs))
+    lower_rkppl(program.emitted.main, columns; mod=program.mod, conditioned,
+        frozen), columns
 end
-function _rk_bind_program(program::_RKProgram, plan::_RK_PLAN_TYPES)
-    unbound, columns = _rk_lower_program(program, plan)
+function _rk_bind_program(program::_RKProgram, plan::_RK_PLAN_TYPES; frozen=nothing)
+    unbound, columns = _rk_lower_program(program, plan; frozen)
     bind_data(unbound, columns)
 end
 
@@ -141,8 +145,40 @@ _rk_program(backend::BRM.RKBRMI) =
 # A backend's binding of that program to its own data, bound once. Every
 # query of the backend reads it.
 _rk_translated(backend::BRM.RKBRMI) =
-    BRM._rk_once!(() -> _rk_bind_program(_rk_program(backend), backend.plan),
-        backend.bound)
+    BRM._rk_once!(() -> _rk_bind_program(_rk_program(backend), backend.plan;
+        frozen=_rk_frozen(backend)), backend.bound)
+# The fitted values a data-free backend binds frozen.
+_rk_frozen(backend::BRM.RKBRMI) = backend.fitted === nothing ? nothing : backend.fitted.frozen
+
+# A state's frozen values less those fitted from `dropped` fit-role inputs (a
+# resampled grouping's), which the replay binds with its own data.
+function BRM._rk_frozen_subset(state::BRM.BRMFittedState, dropped::Set{Symbol})
+    frozen = state.fitted
+    isempty(dropped) && return frozen
+    keep = [name for name in keys(frozen.values)
+        if isempty(intersect(state.fitted_reads[name], dropped))]
+    inputs = [name for name in keys(frozen.inputs) if !(name in dropped)]
+    FrozenValues(NamedTuple{Tuple(keep)}(Tuple(frozen.values[name] for name in keep)),
+        NamedTuple{Tuple(inputs)}(Tuple(frozen.inputs[name] for name in inputs)))
+end
+
+# The fitted values of `names` in a backend's binding, as RKPPL freezes them.
+BRM._rk_frozen_values(backend::BRM.RKBRMI, names) =
+    frozen_values(_rk_translated(backend), names)
+
+# A data-free plan's translated program, binding and graph: the program and
+# graph of `previous` (a data-free backend it replays) when its callables are
+# the same, as `reprocess` shares a fit's.
+function BRM._rk_fitted_build(emitted::BRM._RKEmittedProgram, plan, frozen, previous)
+    if previous !== nothing && BRM._rk_same_callables(BRM._rk_retained_program(previous), emitted)
+        program = _rk_program(previous)
+        bound = _rk_bind_program(program, plan; frozen)
+        return previous.program, BRM._RKOnce(bound), previous.model
+    end
+    program = _RKProgram(emitted)
+    bound = _rk_bind_program(program, plan; frozen)
+    BRM._RKOnce(program), BRM._RKOnce(bound), build_kernel(bound)
+end
 BRM._rk_retained_program(backend::BRM.RKBRMI) = _rk_program(backend).emitted
 
 const _RK_STATISTICAL_MODEL_MODULE = Ref{Union{Nothing,Module}}(nothing)
@@ -242,7 +278,16 @@ end
 
 BRM.rk_bound_plan(backend::BRM.RKBRMI) = _rk_translated(backend)
 
-BRM.rk_bound_data(backend::BRM.RKBRMI) = _rk_bound_columns(BRM.rk_bound_plan(backend).columns)
+BRM.rk_bound_data(backend::BRM.RKBRMI) = _rk_bound_inputs(BRM.rk_bound_plan(backend))
+# A binding's inputs: its columns, and the frozen values RK preparation takes as
+# HAVE values in place of the definitions it folds (not in `columns`).
+function _rk_bound_inputs(bound)
+    hasproperty(bound, :frozen) || return _rk_bound_columns(bound.columns)
+    folded = [name for name in keys(bound.frozen.values) if !haskey(bound.columns, name)]
+    isempty(folded) && return _rk_bound_columns(bound.columns)
+    merge(_rk_bound_columns(bound.columns),
+        NamedTuple{Tuple(folded)}(Tuple(bound.frozen.values[name] for name in folded)))
+end
 function _rk_bound_columns(columns)
     names = Tuple(keys(columns))
     NamedTuple{names}(Tuple(columns[name] for name in names))
@@ -252,9 +297,9 @@ end
 # later design of that kind binds into (lowering reads only the data's names,
 # numbers and arrays per index, rkppl-use §1).
 BRM._rk_design_lowering(replay::BRM.RKBRMI) =
-    first(_rk_lower_program(_rk_program(replay), replay.plan))
+    first(_rk_lower_program(_rk_program(replay), replay.plan; frozen=_rk_frozen(replay)))
 BRM._rk_bind_design_plan(lowering, columns) = bind_data(lowering, columns)
-BRM._rk_plan_columns(plan) = _rk_bound_columns(plan.columns)
+BRM._rk_plan_columns(plan) = _rk_bound_inputs(plan)
 
 function BRM.rk_restore_draws(backend::BRM.RKBRMI, U::AbstractMatrix)
     restore_draws(backend.model.layout, U)

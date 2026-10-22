@@ -69,8 +69,8 @@ function _brm_prepare_term(term::ExprColumn{typeof(s)}, target::Symbol,
     source, raw = _brm_term_data(:s, only(args), context)
     raw isa AbstractVector{<:Real} || error(
         "BRM term preparation: `s($source)` requires numeric data")
-    # A frozen replay fits the basis to the training data (`_brm_fit_source`).
-    fit = _brm_fit_spline(_brm_fit_source(source, raw))
+    # A frozen replay fits the basis to the training data (`_brm_fitted`).
+    fit = _brm_fitted(_brm_fit_spline, :spline, source, raw)
     Xnull, Zpen = _brm_apply_spline(fit, raw)
     sd_prior = _brm_term_prior_expression(term, target, context, :term_sd)
     _BRMPreparedTerm(s, source, (; target, fit, Xnull, Zpen, sd_prior), (source,))
@@ -86,8 +86,9 @@ function _brm_prepare_term(term::ExprColumn{typeof(t2)}, target::Symbol,
     second_source, z = _brm_term_data(:t2, args[2], context)
     (x isa AbstractVector{<:Real} && z isa AbstractVector{<:Real}) || error(
         "BRM term preparation: `t2` margins must be numeric data columns")
-    fit = _brm_fit_t2(_brm_fit_source(first_source, x),
-        _brm_fit_source(second_source, z); k)
+    fit = _brm_fitted(Symbol(:t2_, second_source, :_k, k), first_source, x) do x_fit
+        _brm_fit_t2(x_fit, _brm_fit_source(second_source, z); k)
+    end
     Xfixed, Zrr, Zrn, Znr = _brm_apply_t2(fit, x, z)
     sources = (first_source, second_source)
     sd_priors = ntuple(3) do index
@@ -130,8 +131,8 @@ function _brm_prepare_monotonic(term, target, context)
     isempty(getkwargs(term)) || error(
         "BRM term preparation: monotonic term does not accept keywords")
     source, raw = _brm_term_data(nameof(getf(term)), only(args), context)
-    # A frozen replay codes the training levels (`_brm_fit_source`).
-    levels = _brm_fit_levels(_brm_fit_source(source, raw))
+    # A frozen replay codes the training levels (`_brm_fitted`).
+    levels = _brm_fitted_levels(source, raw)
     idx = _brm_apply_levels(levels, raw)
     simplex_prior = _brm_normalize_simplex_prior(_brm_term_prior_expression(
         term, target, context, :term_simplex; default=ExprColumn(Dirichlet, 1.0)),

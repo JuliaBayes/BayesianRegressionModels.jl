@@ -441,6 +441,21 @@ function _rk_scalar_lone_intercepts(emitted::_RKEmittedProgram, lone::Dict{Symbo
     _RKEmittedProgram(emitted.defs, main, emitted.bindings)
 end
 
+# A value computed from a fit-role input alone (an indicator of one of its
+# levels) is one further fitted values are computed from.
+function _rk_ast_fitted_input!(fitted, name::Symbol, source)
+    source isa Symbol && source in fitted.inputs && push!(fitted.inputs, name)
+    name
+end
+
+# A column's variance an R2D2 budget allocates by, read off its fit-role twin:
+# a fitted value of the program (`x_fit_var = brm_covariate_var(x_fit)`).
+function _rk_ast_fitted_variance!(definitions, statements, taken, fitted, column)
+    call = _rk_ast_statistical_call!(definitions, taken, :brm_covariate_var, column;
+        kernel=true)
+    _rk_ast_fitted_value!(statements, taken, fitted, :brm_covariate_var, call)
+end
+
 function _rk_ast_r2d2_scale(r2d2, addressee; scalar=true, variance_values=nothing)
     shares, variances = r2d2.allocation[addressee]
     variance_values === nothing || (variances = variance_values)
@@ -1328,6 +1343,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     union!(taken, reserved)
     # Fitted values (group levels, R2D2 variances) read these fit-role twins.
     fit_sources = _rk_fit_sources(plan.derived)
+    fitted = _RKFittedValues(Base.values(fit_sources))
     # A predictor sharing its name with a data column cannot keep it:
     # the program has one namespace, so the affine (definition and
     # response uses) is alpha-renamed. Unreachable via `@brm`
@@ -1391,14 +1407,26 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     for derived in plan.derived
         # A fit-role input is bound data (`_rk_fit_twin!`), not a definition.
         derived.expression.head === :_rk_fit_input && continue
-        expression = _rk_ast_data_expr!(defs, stmts, bindings, taken, derived.expression)
+        expression = _rk_ast_data_expr!(defs, stmts, bindings, taken, derived.expression;
+            fitted)
         push!(stmts, Expr(:(=), derived.name, expression))
     end
     # Emit shared budgets once, before their population and group-level
     # consumers. All derived scales remain ordinary graph values.
     joint_priors = Dict{Tuple{Symbol,Symbol},Tuple{Symbol,Tuple}}()
     level_indices = Dict{Tuple{Symbol,Symbol},Symbol}()
-    level_sources = fit_sources
+    # A plain block's group levels are a fitted value of its grouping's
+    # fit-role column (`subject_fit_levels = brm_fit_levels(subject_fit)`),
+    # read by every block over that grouping.
+    level_sources = Dict{Symbol,Symbol}()
+    for bucket in plan.ranef_buckets
+        grouping = bucket.grouping
+        grouping.form === :plain || continue
+        group = first(grouping.columns)
+        (haskey(fit_sources, group) && !haskey(level_sources, group)) || continue
+        level_sources[group] = _rk_ast_fitted_value!(stmts, taken, fitted,
+            :brm_fit_levels, Expr(:call, :brm_fit_levels, fit_sources[group]))
+    end
     for (bi, bucket) in enumerate(plan.ranef_buckets)
         bucket.decomposition === nothing && continue
         append!(stmts, _rk_ast_value_bucket(defs, bucket, ranef_draws[bi],
@@ -1525,11 +1553,15 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                     (:Normal, (0.0, _rk_ast_r2d2_scale(r2d2, term.addressee;
                         scalar=kind !== :factor,
                         variance_values=kind === :factor ?
-                            [Expr(:call, :var, _rk_ast_factor_indicator!(defs, stmts, taken,
-                                string(predictor.name, "_", label), term, j;
-                                column=_rk_fit_of(fit_sources, only(term.columns))))
+                            [_rk_ast_fitted_variance!(defs, stmts, taken, fitted,
+                                _rk_ast_fitted_input!(fitted, _rk_ast_factor_indicator!(
+                                    defs, stmts, taken, string(predictor.name, "_", label),
+                                    term, j;
+                                    column=_rk_fit_of(fit_sources, only(term.columns))),
+                                    _rk_fit_of(fit_sources, only(term.columns))))
                                 for (j, label) in enumerate(term.options.labels)] :
-                            [Expr(:call, :var, _rk_fit_of(fit_sources, colactual[index]))])))) :
+                            [_rk_ast_fitted_variance!(defs, stmts, taken, fitted,
+                                _rk_fit_of(fit_sources, colactual[index]))])))) :
                     (:Normal, r2)
             end
             if kind === :factor

@@ -193,8 +193,8 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
         nothing
     else
         source, raw = _brm_term_data(:hsgp, by, context)
-        # A frozen replay keeps the training groups (`_brm_fit_source`).
-        levels = _brm_fit_levels(_brm_fit_source(source, raw))
+        # A frozen replay keeps the training groups (`_brm_fitted`).
+        levels = _brm_fitted_levels(source, raw)
         (; source, levels, idx=_brm_apply_levels(levels, raw))
     end
     n_basis = cov === :periodic ? 2 * only(K) : prod(K)
@@ -225,11 +225,17 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
     else
         domain_fits = _brm_hsgp_domain_fits(kw, length(axes))
         # A frozen replay fits the interval to the training axes and refuses
-        # replay values past it (unless `extrapolate=:clamp`).
-        training_axes = _brm_hsgp_training_axes(sources, axes, rows, fitted_axes)
-        fits = isnothing(domain_fits) ?
-            _brm_fit_hsgp(training_axes, K, c; anchor) : domain_fits
-        training_axes === fitted_axes || extrapolate === :clamp ||
+        # replay values past it (unless `extrapolate=:clamp`). The interval
+        # and the training range are fits of the training data (`_brm_fitted`).
+        key = Symbol("hsgp(", join(sources, ", "), "; k=", K, ", c=", c, ", anchor=",
+            anchor, ", rows=", isnothing(rows) ? "" : rows.source, ")")
+        (; fits, support) = _brm_fitted_value(key, first(sources)) do
+            training_axes = _brm_hsgp_training_axes(sources, axes, rows, fitted_axes)
+            fits = isnothing(domain_fits) ?
+                _brm_fit_hsgp(training_axes, K, c; anchor) : domain_fits
+            (; fits, support=_brm_hsgp_support(training_axes, fits))
+        end
+        _brm_frozen_replay() === nothing || extrapolate === :clamp ||
             _brm_hsgp_replay_axes(fitted_axes, fits, nothing, :error;
                 prefix="RK reprocess", names=sources,
                 fixed_domain=!isnothing(domain_fits))
@@ -246,8 +252,7 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
         )))
         state = (; target, latent=false, explicit_domain=!isnothing(domain_fits),
                  K, c, centeredness, cov, iso, period, prepared...,
-                 orthogonal, by=by_state, anchor, extrapolate,
-                 support=_brm_hsgp_support(training_axes, fits), rows,
+                 orthogonal, by=by_state, anchor, extrapolate, support, rows,
                  _brm_gp_priors(term, target, context)...)
     end
     deps = (sources..., (isnothing(by_state) ? () : (by_state.source,))...,

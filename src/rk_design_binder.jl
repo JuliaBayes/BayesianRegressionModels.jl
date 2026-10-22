@@ -74,15 +74,24 @@ function rk_design_binder(rk::RKBRMI; resample_groups=(),
         held_out=_rk_held_out_names(rk.plan))
     prefix = "RK design binder"
     groups = _rk_resample_group_set(resample_groups; prefix)
-    training = _rk_training_columns(parent(rk))
-    unknown = setdiff(groups, keys(training))
+    training = _rk_fit_column_names(rk)
+    unknown = setdiff(groups, training)
     isempty(unknown) || error(
         "$prefix: `resample_groups` names $(sort!(collect(unknown))), which " *
         "is not a data column of the fitted model")
     groups = Tuple(sort!(collect(groups)))
-    RKDesignBinder(rk, groups, Tuple(held_out), sort!(collect(keys(training))),
+    RKDesignBinder(rk, groups, Tuple(held_out), sort!(collect(training)),
         _rk_design_fitted(rk, groups), Dict{Any,Any}(), ReentrantLock())
 end
+
+# The data columns of the fit `rk` replays: its own, or on a data-free backend
+# those of the fit its state was exported from.
+_rk_fit_column_names(rk::RKBRMI) = rk.fitted === nothing ?
+    Set{Symbol}(keys(_rk_training_columns(parent(rk)))) :
+    Set{Symbol}(keys(_rk_fitted_state(rk).columns))
+_rk_fit_constant_names(rk::RKBRMI) = rk.fitted === nothing ?
+    Set{Symbol}(c.name for c in last(_brm_resolve_constants(parent(rk)))) :
+    Set{Symbol}(keys(_rk_fitted_state(rk).constants))
 
 (binder::RKDesignBinder)(design) = _rk_plan_columns(_rk_design_plan(binder, design))
 
@@ -152,14 +161,19 @@ _rk_plan_kernels(plan::_RKHeldOutPlan) = _rk_plan_kernels(plan.parent)
 _rk_plan_kernels(_plan) = ()
 
 # The inputs no design changes: fit-role inputs of the columns that are not
-# resampled, and fitted `constant(...)` values.
+# resampled, and fitted `constant(...)` values. A data-free backend binds no
+# fit-role input: its frozen fitted values take their place.
 function _rk_design_fitted(rk::RKBRMI, groups)
     columns = _rk_source_data_columns(rk.plan, _rk_retained_program(rk))
     twins = _rk_plan_fit_inputs(rk.plan)
-    constants = Set{Symbol}(c.name for c in last(_brm_resolve_constants(parent(rk))))
+    constants = _rk_fit_constant_names(rk)
+    frozen = rk.fitted !== nothing
     names = sort!([name for name in keys(columns) if name in constants ||
-        (haskey(twins, name) && !(twins[name] in groups))])
-    NamedTuple{Tuple(names)}(Tuple(columns[name] for name in names))
+        (!frozen && haskey(twins, name) && !(twins[name] in groups))])
+    fitted = NamedTuple{Tuple(names)}(Tuple(columns[name] for name in names))
+    frozen || return fitted
+    state = _rk_fitted_state(rk)
+    merge(fitted, _rk_frozen_subset(state, _rk_resampled_fit_inputs(state, groups)).values)
 end
 
 function _rk_design_class(binder::RKDesignBinder, replay::RKBRMI, design)
@@ -171,6 +185,10 @@ function _rk_design_class(binder::RKDesignBinder, replay::RKBRMI, design)
     _rk_design_checked(replay.plan) ||
         return _RKDesignClass(Pair{Symbol,Any}[], nothing, Any[], [:plan])
     columns = _rk_source_data_columns(replay.plan, _rk_retained_program(rk))
+    # A data-free replay binds its fitted values frozen, not the fit-role inputs
+    # they are fitted from.
+    replay.fitted === nothing ||
+        foreach(name -> delete!(columns, name), keys(replay.fitted.frozen.inputs))
     twins = _rk_plan_fit_inputs(replay.plan)
     fitted = binder.fitted
     sources = Pair{Symbol,Any}[]

@@ -491,14 +491,18 @@ struct RKBRMI{P<:BRMI,PL,M,S<:BRMI}
     # The BRMI the caller passed (`brm_source`). A replay around the same
     # model forwards it.
     source::S
+    # The frozen preprocessing a data-free backend binds in place of the
+    # training data (a `BRMFittedState`), or `nothing` for a backend of its own
+    # data or a replay of one.
+    fitted::Any
     # The retained parent is the model the plan lowered: `optional(...)`
     # priors and grouping-column addresses are already resolved
     # (`_brm_resolve_prior_addresses`).
     function RKBRMI(parent::BRMI, plan, model; program::_RKOnce=_RKOnce(),
-            bound::_RKOnce=_RKOnce(), source::BRMI=parent)
+            bound::_RKOnce=_RKOnce(), source::BRMI=parent, fitted=nothing)
         parent = _brm_resolve_prior_addresses(parent)
         new{typeof(parent),typeof(plan),typeof(model),typeof(source)}(parent,
-            plan, model, program, bound, source)
+            plan, model, program, bound, source, fitted)
     end
 end
 
@@ -2485,6 +2489,16 @@ function _rk_cross_derived_refs!(expression, data::AbstractDict,
     nothing
 end
 
+# The value a data preparation's only argument twins, when that argument is a
+# fit-role input or twin (`_rk_fit_twin!`).
+function _rk_fit_twin_source(arguments, derived)
+    length(arguments) == 1 && only(arguments) isa Symbol || return nothing
+    for spec in derived
+        spec.name === only(arguments) && return _rk_fit_twinned(spec.label)
+    end
+    nothing
+end
+
 # Evaluate a dotted definition BRM-side for verification against shared
 # values. Resolves staged names through the derived registry.
 function _rk_eval_dotted(value, data::AbstractDict,
@@ -2509,9 +2523,14 @@ function _rk_eval_dotted(value, data::AbstractDict,
     value isa Expr || error("RK backend: internal: cannot evaluate " *
                             "derived value `$(repr(value))`")
     if value.head === :_rk_data_preparation
-        args = map(a -> _rk_eval_dotted(a, data, derived, memo),
-            value.args[2:end])
-        return _rk_eval_data_preparation(Val(first(value.args)), args...)
+        recipe = first(value.args)
+        evaluate() = _rk_eval_data_preparation(Val(recipe),
+            map(a -> _rk_eval_dotted(a, data, derived, memo), value.args[2:end])...)
+        # A fitted value (an anchor of a fit-role input) is a fit of the
+        # training data: a data-free replay reads it from the exported fits.
+        source = _rk_fit_twin_source(value.args[2:end], derived)
+        return source === nothing ? evaluate() :
+            _brm_fitted_value(evaluate, recipe, source)
     end
     if value.head === :ref && length(value.args) == 2
         values, index = map(a -> _rk_eval_dotted(a, data, derived, memo),
@@ -2937,7 +2956,7 @@ function _rk_fit_twin!(derived::Vector{_RKDerivedSpec},
         spec.label === label && return spec.name
     end
     haskey(data, vname) && return _rk_fit_input!(derived, columns, taken, vname,
-        _brm_fit_source(vname, data[vname]))
+        _brm_fit_input_source(vname, data[vname]))
     index = findfirst(spec -> spec.name === vname, derived)
     index === nothing && error(
         "RK backend: internal: fitted value `$vname` reads no data column")
@@ -4828,7 +4847,7 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
             for axis in axes)
         if mask !== nothing
             fit_rows = _brm_hsgp_row_mask(
-                _brm_fit_source(rows.source, data[rows.source]),
+                _brm_fit_input_source(rows.source, data[rows.source]),
                 length(columns[first(fit_axes)]), rows.source)
             fit_mask = _rk_fit_input!(derived, columns, taken, mask, Float64.(fit_rows))
         end

@@ -15,6 +15,33 @@ brm_tps_basis(x, k) = brm_tps_basis(x, x, k)
 
 brm_t2_basis(x, z, x_fit, z_fit, k) = _brm_apply_t2(_brm_fit_t2(x_fit, z_fit; k), x, z)
 brm_t2_basis(x, z, k) = brm_t2_basis(x, z, x, z, k)
+# A `t2` basis fitted to its fit-role axes, as one numeric vector (the shape of
+# data a program binds): each margin's shift, scale, null-space constants,
+# knots, second-derivative map and range projection, then the fixed block's
+# center. The emitted program evaluates the basis at the rows from it.
+function brm_t2_fit(x_fit, z_fit, k)
+    fit = _brm_fit_t2(x_fit, z_fit; k)
+    vcat((_brm_pack_cr_fit(margin) for margin in fit.margins)..., fit.fixed_center)
+end
+brm_t2_basis(x, z, fit::AbstractVector{<:Real}, k) =
+    _brm_apply_t2(_brm_unpack_t2_fit(fit, k), x, z)
+
+_brm_pack_cr_fit(fit) = vcat(fit.shift, fit.scale, fit.null_const_scale, fit.slope_norm,
+    fit.knots, vec(fit.F), vec(fit.range_projection))
+function _brm_unpack_t2_fit(packed, k)
+    offset = Ref(0)
+    take(n) = (values = packed[offset[]+1:offset[]+n]; offset[] += n; values)
+    margins = map(k) do m
+        shift, scale, null_const_scale, slope_norm = take(4)
+        knots = take(m)
+        F = reshape(take(m^2), m, m)
+        range_projection = reshape(take(m * (m - 2)), m, m - 2)
+        (; shift, scale, knots, F, range_projection, null_const_scale, slope_norm, k=m)
+    end
+    (; margins, fixed_center=packed[offset[]+1:end], k)
+end
+
+_brm_covariate_var(values) = var(values)
 
 function brm_hsgp_basis(axes, k, c, iso)
     K = k isa Tuple ? k : (k,)
@@ -85,6 +112,12 @@ brm_gp_covariance(x, sigma, rho, period, jitter) = iszero(period) ?
 brm_gp_latent(covariance, z) = StatisticalPreparation.gp_chol_latent(covariance, z)
 
 brm_level_indices(labels, source) = _rk_value_level_indices(labels, source)
+# A grouping's fitted levels: reading them as a grouping column gives the same
+# levels back (`_rk_grouping_levels`), and a categorical column keeps its
+# level order. The emitted program reads them in place of the fit-role column.
+brm_fit_levels(source::CA.CategoricalArray) = CA.categorical(CA.levels(source);
+    levels=CA.levels(source), ordered=CA.isordered(source))
+brm_fit_levels(source::AbstractVector) = collect(CA.levels(source))
 # No longer emitted: the gather is written inline as `draws[indices, margin]`.
 # Kept for RK sources printed before that change, which import it by name.
 brm_ranef_column(draws, indices, margin) = draws[indices, margin]

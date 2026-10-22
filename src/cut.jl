@@ -86,6 +86,13 @@ function brm_cut_family end
 function brm_cut_family(joint::RKBRMI, upstream::RKBRMI, U::AbstractMatrix;
         ad_backend, start=nothing)
     prefix = "brm_cut_family"
+    # The pinned lowering fits preprocessing from the joint plan's fit-role
+    # inputs, which on a data-free backend hold the design's own values.
+    joint.fitted === nothing || error(
+        "$prefix: the joint model is a data-free backend (`RKBRMI(brmi, state)`), " *
+        "whose frozen preprocessing the coordinate cut cannot pin yet; build the " *
+        "joint model on its training data, or build the explicit cut, " *
+        "brm_cut_family(inputs, downstream, data, upstream, U).")
     up_names = _rk_layout_coordinate_names(upstream)
     U = _brm_cut_draws(U, up_names; prefix)
     joint_names = _rk_layout_coordinate_names(joint)

@@ -96,9 +96,13 @@ function _rk_model_population_column(term, context=nothing)
     make_error = message -> ArgumentError("RK backend: missing covariate transform: $message")
     # A frozen replay fits the anchors to the training observations.
     observed = _rk_fit_observed_values(plan)
-    fit = kind === :model_value ? nothing : kind === :center ?
-        (; mean=_brm_fit_mean_numeric(observed, :predictor, :center, make_error), scale=1.0) :
-        _brm_fit_zscale_numeric(observed, :predictor, make_error)
+    fit = kind === :model_value ? nothing :
+        _brm_fitted(Symbol(:observed_, kind), plan.source, plan.values) do values
+            observations = Float64.(collect(skipmissing(values)))
+            kind === :center ? (; mean=_brm_fit_mean_numeric(observations, :predictor,
+                    :center, make_error), scale=1.0) :
+                _brm_fit_zscale_numeric(observations, :predictor, make_error)
+        end
     values = fit === nothing ? raw : (raw .- fit.mean) ./ fit.scale
     anchors = Expr(:call, :_brm_observed_values, plan.source, observed)
     expression = fit === nothing ? name(inner) :
@@ -114,9 +118,9 @@ function _rk_model_population_column(term, context=nothing)
 end
 
 # The observed values a completed covariate's anchors are fitted to: the bound
-# column's, or the training column's on a frozen replay (`_brm_fit_source`).
+# column's, or the training column's on a frozen replay (`_brm_fit_input_source`).
 _rk_fit_observed_values(plan) =
-    Float64.(collect(skipmissing(_brm_fit_source(plan.source, plan.values))))
+    Float64.(collect(skipmissing(_brm_fit_input_source(plan.source, plan.values))))
 
 # A completed covariate's anchors read a fit-role input holding those observed
 # values (`_rk_fit_input!`), so a frozen `reprocess` keeps the training

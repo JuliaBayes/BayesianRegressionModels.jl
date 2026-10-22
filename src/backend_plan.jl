@@ -1602,11 +1602,11 @@ Base.@nospecializeinfer function _brm_simple_random_effect_plans(
             raw isa AbstractVector || error(
                 "BRM backend lowering: grouping column `$group` must be a " *
                 "vector")
-            # A frozen replay keeps the training groups (`_brm_fit_source`).
-            training = _brm_fit_source(group, raw)
-            levels = collect(_brm_fit_levels(training))
-            n_levels, indices = training === raw ? _brm_level_index(raw) :
-                (length(levels), _brm_apply_fitted_levels(levels, raw))
+            # A frozen replay keeps the training groups (`_brm_fitted`).
+            levels = collect(_brm_fitted_levels(group, raw))
+            n_levels, indices = _brm_fit_frozen(group) ?
+                (length(levels), _brm_apply_fitted_levels(levels, raw)) :
+                _brm_level_index(raw)
             length(levels) == n_levels || error(
                 "BRM backend lowering: inconsistent fitted levels for " *
                 "group `$group`")
@@ -1827,7 +1827,8 @@ function _brm_transform_fit(kind::Symbol, label::Symbol, inner, values,
                             raw_ref, fitted)
     const_ = fitted(label, kind, raw_ref)
     isnothing(const_) || return const_
-    _brm_fit_transform(kind, _brm_fit_values(inner, values))
+    _brm_fitted_values(values -> _brm_fit_transform(kind, values), kind, label,
+        inner, values)
 end
 
 # The one input of a transform term, or `nothing` for another arity. A keyword
@@ -1957,10 +1958,19 @@ end
 # `_brm_fit_source(name, values)`, which answers the training column of the
 # same name. Outside a replay it returns `values` unchanged. Group columns in
 # `resample` keep the replay data's own levels (new-population prediction).
+#
+# A fit that planning computes in Julia (a level set, a spline fit) goes
+# through `_brm_fitted`, keyed by what it fits. An export (`brm_fitted_state`)
+# replays the training data and `record`s every such fit; a data-free replay
+# (`RKBRMI(brmi, state)`) has no training columns and reads each fit from
+# `fits` instead.
 struct _BRMFrozenReplay
     training::Dict{Symbol,Any}
     resample::Set{Symbol}
+    fits::Union{Nothing,Dict{Tuple{Symbol,Symbol},Any}}
+    record::Union{Nothing,Dict{Tuple{Symbol,Symbol},Any}}
 end
+_BRMFrozenReplay(training, resample) = _BRMFrozenReplay(training, resample, nothing, nothing)
 
 const _BRM_FROZEN_REPLAY = :BayesianRegressionModels_frozen_replay
 
@@ -1988,16 +1998,73 @@ function _brm_fit_source(name::Symbol, values)
     frozen = _brm_frozen_replay()
     frozen === nothing && return values
     name in frozen.resample && return values
+    frozen.fits === nothing || _brm_fit_not_exported(:column, name)
     get(frozen.training, name, values)
 end
 
-# The values a fit of the data expression `inner` reads: `values`, or its
-# values on the training data on a frozen replay.
-function _brm_fit_values(inner, values)
+# The values a fit-role input (`_rk_fit_twin!`) binds. A data-free replay binds
+# the exported fitted values in place of every fit-role input, so it plans with
+# the replay data's own values, which no bound value is computed from.
+function _brm_fit_input_source(name::Symbol, values)
     frozen = _brm_frozen_replay()
-    frozen === nothing && return values
-    collect(Float64, _brm_replay_expression(inner, frozen.training))
+    frozen === nothing || frozen.fits === nothing || return values
+    _brm_fit_source(name, values)
 end
+
+# Whether the fits of data column `name` are the training data's.
+function _brm_fit_frozen(name::Symbol)
+    frozen = _brm_frozen_replay()
+    frozen === nothing && return false
+    name in frozen.resample && return false
+    frozen.fits !== nothing || haskey(frozen.training, name)
+end
+
+# `fit(values)` for the data column `name`, keyed by `tag` (what it fits): the
+# training column's fit on a frozen replay, recorded when exporting, or the
+# exported fit on a data-free replay.
+function _brm_fitted(fit, tag::Symbol, name::Symbol, values)
+    frozen = _brm_frozen_replay()
+    (frozen === nothing || name in frozen.resample) && return fit(values)
+    _brm_frozen_fit(frozen, (tag, name)) do
+        fit(get(frozen.training, name, values))
+    end
+end
+_brm_fitted_levels(name::Symbol, values) = _brm_fitted(_brm_fit_levels, :levels, name, values)
+
+# A fit the planner computes from a fit-role input (`_rk_fit_twin!`), which
+# already holds the training values on a frozen replay: computed, recorded when
+# exporting, or read from the exported fits on a data-free replay.
+function _brm_fitted_value(compute, tag::Symbol, name::Symbol)
+    frozen = _brm_frozen_replay()
+    (frozen === nothing || name in frozen.resample) && return compute()
+    _brm_frozen_fit(compute, frozen, (tag, name))
+end
+
+# `fit` of the data expression `inner` (`values` on the fit's data), keyed by
+# `tag` and the term `label` it belongs to.
+function _brm_fitted_values(fit, tag::Symbol, label::Symbol, inner, values)
+    frozen = _brm_frozen_replay()
+    frozen === nothing && return fit(values)
+    _brm_frozen_fit(frozen, (tag, label)) do
+        fit(collect(Float64, _brm_replay_expression(inner, frozen.training)))
+    end
+end
+
+function _brm_frozen_fit(compute, frozen::_BRMFrozenReplay, key)
+    if frozen.fits !== nothing
+        haskey(frozen.fits, key) || _brm_fit_not_exported(key...)
+        return frozen.fits[key]
+    end
+    fit = compute()
+    frozen.record === nothing || (frozen.record[key] = fit)
+    fit
+end
+
+_brm_fit_not_exported(tag, name) = error(
+    "RK data-free replay: the fitted state holds no `$tag` fit of `$name`. " *
+    "Either this model fits `$name` in a way a fitted state does not export " *
+    "yet, or the state was exported from another model; replay it with " *
+    "`reprocess(rk, new_data)` on the training fit instead")
 
 _brm_fit_levels(raw::CA.CategoricalVector) = CA.levels(raw)
 _brm_apply_levels(levels, raw::AbstractVector) =
@@ -2155,19 +2222,18 @@ function _brm_categorical_population_columns(
     frozen = fitted(_brm_cellmeans_level_address(block, first_level),
                     :population_factor_dummy, source)
     if isnothing(frozen)
-        training = isnothing(levels) ? _brm_fit_source(source, raw) : raw
         if !isnothing(levels)
             # `levels` carries the fitted level values when `raw` is already
             # recoded (string `factor(...; ref=...)` recodes to integer codes
             # into `levels`), so the level set is `levels` itself, also when a
             # replay frame observes only some of them.
             n_levels, indices = length(levels), raw
-        elseif training === raw
+        elseif !_brm_fit_frozen(source)
             n_levels, indices = _brm_level_index(raw)
             levels = _brm_fit_levels(raw)
         else
             # A frozen replay codes the training level set.
-            levels = _brm_fit_levels(training)
+            levels = _brm_fitted_levels(source, raw)
             n_levels = length(levels)
             indices = _brm_apply_fitted_levels(levels, raw)
         end
@@ -2243,8 +2309,9 @@ function _brm_string_factor_population_columns(term, inner, raw::AbstractVector;
     any(ismissing, values) && return nothing
     kwargs = getkwargs(term)
     all(k -> k === :ref || k === :cmc, keys(kwargs)) || return nothing
-    # A frozen replay codes the training levels (`_brm_fit_source`).
-    fit_levels = _brm_fit_levels(_brm_factor_values(_brm_fit_source(name(inner), raw)))
+    # A frozen replay codes the training levels (`_brm_fitted`).
+    fit_levels = _brm_fitted(values -> _brm_fit_levels(_brm_factor_values(values)),
+        :factor_levels, name(inner), raw)
     isempty(fit_levels) && return nothing
     ref_raw = get(kwargs, :ref, first(fit_levels))
     ref_raw isa AbstractString || return nothing

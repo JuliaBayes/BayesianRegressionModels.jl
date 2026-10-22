@@ -61,6 +61,9 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
         resample_groups=(), held_out=_rk_held_out_names(rk.plan))
     prefix = "RK reprocess"
     freeze_constants || return RKBRMI(_brm_rebind_brmi(parent(rk), new_data); held_out)
+    # A data-free backend (`RKBRMI(brmi, state)`) replays from its fitted state.
+    rk.fitted === nothing || return _rk_fitted_replay(brm_source(rk), new_data,
+        _rk_fitted_state(rk); resample_groups, held_out, previous=rk, prefix)
     groups = _rk_resample_group_set(resample_groups; prefix)
     training = _rk_training_columns(parent(rk))
     unknown = setdiff(groups, keys(training))
@@ -209,10 +212,10 @@ function _rk_program_statements(emitted::_RKEmittedProgram)
         ["binding: " * string(first(b)) for b in emitted.bindings])
 end
 
-function _rk_check_replay_program(retained::_RKEmittedProgram,
-        replayed::_RKEmittedProgram; prefix)
-    fitted = _rk_program_statements(retained)
-    replay = _rk_program_statements(replayed)
+_rk_check_replay_program(retained::_RKEmittedProgram, replayed::_RKEmittedProgram;
+    prefix) = _rk_check_replay_program(_rk_program_statements(retained),
+        _rk_program_statements(replayed); prefix)
+function _rk_check_replay_program(fitted::Vector{String}, replay::Vector{String}; prefix)
     fitted == replay && return nothing
     k = something(findfirst(i -> i > length(replay) || fitted[i] != replay[i],
         eachindex(fitted)), length(fitted) + 1)

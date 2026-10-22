@@ -317,11 +317,13 @@ end
         # One row has no SD of its own; the training anchors apply.
         check_frozen(build, [7])
     end
-    # The fit reads its anchors from a fit-role copy of the column.
+    # The fit reads its anchors from a fit-role copy of the column, each one
+    # a named fitted value.
     emitted = BRM._rk_emit_ast(BRM._brm_rk_plan(RM.zscaled(TRAIN)))
     source = sprint(Base.show_unquoted, emitted.main)
-    @test occursin("brm_covariate_mean(x_fit)", source)
-    @test occursin("brm_covariate_sd(x_fit)", source)
+    @test occursin("x_fit_mean = brm_covariate_mean(x_fit)", source)
+    @test occursin("x_fit_sd = brm_covariate_sd(x_fit)", source)
+    @test count("brm_covariate_mean(", source) == 1
 end
 
 @stestset "hsgp keeps the training basis interval" begin

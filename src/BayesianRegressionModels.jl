@@ -63,6 +63,7 @@ include("rk_structured.jl")
 include("rk_observations.jl")
 include("rk_reprocess.jl")
 include("rk_design_binder.jl")
+include("rk_fitted_state.jl")
 include("cut.jl")
 include("vimpl.jl")
 
@@ -173,6 +174,7 @@ export truncated, censored, interval_censored
 export rk_translate_artifact
 export rk_artifact_inputs
 export rk_bound_data, rk_bound_plan, rk_design_binder, RKDesignBinder
+export brm_fitted_state, BRMFittedState
 export BRMCutFamily, brm_cut_family, brm_cut_fit, brm_cut_point, brm_cut_propagate, rk_draw_values
 export rkppl_model, rk_model
 # Re-export every Distributions.jl family BRM lowers so

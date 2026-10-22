@@ -86,7 +86,8 @@ const _RK_SOURCE_IMPORTS = (
     ReactiveKernels=(Symbol("@kernel"), :plate),
     BayesianRegressionModels=(:brm_tps_basis, :brm_t2_basis, :brm_hsgp_basis,
         :brm_hsgp_periodic_basis, :brm_hsgp_sqrt_spd, :brm_hsgp_periodic_sqrt_spd,
-        :brm_gp_covariance, :brm_gp_latent, :brm_level_indices, :brm_dummy,
+        :brm_gp_covariance, :brm_gp_latent, :brm_fit_levels, :brm_level_indices, :brm_dummy,
+        :brm_t2_fit,
         :brm_panel_slice, :brm_flatten_cells, :brm_invprobit, :brm_invcloglog,
         :brm_ragged_rows, :brm_ragged_rows_ordered))
 

@@ -284,7 +284,7 @@ public_prior_reader(a, b, row) = a[row] .+ b[row]
     source = sprint(Base.show_unquoted, Expr(:block, artifact.defs..., artifact.ast))
     @test occursin("Exponential.(0.7)", source)
     @test occursin("L ~ LKJCholesky(K, eta)", source)
-    @test occursin("b_shared_group ~ brm_correlated_group_effects(group_fit, 2, 3.0)", source)
+    @test occursin("b_shared_group ~ brm_correlated_group_effects(group_fit_levels, 2, 3.0)", source)
     @test coordinate_names(backend.model.layout) == coordinate_names(default_backend.model.layout)
     check_plain_gradient(backend)
     ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)

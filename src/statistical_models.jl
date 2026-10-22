@@ -206,6 +206,12 @@ brm_covariate_sd(values) = begin
     return fit.scale
 end),
 
+    brm_covariate_var = :(
+brm_covariate_var(values) = begin
+    variance = BayesianRegressionModels._brm_covariate_var(values)
+    return variance
+end),
+
     brm_matrix_column = :(
 brm_matrix_column(inputs, column) = begin
     matrix = only(inputs)
