@@ -723,9 +723,14 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
         if p.name in implicit_names && !(p.name in coefficients)]
     roots = Set{Symbol}(observation.key for observation in observations)
     routes = (kernels..., submodels...)
+    dependencies = Dict(op.name => op.dependencies for op in program.operations)
     for route in routes
-        push!(roots, route.name)
-        union!(roots, route.globals)
+        if route isa _RKPreparedKernelAssignment && haskey(dependencies, route.name)
+            union!(roots, _rk_kernel_dependencies(route, dependencies[route.name]))
+        else
+            push!(roots, route.name)
+            union!(roots, route.globals)
+        end
     end
     # Scalars read only by a random-effect block's scale priors or Student-t
     # law are planned as on the formula route.

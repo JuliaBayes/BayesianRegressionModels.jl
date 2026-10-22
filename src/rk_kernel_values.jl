@@ -442,6 +442,9 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
     end
     body = Any[]
     observations = Any[]
+    # The observation statements the cell keeps; one whose response is
+    # omitted reads nothing for the program.
+    observed = Any[]
     collected = nothing
     for statement in raw_body
         statement isa LineNumberNode && continue
@@ -488,6 +491,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             push!(observations, (; source, param=lhs, callable,
                 arguments=values, argument_names, weight, weight_name, nested,
                 modifier, bounds, input))
+            push!(observed, statement)
             continue
         end
         push!(body, statement)
@@ -503,8 +507,12 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
     for statement in body
         _rk_source_outputs!(locals, statement)
     end
+    # The names the cell reads for the program: an omitted response's
+    # observation is not one, so a predictor only it reads is unreached (and a
+    # shared `|ID|` block narrows to the margins observed likelihoods read).
     referenced = Set{Symbol}()
-    foreach(statement -> _brm_cell_value_refs!(referenced, statement), raw_body)
+    foreach(statement -> _brm_cell_value_refs!(referenced, statement), [body; observed])
+    collected === nothing || _brm_cell_value_refs!(referenced, collected)
     available = union(Set(keys(program.context.data)), Set(op.name for op in program.operations))
     globals = sort!(collect(intersect(setdiff(referenced, locals), available)))
     cells = _rk_ast_fresh_name(string(name, "_cells"), union(available, keys(columns)))
@@ -1391,6 +1399,25 @@ function _rk_nested_observation_reads(observation, distribution, reads)
     cells = merge(observation.cells, Dict{Symbol,Symbol}(n => n for n in values(hoisted)))
     _RKNestedObservation(observation.observation, cells),
         _BRMPreparedExpr(distribution.callable, args, distribution.kwargs)
+end
+
+# The program names a kernel depends on, for the plan's reachability: its own
+# dependencies except the positional sources only an omitted response's
+# observation reads (a source another kept statement reads stays one).
+function _rk_kernel_dependencies(kernel::_RKPreparedKernelAssignment, dependencies)
+    reads = Set{Symbol}()
+    foreach(statement -> _brm_cell_value_refs!(reads, statement), kernel.body)
+    kernel.collected === nothing || _brm_cell_value_refs!(reads, kernel.collected)
+    for observation in kernel.observations
+        push!(reads, observation.param)
+        foreach(argument -> _brm_cell_value_refs!(reads, argument), observation.arguments)
+        observation.weight === nothing || _brm_cell_value_refs!(reads, observation.weight)
+        foreach(bound -> _brm_cell_value_refs!(reads, bound.expression), observation.bounds)
+    end
+    unread = Set{Symbol}(input.source for (param, input) in zip(kernel.params, kernel.inputs)
+        if !(param in reads))
+    setdiff!(unread, reads)
+    union(setdiff(Set{Symbol}(dependencies), unread), kernel.globals)
 end
 
 # The kernel with its value bound to the plate local the hoisted arguments
