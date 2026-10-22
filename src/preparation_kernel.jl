@@ -85,27 +85,80 @@ function _brm_kernel_subject_values(raw, group::Symbol; prefix="BRM kernel prepa
 end
 
 # An empty `ev_vals` is a zero-row axis (a design with no rows on it, such as
-# no placebo observations): every cell gets an empty slice.
+# no placebo observations): every cell gets an empty slice. Each cell holds
+# its rows ascending. The RK graph computes this on every call of a reader
+# whose design is a runtime input, so it finds each row's cell once and sizes
+# every cell before filling it.
 function _brm_kernel_ragged_partition(a_name::Symbol, grp_name::Symbol,
                                      ev_vals::AbstractVector,
                                      subject_vals::AbstractVector; prefix="BRM kernel preparation")
-    any(ismissing, ev_vals) && error(
+    _brm_has_missing(ev_vals) && error(
         "$prefix: kernel(...) `ragged($a_name, $grp_name)`: `$grp_name` must be a " *
         "column with no missing labels.")
-    pos = Dict{Any,Int}()
-    for (i, v) in enumerate(subject_vals); pos[v] = i; end
-    rows = [Int[] for _ in eachindex(subject_vals)]
-    unknown = Any[]
-    for (r, v) in enumerate(ev_vals)
-        i = get(pos, v, 0)
-        i == 0 ? push!(unknown, v) : push!(rows[i], r)
+    cell = _brm_label_positions(ev_vals, subject_vals)
+    counts = zeros(Int, length(subject_vals))
+    for i in cell
+        i == 0 || (counts[i] += 1)
     end
-    isempty(unknown) || error(
-        "$prefix: kernel(...) `ragged($a_name, $grp_name)`: label(s) " *
-        "$(unique(unknown)) in `$grp_name` name no subject in the kernel's " *
-        "per-subject frame. Every event row must belong to a subject this " *
-        "kernel walks.")
+    if sum(counts) != length(cell)
+        unknown = Any[v for (v, i) in zip(ev_vals, cell) if i == 0]
+        error(
+            "$prefix: kernel(...) `ragged($a_name, $grp_name)`: label(s) " *
+            "$(unique(unknown)) in `$grp_name` name no subject in the kernel's " *
+            "per-subject frame. Every event row must belong to a subject this " *
+            "kernel walks.")
+    end
+    rows = [Vector{Int}(undef, n) for n in counts]
+    fill!(counts, 0)
+    for (r, i) in enumerate(cell)
+        rows[i][counts[i] += 1] = r
+    end
     rows
+end
+
+_brm_has_missing(values::AbstractVector) = Missing <: eltype(values) && any(ismissing, values)
+
+# The position of each value's label in `labels` (`0` when none matches, the
+# last match when a label repeats), compared by `isequal`. Machine-integer
+# labels over a compact range index a dense table; any others a hash table
+# keyed by the labels' own element type.
+function _brm_label_positions(values::AbstractVector{<:Base.BitInteger},
+                              labels::AbstractVector{<:Base.BitInteger})
+    isempty(labels) && return zeros(Int, length(values))
+    lo, hi = extrema(labels)
+    span = Int128(hi) - Int128(lo) + 1
+    span <= 4 * length(labels) + 64 || return _brm_label_positions_hashed(values, labels)
+    table = zeros(Int, Int(span))
+    for (i, v) in enumerate(labels)
+        table[Int(Int128(v) - lo) + 1] = i
+    end
+    positions = Vector{Int}(undef, length(values))
+    for (r, v) in enumerate(values)
+        positions[r] = lo <= v <= hi ? table[Int(Int128(v) - lo) + 1] : 0
+    end
+    positions
+end
+_brm_label_positions(values::AbstractVector, labels::AbstractVector) =
+    _brm_label_positions_hashed(values, labels)
+# Rows usually arrive grouped by label, so a row repeating the previous row's
+# label reuses its lookup.
+function _brm_label_positions_hashed(values, labels)
+    position = Dict{eltype(labels),Int}()
+    for (i, v) in enumerate(labels)
+        position[v] = i
+    end
+    positions = Vector{Int}(undef, length(values))
+    isempty(values) && return positions
+    previous = first(values)
+    at = get(position, previous, 0)
+    for (r, v) in enumerate(values)
+        if !isequal(v, previous)
+            previous = v
+            at = get(position, v, 0)
+        end
+        positions[r] = at
+    end
+    positions
 end
 
 # `ragged(x, group)` or `ragged(x, group, cells)` — the kernel positional a
@@ -275,7 +328,7 @@ end
 function _brm_ragged_rows_graph(x, group, groups, cell, cells, axis_names, axes)
     prefix = "RK backend"
     labels = _brm_kernel_subject_values(cells, cell; prefix)
-    ev_vals = collect(_brm_group_values(groups))
+    ev_vals = _brm_group_values(groups)
     _brm_kernel_check_ragged_axis(x, group,
         Tuple{Symbol,Int}[(nm, length(a)) for (nm, a) in zip(axis_names, axes)],
         length(ev_vals); prefix)
