@@ -40,11 +40,30 @@ configured(data) = @brm data begin
     yb ~ Normal(b_loc, 0.5)
     yc ~ Normal(c_loc, 0.5)
 end
+
+# One row per subject; a `@plate` cell observes `ya` (reading `a_loc` and
+# `b_loc`) and `yc` (reading only `c_loc`). Without `yc`, `c_loc` is read only
+# by an omitted in-cell observation (todo `1784wd0`).
+const CELL = (; subject=[1, 2, 3, 4], x=[-1.0, 0.5, 0.0, 1.5],
+    ya=[[0.3, 0.9], [-0.2], [0.1, 1.2], [-0.8, 0.0]],
+    yc=[[-0.4], [0.8, 0.3], [0.5], [-0.6, 0.1]])
+const CELL_OMIT_C = (; CELL.subject, CELL.x, CELL.ya)
+cell(data) = @brm data begin
+    a_loc ~ 1 + x + (1 | p | subject)
+    b_loc ~ 1 + (1 | p | subject)
+    c_loc ~ 1 + (1 | p | subject)
+    @plate for i in eachindex(a_loc)
+        ya[i] ~ Normal(a_loc[i] .+ b_loc[i], 0.5)
+        yc[i] ~ Normal(c_loc[i], 0.5)
+    end
+end
 end
 
 const RKM = RKMarginalRanef
 
-rk_bucket(brmi) = only(b for b in BRM._brm_rk_plan(brmi).ranef_buckets if b.id === :p)
+rk_buckets(plan) = plan.ranef_buckets
+rk_buckets(plan::BRM._RKValuePlan) = rk_buckets(plan.regression)
+rk_bucket(brmi) = only(b for b in rk_buckets(BRM._brm_rk_plan(brmi)) if b.id === :p)
 rk_margins(bucket) = [(m.predictor, m.coefficient) for m in bucket.margins]
 
 @stestset "RK plans the exact marginal of an omitted response's shared block" begin
@@ -97,5 +116,33 @@ end
             @test value ≈ brm_stan_logdensity_to_rk(transport, u, stan_value) atol=2e-11 rtol=2e-11
             @test gradient ≈ brm_stan_gradient_to_rk(transport, u, stan_gradient) atol=2e-10 rtol=2e-10
         end
+    end
+end
+
+@stestset "an omitted in-cell response narrows the shared block" begin
+    @test rk_margins(rk_bucket(RKM.cell(RKM.CELL))) ==
+        [(:a_loc, :Intercept), (:b_loc, :Intercept), (:c_loc, :Intercept)]
+    omitted = rk_bucket(RKM.cell(RKM.CELL_OMIT_C))
+    @test rk_margins(omitted) == [(:a_loc, :Intercept), (:b_loc, :Intercept)]
+    @test omitted.lkj_eta == 1.5
+    brmi = RKM.cell(RKM.CELL_OMIT_C)
+    rk, problem = consumer_problem(brmi)
+    @test !any(n -> startswith(string(n), "c_loc"), coordinate_names(rk.model.layout))
+    sb = SBBRMI(brmi; mod=RKM, total_groups=())
+    path = joinpath(tempdir(), "brm-rk-marginal-ranef", "cell_omit_c.stan")
+    mkpath(dirname(path))
+    stan = BRM.stan_instantiate(sb; path)
+    names = BridgeStan.param_unc_names(stan.model)
+    transport = brm_coordinate_transport(rk, sb, names)
+    @test length(transport) == length(names) == length(coordinate_names(rk.model.layout))
+    for u in (zeros(length(transport)),
+              collect(range(-0.43, 0.51; length=length(transport))))
+        stan_u = brm_rk_point_to_stan(transport, u)
+        value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
+        stan_gradient = similar(stan_u)
+        stan_value, _ = BridgeStan.log_density_gradient!(stan.model, stan_u,
+            stan_gradient; propto=false, jacobian=true)
+        @test value ≈ brm_stan_logdensity_to_rk(transport, u, stan_value) atol=2e-11 rtol=2e-11
+        @test gradient ≈ brm_stan_gradient_to_rk(transport, u, stan_gradient) atol=2e-10 rtol=2e-10
     end
 end

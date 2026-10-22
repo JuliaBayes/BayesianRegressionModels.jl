@@ -211,9 +211,10 @@ end
     up = RKBRMI(CutModels.shared(STAGE1))
     draws = zeros(length(BRM._rk_layout_coordinate_names(up)), 2)
     draws[:, 2] .= 0.2
-    # refused: pinning the block would fix E0's random effects at prior draws
-    # (shared blocks across the stages: todo `0fdu7mc`).
-    @test_throws "`b_p_subject` has margin(s) 3 that no upstream likelihood reads" brm_cut_family(
+    # refused: stage 1 narrows the block to the margins its likelihood reads, so
+    # its block coordinates are not the joint's (shared blocks across the
+    # stages: todo `0fdu7mc`).
+    @test_throws r"upstream declaration `b_p_subject\.\w+` is not a declaration of the joint model with the same coordinates" brm_cut_family(
         joint, up, draws; ad_backend=AD)
 end
 
