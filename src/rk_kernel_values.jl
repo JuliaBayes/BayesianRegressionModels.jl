@@ -99,9 +99,16 @@ end
 
 # SLIC's unqualified built-in family tokens need not be exported into the
 # caller module. A caller's actual binding still takes precedence.
-_rk_kernel_binding(scope, head) =
-    head isa Symbol && !isdefined(scope, head) && isdefined(StanBlocks.stan, head) ?
-        getfield(StanBlocks.stan, head) : Core.eval(scope, head)
+# The name is read, never evaluated: while a package image is generated, every
+# module but the package being precompiled is closed to `eval`, and a model
+# may be defined in one of its dependencies.
+function _rk_kernel_binding(scope, head)
+    head isa Symbol && !isdefined(scope, head) && isdefined(StanBlocks.stan, head) &&
+        return getfield(StanBlocks.stan, head)
+    value = _sb_cell_binding(scope, head)
+    value === nothing && error("RK backend: `$head` names nothing in module `$scope`")
+    value
+end
 
 # In-cell distribution combinators take a family token as their first
 # positional (`weighted(normal, w, mu, sigma)`), never a data argument.
