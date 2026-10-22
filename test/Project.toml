@@ -48,8 +48,9 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # shadows its data name; 2f5b6203 stores integer step locals of nested scans; e67bc314 lets
 # a called `@slic` submodel hold a latent or observed `@scan` (snag scan-inside-call-2ea17cef);
 # d3483f11 lets a plate cell's group be that scan's observed keyword (snag
-# submodel-scan-ob-50a09edb).
-rev = "d3483f11f60da28865d74992370d9db10073197f"
+# submodel-scan-ob-50a09edb); 897557c takes `interval_censored`'s interval by keyword and
+# refuses a combinator's unknown keyword; 204e5a7 lists typed `=` in `stan_descriptor`.
+rev = "45fc68bbcbe7a4d2c5197307bbb039f878a4e58b"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"

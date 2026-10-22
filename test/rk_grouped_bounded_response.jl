@@ -134,18 +134,13 @@ end
             z = nested ? reduce(vcat, data.z) : data.z
             base + evidence + sum(logpdf.(Normal.(nested ? 0 : raw_lower, 1), z))
         end
-        # SBBRMI: an in-cell interval-censored vector group has no sized
-        # predictive draw yet (StanBlocks snag `in-cell-interval-c354f5f4`).
-        stan = law === interval_censored ?
-            (@test_throws "SIZED predictive companion" consumer_stan(brmi,
-                "grouped-bounded-$label"; mod=PublicGroupedBoundedResponse); nothing) :
-            consumer_stan(brmi, "grouped-bounded-$label"; mod=PublicGroupedBoundedResponse)
+        stan = consumer_stan(brmi, "grouped-bounded-$label"; mod=PublicGroupedBoundedResponse)
         mapping = [names[ia] => "pop_theta_beta_pop.1";
             names[it] => "b_p_subject_tau.1";
             [names[iz[i]] => "b_p_subject_z_flat.$i" for i in 1:3]]
         for u in (zeros(5), collect(range(-0.2, 0.3; length=5)), fill(-0.1, 5))
             check_consumer_point(problem, u, oracle)
-            stan === nothing || check_consumer_stan(problem, stan, mapping, backend, u)
+            check_consumer_stan(problem, stan, mapping, backend, u)
         end
         @test isequal(data, saved)
     end
