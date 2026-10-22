@@ -40,9 +40,12 @@ partition(ev, labels) = BRM._brm_kernel_ragged_partition(:x, :g, ev, labels)
         Any[1, "a", :b],                           # mixed
     ]
     for cells in labels
-        ev = cells[rand(rng, eachindex(cells), 200)]
-        @test partition(ev, cells) == reference_partition(ev, cells)
-        @test partition(ev, cells) isa Vector{Vector{Int}}
+        # Interleaved rows, and rows grouped in runs (each run reuses its lookup).
+        for ev in (cells[rand(rng, eachindex(cells), 200)],
+                cells[repeat(rand(rng, eachindex(cells), 20); inner=5)])
+            @test partition(ev, cells) == reference_partition(ev, cells)
+            @test partition(ev, cells) isa Vector{Vector{Int}}
+        end
     end
     # Rows matched across numeric types by `isequal`, as the hash table does.
     @test partition([1.0, 3.0, 1.0], [1, 3]) == [[1, 3], [2]]

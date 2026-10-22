@@ -140,12 +140,25 @@ function _brm_label_positions(values::AbstractVector{<:Base.BitInteger},
 end
 _brm_label_positions(values::AbstractVector, labels::AbstractVector) =
     _brm_label_positions_hashed(values, labels)
+# Rows usually arrive grouped by label, so a row repeating the previous row's
+# label reuses its lookup.
 function _brm_label_positions_hashed(values, labels)
     position = Dict{eltype(labels),Int}()
     for (i, v) in enumerate(labels)
         position[v] = i
     end
-    Int[get(position, v, 0) for v in values]
+    positions = Vector{Int}(undef, length(values))
+    isempty(values) && return positions
+    previous = first(values)
+    at = get(position, previous, 0)
+    for (r, v) in enumerate(values)
+        if !isequal(v, previous)
+            previous = v
+            at = get(position, v, 0)
+        end
+        positions[r] = at
+    end
+    positions
 end
 
 # `ragged(x, group)` or `ragged(x, group, cells)` — the kernel positional a
