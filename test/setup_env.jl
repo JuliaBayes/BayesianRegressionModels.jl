@@ -107,8 +107,13 @@ const PINS = [
     # module inside a downstream package image, so a whole `RKBRMI` builds
     # in a precompile workload; snag rkppl-build-kern-4607ff90), and contains
     # a89e08381 (the `bind_data` structural cache) and 74e415976 (a computed
-    # partition drives a per-cell loop).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "9af9b1976c2edb9fa3e7ee49ab420ffea972994c"),  # main
+    # partition drives a per-cell loop). de89298a adds 7ba63ea6e
+    # (`frozen_values`, `bind_data(…; frozen)`, `lower_rkppl(…; frozen)`: a
+    # design binds its data-only definitions frozen by value, which
+    # test/rk_fitted_state.jl replays without the training data) and
+    # 28f8896d8 (a frozen design may omit an input of strings); snag
+    # rkppl-bind-froze-da223711.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "de89298a28c26a8e31a324088049c514be8db90f"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.5); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "d16c4efb72b963f45de9d6f632c38d46706c23e1"),  # main

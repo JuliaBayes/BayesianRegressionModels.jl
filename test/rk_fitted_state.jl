@@ -218,15 +218,31 @@ density(rk, u) = LogDensityProblems.logdensity(
     rk_logdensity_problem(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse)), u)
 absent(v) = occursin("Absent", string(nameof(typeof(v))))
 
-# Data-free inputs `free` against a training replay's `replay`: the same values,
-# except that a fit-role input is never bound (or bound absent) and a value RK
-# preparation folds is bound frozen in place of the replay's graph statement.
-# A resampled grouping's fit-role input holds the design's own values on both.
-function check_inputs(free, replay, state; resample_groups=())
+# The names a data-free binding of `rk`'s program holds absent: the fit-role
+# inputs it drops, and the definitions fitted from those alone that no frozen
+# value stands in for (`mu_gs_lvl_2_indicator`, read only by its frozen
+# variance `mu_gs_lvl_2_indicator_var`).
+function absent_names(rk, state, dropped, data)
+    names = Set{Symbol}(dropped)
+    for statement in BRM._rk_retained_program(rk).main.args
+        Meta.isexpr(statement, :(=), 2) && statement.args[1] isa Symbol || continue
+        reads = intersect(BRM._rk_source_symbols!(Set{Symbol}(), statement.args[2]), data)
+        !isempty(reads) && issubset(reads, names) && push!(names, statement.args[1])
+    end
+    setdiff(names, keys(state.fitted.values))
+end
+
+# Data-free inputs `free` against a training replay's `replay` of the fit `rk`:
+# the same values, except that a fit-role input and what is fitted from it
+# alone are never bound (or bound absent), and a value RK preparation folds is
+# bound frozen in place of the replay's graph statement. A resampled grouping's
+# fit-role input holds the design's own values on both.
+function check_inputs(free, replay, state, rk; resample_groups=())
     dropped = Set(input for input in state.fit_inputs
         if !(state.fit_twins[input] in resample_groups))
+    unbound = absent_names(rk, state, dropped, Set{Symbol}(keys(replay)))
     for name in keys(free)
-        if name in dropped
+        if name in unbound
             @test absent(free[name])
         elseif haskey(replay, name)
             @test isequal(free[name], replay[name])
@@ -243,7 +259,7 @@ function check_data_free(build, state, rk, design; resample_groups=(), want=:mu)
     free = RKBRMI(build(design), state; resample_groups)
     replay = reprocess(rk, design; resample_groups)
     @test free.fitted.state === state
-    check_inputs(rk_bound_data(free), rk_bound_data(replay), state; resample_groups)
+    check_inputs(rk_bound_data(free), rk_bound_data(replay), state, rk; resample_groups)
     if isempty(resample_groups)
         @test BRM._rk_layout_coordinate_names(free) == state.coordinates
         u = point(replay)
@@ -263,7 +279,7 @@ end
         # A data-free backend replays further designs from its state.
         again = reprocess(free, rows(TRAIN, 10:14))
         check_inputs(rk_bound_data(again), rk_bound_data(reprocess(rk, rows(TRAIN, 10:14))),
-            state)
+            state, rk)
         # The state serialized and read back binds the same design.
         io = IOBuffer()
         serialize(io, state)
@@ -307,7 +323,7 @@ end
         # The second and third designs are of the first one's kind: bound into
         # its lowering without planning.
         for design in (rows(TRAIN, 3:9), rows(TRAIN, 11:17), rows(TRAIN, 13:16))
-            check_inputs(binder(design), trained(design), state; resample_groups=groups)
+            check_inputs(binder(design), trained(design), state, rk; resample_groups=groups)
         end
     end
 end
