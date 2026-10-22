@@ -3051,6 +3051,18 @@ _sb_frozen_preproc(data) = let ctx = get(data, _SB_PREPROC_KEY, nothing)
     ctx isa _SBPreprocContext ? ctx.frozen : nothing
 end
 
+# Scratch data for a label walker (`_sb_popcoefnames`, `_sb_id_bucket_margins`,
+# the interaction address map) that drives the emitter's own column builders.
+# A frozen re-emission names its columns from the same fitted records the
+# emitter reads, so a replay frame with one subject or a subset of levels never
+# refits `zscale(x)` or re-derives a `mo(c)` level set here.
+function _sb_label_scratch(frozen_preproc)
+    scratch = Dict{Symbol,Any}()
+    isnothing(frozen_preproc) || (scratch[_SB_PREPROC_KEY] =
+        _SBPreprocContext(Dict{Symbol,PreprocEntry}(), frozen_preproc))
+    scratch
+end
+
 function _sb_frozen_preproc_entry(data, key::Symbol, kind::Symbol, raw_ref)
     ctx = get(data, _SB_PREPROC_KEY, nothing)
     ctx isa _SBPreprocContext || return nothing
@@ -3357,7 +3369,7 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing, provenan
         # `nothing` for a binding that is not a population formula at all
         # (a scalar prior, a `kernel(...)` binding): there is nothing to name.
         try
-            popcoefnames(brmi, lp)
+            _sb_popcoefnames(brmi, lp; frozen_preproc)
         catch err
             # `popcoefnames` covers the standard fixed-effect surface and errors
             # on shapes that need full model context (`hsgp(x, by=g)`, ...).
@@ -3416,8 +3428,8 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing, provenan
         try
             # A design-coded string column's block address fans out over its
             # level columns exactly like an interaction term over its columns.
-            merge(_sb_interaction_address_map(brmi, lp),
-                  _sb_design_block_address_map(brmi, lp))
+            merge(_sb_interaction_address_map(brmi, lp; frozen_preproc),
+                  _sb_design_block_address_map(brmi, lp; frozen_preproc))
         catch err
             haskey(unresolved, lp) || (unresolved[lp] = sprint(showerror, err))
             Dict{Symbol,Vector{Symbol}}()
@@ -3881,7 +3893,8 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
                                                     frozen_preproc=_frozen_preproc)
     r2d2_overrides = _sb_r2d2_overrides(brmi, id_buckets, effect_overrides;
                                         frozen_preproc=_frozen_preproc)
-    hs_overrides = _sb_horseshoe_overrides(brmi, effect_overrides, r2d2_overrides)
+    hs_overrides = _sb_horseshoe_overrides(brmi, effect_overrides, r2d2_overrides;
+                                           frozen_preproc=_frozen_preproc)
     data[_SB_HS_PLANS_KEY] = hs_overrides
     total_plans = _sb_plan_totals(brmi,prepared,effect_overrides,id_buckets,
         ranef_effect_overrides,total_groups; cv_groups,centered_groups,r2d2_overrides,ranef_r2d2_overrides,
@@ -8369,7 +8382,14 @@ it: `effect(lhs, a & b)` sets one shared Normal prior over every `beta_pop`
 column the term emits, in either operand order; a direct `int_…` label
 address refines it on that column alone.
 """
-function popcoefnames(brmi::BRMI, lhs::Symbol)
+popcoefnames(brmi::BRMI, lhs::Symbol) = _sb_popcoefnames(brmi, lhs)
+
+# `frozen_preproc` is the fitted record a frozen re-emission
+# (`reprocess(...; freeze_constants=true, resample_groups=...)`) builds its
+# columns from. Every emission-time prior resolver passes it, so its labels
+# count the fitted `mo(c)` levels and string-categorical level columns rather
+# than the replay rows' own (snag reprocess-resamp-0a765fc0).
+function _sb_popcoefnames(brmi::BRMI, lhs::Symbol; frozen_preproc=nothing)
     op = linear_predictor_op(brmi, lhs)
     isnothing(op) && return nothing
     _, rhs = getargs(op, 2)
@@ -8381,8 +8401,9 @@ function popcoefnames(brmi::BRMI, lhs::Symbol)
     labels = Symbol[]
     # Scratch data/stmts: `_sb_pop_cols!` materialises columns into these as a
     # side effect; we only read back the pushed column reference(s) as labels.
-    scratch = Dict{Symbol,Any}(); scratch_stmts = Any[]
-    design_columns = _sb_design_coded_columns(pop_terms)
+    scratch = _sb_label_scratch(frozen_preproc); scratch_stmts = Any[]
+    design_columns = _sb_design_coded_columns(pop_terms;
+        population_columns=_sb_population_columns(scratch))
     for (t, coded) in zip(pop_terms, design_columns)
         # The intercept is always exactly one all-ones column; skip the
         # emitter's length probe (irrelevant to naming) and label it directly.
@@ -9274,7 +9295,7 @@ end
 # so a transformed operand's columns stay reachable only through their
 # `int_…` labels. Duplicate identical terms append: both emit, both are
 # claimed.
-function _sb_interaction_address_map(brmi::BRMI, lhs::Symbol)
+function _sb_interaction_address_map(brmi::BRMI, lhs::Symbol; frozen_preproc=nothing)
     out = Dict{Symbol,Vector{Symbol}}()
     op = linear_predictor_op(brmi, lhs)
     isnothing(op) && return out
@@ -9283,7 +9304,7 @@ function _sb_interaction_address_map(brmi::BRMI, lhs::Symbol)
     for t in _sb_terms(rhs)
         _sb_classify_term!(t, pop_terms, ran_terms, direct_terms)
     end
-    scratch = Dict{Symbol,Any}(); scratch_stmts = Any[]
+    scratch = _sb_label_scratch(frozen_preproc); scratch_stmts = Any[]
     for t in pop_terms
         te = _as_expr_column(t)
         (isnothing(te) || getf(te) !== (&)) && continue
@@ -9303,20 +9324,22 @@ end
 # string column: its level indicators, `<c>_lvl_<k>`), aligned with
 # `pop_terms`, `nothing` elsewhere. SBBRMI emits such a predictor through
 # `_brm_population_design`, so its labels and block addresses come from the
-# same columns, with the design's own cell-means choice.
-function _sb_design_coded_columns(pop_terms)
+# same columns, with the design's own cell-means choice. `population_columns`
+# is the emitter's column hook (`_sb_population_columns`), so a frozen
+# re-emission codes the fitted level set.
+function _sb_design_coded_columns(pop_terms; population_columns=_brm_population_columns)
     flags = _brm_cellmeans_term_flags(Tuple(pop_terms))
     map(pop_terms, flags) do t, cellmeans
         t isa NamedColumn && parent(t) isa DataColumn &&
             _brm_is_string_categorical_data(parent(parent(t))) || return nothing
-        _brm_population_columns(t; cellmeans)
+        population_columns(t; cellmeans)
     end
 end
 
 # block address -> the ordered `beta_pop` labels of a design-coded categorical
 # term, for one linear predictor: `effect(lp, c)` claims every level column of
 # a bare string column `c`, and `effect(lp, c_lvl_<k>)` refines one of them.
-function _sb_design_block_address_map(brmi::BRMI, lhs::Symbol)
+function _sb_design_block_address_map(brmi::BRMI, lhs::Symbol; frozen_preproc=nothing)
     out = Dict{Symbol,Vector{Symbol}}()
     op = linear_predictor_op(brmi, lhs)
     isnothing(op) && return out
@@ -9325,7 +9348,8 @@ function _sb_design_block_address_map(brmi::BRMI, lhs::Symbol)
     for t in _sb_terms(rhs)
         _sb_classify_term!(t, pop_terms, ran_terms, direct_terms)
     end
-    for coded in _sb_design_coded_columns(pop_terms)
+    population_columns = _sb_population_columns(_sb_label_scratch(frozen_preproc))
+    for coded in _sb_design_coded_columns(pop_terms; population_columns)
         isnothing(coded) && continue
         for c in coded, address in c.effect_addresses
             address === c.label || push!(get!(out, address, Symbol[]), c.label)
@@ -10235,11 +10259,7 @@ end
 
 function _sb_id_bucket_margins(bucket; frozen_preproc=nothing)
     out = NamedTuple[]
-    scratch_data = Dict{Symbol,Any}()
-    # A frozen re-emission names its columns from the same fitted records the
-    # emitter reads, so a one-subject replay never refits `zscale(x)` here.
-    isnothing(frozen_preproc) || (scratch_data[_SB_PREPROC_KEY] =
-        _SBPreprocContext(Dict{Symbol,PreprocEntry}(), frozen_preproc))
+    scratch_data = _sb_label_scratch(frozen_preproc)
     scratch_stmts = Any[]
     for (predictor, terms) in _sb_bucket_target_terms(bucket)
         for t in terms
@@ -10513,7 +10533,8 @@ end
 # is the whole-predictor form's silent version of exactly that), so the
 # statement has to say which prior it means. Intercepts stay outside and keep
 # their ordinary or explicitly overridden prior.
-function _sb_ranef_r2d2_joint(brmi::BRMI, id, margins, include, effect_overrides)
+function _sb_ranef_r2d2_joint(brmi::BRMI, id, margins, include, effect_overrides;
+                              frozen_preproc=nothing)
     n_margins = length(margins)
     lps = unique(Symbol[m.predictor for m in margins])
     whole = Set{Symbol}(spec.predictor for spec in r2d2_priors(brmi)
@@ -10535,7 +10556,7 @@ function _sb_ranef_r2d2_joint(brmi::BRMI, id, margins, include, effect_overrides
                   "it contributes $(length(hits)) margins to `|$id|` and none " *
                   "is its intercept")
         resolved = try
-            popcoefnames(brmi, lp)
+            _sb_popcoefnames(brmi, lp; frozen_preproc)
         catch err
             error("sbimpl: `sd(:, $id) ~ r2d2(...; include=...)` cannot " *
                   "resolve the population columns of `$lp`: " *
@@ -10560,7 +10581,7 @@ function _sb_ranef_r2d2_joint(brmi::BRMI, id, margins, include, effect_overrides
         end
         cats = NamedTuple[]
         if include.contrasts
-            entries = _sb_cat_entries(brmi, lp)
+            entries = _sb_cat_entries(brmi, lp; frozen_preproc)
             cat_overrides = _sb_cat_effect_overrides(effect_overrides, lp)
             for e in (isnothing(entries) ? NamedTuple[] : entries)
                 haskey(cat_overrides, e.emitted) && error(
@@ -10577,8 +10598,7 @@ function _sb_ranef_r2d2_joint(brmi::BRMI, id, margins, include, effect_overrides
                     "coded there (`$lp` has no intercept). Give `$lp` an intercept, " *
                     "keep the factor treatment-coded with `factor($(e.address); " *
                     "cmc=false)`, or leave `:contrasts` out of `include=`")
-                n_levels, _ = _sb_level_index(_sb_cat_levels(e.term))
-                n_contrasts = n_levels - 1
+                n_contrasts = e.n_levels - 1
                 push!(cats, (; emitted=e.emitted, address=e.address,
                               n_contrasts, phi_start=cursor))
                 cursor += n_contrasts
@@ -10661,7 +10681,7 @@ Base.@nospecializeinfer function _sb_ranef_r2d2_overrides(@nospecialize(brmi::BR
             end
             if !isnothing(base.include)
                 joint = _sb_ranef_r2d2_joint(brmi, id, margins, base.include,
-                                             effect_overrides)
+                                             effect_overrides; frozen_preproc)
             end
             push!(groups, (; indices=collect(eachindex(margins)), references,
                             r2_prior=base.r2_prior,
@@ -10828,7 +10848,7 @@ Base.@nospecializeinfer function _sb_r2d2_overrides(@nospecialize(brmi::BRMI), i
     isempty(specs) && return Dict{Symbol,NamedTuple}()
 
     lp_names = Symbol[x.name for x in linear_predictors(brmi)]
-    labels_of(lp) = try popcoefnames(brmi, lp) catch; nothing end
+    labels_of(lp) = try _sb_popcoefnames(brmi, lp; frozen_preproc) catch; nothing end
 
     out = Dict{Symbol,NamedTuple}()
     for spec in specs
@@ -11127,7 +11147,8 @@ function _sb_hs_literal_sibling_args!(expr, spelling)
     nothing
 end
 
-Base.@nospecializeinfer function _sb_horseshoe_overrides(@nospecialize(brmi::BRMI), effect_overrides, r2d2_overrides)
+Base.@nospecializeinfer function _sb_horseshoe_overrides(@nospecialize(brmi::BRMI), effect_overrides, r2d2_overrides;
+                                                         frozen_preproc=nothing)
     for spec in ranef_effect_priors(brmi)
         spec.family === Horseshoe || continue
         spelling = spec.class === :sd ? "sd" : "cor"
@@ -11156,7 +11177,7 @@ Base.@nospecializeinfer function _sb_horseshoe_overrides(@nospecialize(brmi::BRM
             "sbimpl: predictor `$lp` combines `effect($lp, :) ~ r2d2(...)` " *
             "with `~ Horseshoe(...)`; one predictor takes one structured " *
             "prior in v1 (drop one of them)")
-        labels = try popcoefnames(brmi, lp) catch; nothing end
+        labels = try _sb_popcoefnames(brmi, lp; frozen_preproc) catch; nothing end
         isnothing(labels) && error(
             "sbimpl: `effect($lp, ...) ~ Horseshoe(...)` names no linear " *
             "predictor with population coefficients")
