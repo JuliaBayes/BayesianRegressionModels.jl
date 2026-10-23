@@ -1605,7 +1605,9 @@ image is infinite). So is anything that is not a sampled, real-valued, top-level
 declared parameter: a population coefficient, random effect, linear predictor,
 plate-local value, transformed or generated quantity, a natively constrained
 type (simplex, correlation, Cholesky factor), and a bound that is not a numeric
-constant (one computed from data or another parameter).
+constant (one computed by arithmetic over data, or from another parameter; a
+literal, scalar data, and their `fmax`/`fmin` with a structural bound are
+constants).
 
 Returns a fresh draws × `length(unc_names)` matrix; `draws` is left untouched.
 
@@ -1651,8 +1653,9 @@ function parameter_draws(d::BRMDescriptor, draws::AbstractMatrix, unc_names;
     out
 end
 
-# One declared constraint as a number: a literal, or a scalar data value. A
-# bound computed from other values is refused.
+# One declared constraint as a number: a literal, a scalar data value, or
+# their `fmax`/`fmin` (`_adaptive_constraint_value`). A bound computed from
+# other values is refused.
 function _brm_numeric_constraint(plan, constraints, key, parameter)
     haskey(constraints, key) || return nothing
     value = _adaptive_constraint_value(plan, constraints[key], parameter,
