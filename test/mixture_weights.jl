@@ -12,21 +12,7 @@ using LogExpFunctions: logit, logistic
 import StanBlocks
 const BRM = BayesianRegressionModels
 
-const MW_CACHE = joinpath(tempdir(), "brm-mixture-weights")
-isdir(MW_CACHE) || mkpath(MW_CACHE)
-
-mw_problem(d) = brm_execute(d, :instantiate;
-    path=joinpath(MW_CACHE, string(d.id) * ".stan"))
-
-# Constrained values of every parameter, transformed parameter and generated
-# quantity at the unconstrained point `q`, by Stan name.
-function mw_values(problem, q)
-    model = problem.model
-    names = BridgeStan.param_names(model; include_tp=true, include_gq=true)
-    values = BridgeStan.param_constrain(model, q; include_tp=true,
-        include_gq=true, rng=BridgeStan.StanRNG(model, 20261023))
-    Dict(zip(names, values))
-end
+include("mixture_stan_values.jl")
 
 @testset "complementary weights from one sampled scalar" begin
     data = (; y=[-2.1, -1.9, 2.0, 2.2, 0.1])
@@ -41,10 +27,10 @@ end
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
     @test occursin("brm_joint_mean_rows((1 - w), num_elements(y))", code)
     @test occursin("must be nonnegative and sum to 1", code)
-    problem = mw_problem(descriptor)
+    problem = mixture_problem(descriptor)
     @test LogDensityProblems.dimension(problem) == 3
     q = [-1.8, 2.3, logit(0.3)]
-    values = mw_values(problem, q)
+    values = mixture_values(problem, q)
     @test values["w"] ≈ 0.3
     mixture = MixtureModel([Normal(values["mu1"], 0.5), Normal(values["mu2"], 0.5)],
         [1 - values["w"], values["w"]])
@@ -78,9 +64,9 @@ end
     end
     descriptor = brm_descriptor(builder, data; mod=@__MODULE__, highlights=())
     @test StanBlocks.stanc_check(BRM.stan_code(descriptor.plan); warn_pedantic=false).ok
-    problem = mw_problem(descriptor)
+    problem = mixture_problem(descriptor)
     D = LogDensityProblems.dimension(problem)
-    values = mw_values(problem, collect(range(-0.1, 0.4; length=D)))
+    values = mixture_values(problem, collect(range(-0.1, 0.4; length=D)))
     n = length(data.y)
     w = [values["w.$i"] for i in 1:n]
     @test !allequal(w)
@@ -98,7 +84,7 @@ end
         y ~ MixtureModel([Normal(-2, 0.5), Normal(2, 0.5)], [a, b])
     end
     descriptor = brm_descriptor(builder, data; mod=@__MODULE__, highlights=())
-    problem = mw_problem(descriptor)
+    problem = mixture_problem(descriptor)
     # a = b = 0.5 is a probability vector; a = 0.5, b = logistic(1) is not,
     # and Distributions' `MixtureModel` refuses such weights as well.
     @test isfinite(LogDensityProblems.logdensity(problem, [0.0, 0.0]))
