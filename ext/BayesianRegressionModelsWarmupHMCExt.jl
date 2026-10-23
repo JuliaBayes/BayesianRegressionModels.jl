@@ -22,16 +22,21 @@ mutable struct BRMAdaptiveCenteringState{N} <: _BRMRanefCenteringState{N}
     pair_blocks::Vector{Int}
     pair_terms::Vector{Int}
     pair_groups::Vector{Int}
+    pair_mixing::Vector{Int}
     pair_lookup::Vector{Matrix{Int}}
     sources::Vector{Float64}
     effect_indices::BitSet
 end
 
-# Pairs are block-major, then group-major, then term-major.
+# Pairs are block-major, then group-major, then term-major. `pair_mixing[p]`
+# is the coordinate `log w[g]` of a Student-t pair's level, `0` for a Gaussian
+# block: accessors read that integer once per call, never the block's `mixing`
+# vector inside their loops (see `_pair_mixing_scale`).
 function _ranef_pair_layout(blocks)
     pair_blocks = Int[]
     pair_terms = Int[]
     pair_groups = Int[]
+    pair_mixing = Int[]
     pair_lookup = [zeros(Int, b.ranef.n_terms, b.ranef.n_groups) for b in blocks]
     sources = Float64[]
     for (bi, block) in enumerate(blocks), g in 1:block.ranef.n_groups,
@@ -39,11 +44,13 @@ function _ranef_pair_layout(blocks)
         push!(pair_blocks, bi)
         push!(pair_terms, k)
         push!(pair_groups, g)
+        push!(pair_mixing, _block_mixed(block) ? block.mixing[g] : 0)
         push!(sources, block.target_c)
         pair_lookup[bi][k, g] = length(sources)
     end
     effect_indices = BitSet(Iterators.flatten(vec(b.effects) for b in blocks))
-    (pair_blocks, pair_terms, pair_groups, pair_lookup, sources, effect_indices)
+    (pair_blocks, pair_terms, pair_groups, pair_mixing, pair_lookup, sources,
+     effect_indices)
 end
 
 BRMAdaptiveCenteringState(blocks) =
@@ -60,6 +67,7 @@ mutable struct BRMR2D2AdaptiveCenteringState{N} <: _BRMRanefCenteringState{N}
     pair_blocks::Vector{Int}
     pair_terms::Vector{Int}
     pair_groups::Vector{Int}
+    pair_mixing::Vector{Int}
     pair_lookup::Vector{Matrix{Int}}
     sources::Vector{Float64}
     effect_indices::BitSet
@@ -84,10 +92,17 @@ _block_mixing_scale(x, ::BRM.AdaptiveCenteringBlock, g) = one(eltype(x))
 _block_mixing_scale(x, block::BRM.R2D2AdaptiveCenteringBlock, g) =
     exp(x[block.mixing[g]] / 2)
 
-# Level `g`'s marginal scale of term `i`. A Gaussian block's levels share
-# `tau[i]` and keep its operations exactly.
-_block_tau(x, block, i, g) = _block_mixed(block) ?
-    _block_tau(x, block, i) * _block_mixing_scale(x, block, g) : _block_tau(x, block, i)
+# Pair `p`'s level scale `sqrt(w[g])`, read once per accessor call from the
+# state's flat `pair_mixing`; one for a Gaussian block, whose operations the
+# product `tau * one(T)` leaves bit-identical. The differentiated accessors
+# never read the block's `mixing` vector: on Julia 1.10, adding that read (and
+# its branch) to `_block_location`'s row loop corrupted Julia's GC under
+# Enzyme's reverse pass in `test/adaptive_centering_threads.jl`, even for
+# blocks without weights.
+function _pair_mixing_scale(x, state, p)
+    j = state.pair_mixing[p]
+    j == 0 ? one(eltype(x)) : exp(x[j] / 2)
+end
 
 # Canonical partial correlation `p` of a block's correlation factor, in Stan's
 # `cholesky_factor_corr` coordinate order: `tanh` of its coordinate, or the
@@ -134,8 +149,8 @@ end
 # `stick * z`, then `tau * L[i,j]`.  WarmupHMC's discrete window winners can
 # change after a one-ulp gradient drift, so operation order — not just the
 # limiting value — is the contract.
-function _block_cholesky_entry(x, block, i, j, g)
-    tau = _block_tau(x, block, i, g)
+function _block_cholesky_entry(x, block, i, j)
+    tau = _block_tau(x, block, i)
     stick = one(eltype(x))
     offset = (i - 1) * (i - 2) ÷ 2
     for l in 1:i-1
@@ -170,11 +185,12 @@ function _block_location(x, state::_BRMRanefCenteringState{N}, pair_number) wher
     k == 1 && return zero(T)
     block = state.blocks[bi]
     lookup = state.pair_lookup[bi]
+    r = _pair_mixing_scale(x, state, pair_number)
     innovations = ntuple(_ -> zero(T), Val(N))
     m = zero(T)
     for i in 1:k
         m = zero(T)
-        tau = _block_tau(x, block, i, g)
+        tau = _block_tau(x, block, i) * r
         stick = one(T)
         offset = (i - 1) * (i - 2) ÷ 2
         for l in 1:i-1
@@ -197,9 +213,9 @@ function (arg::BRMAdaptiveCenteringArgument{:location})(x)
 end
 
 function (arg::BRMAdaptiveCenteringArgument{:log_scale})(x)
-    bi, k, g = _pair_location(arg.state, arg.pair_number)
+    bi, k, _ = _pair_location(arg.state, arg.pair_number)
     block = arg.state.blocks[bi]
-    log(_block_cholesky_entry(x, block, k, k, g))
+    log(_block_cholesky_entry(x, block, k, k))
 end
 
 struct BRMR2D2AdaptiveCenteringArgument{KIND,N} <: Function
@@ -221,8 +237,9 @@ function (arg::BRMR2D2AdaptiveCenteringArgument{:location})(x)
 end
 
 function (arg::BRMR2D2AdaptiveCenteringArgument{:log_scale})(x)
-    bi, k, g = _pair_location(arg.state, arg.pair_number)
-    log(_block_cholesky_entry(x, arg.state.blocks[bi], k, k, g))
+    bi, k, _ = _pair_location(arg.state, arg.pair_number)
+    log(_block_cholesky_entry(x, arg.state.blocks[bi], k, k) *
+        _pair_mixing_scale(x, arg.state, arg.pair_number))
 end
 
 function _sync_sources!(state, ir)
@@ -706,8 +723,9 @@ function (arg::BRMJointAdaptiveCenteringArgument{:log_scale})(x)
     p = arg.pair_number
     s = arg.state
     if p <= s.n_ranef + s.n_r2d2
-        bi, k, g = _pair_location(s.ranef, p)
-        log(_block_cholesky_entry(x, s.ranef.blocks[bi], k, k, g))
+        bi, k, _ = _pair_location(s.ranef, p)
+        log(_block_cholesky_entry(x, s.ranef.blocks[bi], k, k) *
+            _pair_mixing_scale(x, s.ranef, p))
     elseif p <= s.n_ranef + s.n_r2d2 + s.n_hsgp
         bi, basis = _hsgp_pair_location(s.hsgp, p - s.n_ranef - s.n_r2d2)
         BRM._adaptive_hsgp_log_scale(x, s.hsgp.blocks[bi], basis)
@@ -1256,9 +1274,11 @@ function _ordered_block_map!(y, x, ir::BRMOrderedCenteringReparametrization{N},
             g = groups[r]
             # A Student-t level's factors carry its `sqrt(w[g])`; the block's
             # correlation coordinates and their Jacobian above are scale-free.
-            Cg, Cpg = _block_mixed(block) ?
-                (_tscale(C, _block_mixing_scale(x, block, g)),
-                 _tscale(Cp, _block_mixing_scale(x, block, g))) : (C, Cp)
+            # The scale comes from the flat `pair_mixing` (`_pair_mixing_scale`).
+            p = lookup[1, g]
+            Cg, Cpg = state.pair_mixing[p] == 0 ? (C, Cp) :
+                (_tscale(C, _pair_mixing_scale(x, state, p)),
+                 _tscale(Cp, _pair_mixing_scale(x, state, p)))
             ljac += ir.direction > 0 ?
                 _ordered_group_forward!(y, x, state, block, lookup, g, Cg, Cpg,
                                         perms, q, declared, Val(N + 1)) :
