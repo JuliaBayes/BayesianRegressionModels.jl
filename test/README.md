@@ -455,11 +455,11 @@ describes the same censoring as the call form
 julia --startup-file=no --project=test test/description_cell_combinators.jl
 ```
 
-`description_concatenation.jl` describes StanBlocks' `vcat` token in its two
-roles. As a value in a `@plate for` cell or an included `@slic` submodel, such
-as the dose-axis gather's `vcat(0.0, log_F[doses[i]])`, it is Julia's `vcat`,
-a covered built-in rendered as a stacked vector. As the distribution of `~` it
-stays the block-wise prior family. It runs under the test project:
+`description_concatenation.jl` describes `vcat` in its two roles. As a value in
+a `@plate for` cell, such as the dose-axis gather's `vcat(0.0, log_F[doses[i]])`,
+it is a covered built-in rendered as a stacked vector. As the distribution of
+`~`, here in an included `@slic` submodel, it stays the block-wise prior family.
+It runs under the test project:
 
 ```sh
 julia --startup-file=no --project=test test/description_concatenation.jl
