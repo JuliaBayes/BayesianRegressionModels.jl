@@ -105,6 +105,7 @@ BRM adds:
   | `:posterior_predictive` | a predictive draw of an observation |
   | `:covariate_draw` | the selected modeled covariate value consumed by later operations |
   | `:pointwise_loglik` | an observation's per-element log-likelihood |
+  | `:membership` | a `MixtureModel` response's `n x K` matrix of per-row component-membership probabilities (`<response>_membership`); `source` and `logical` name the response, `labels` the components |
   | `:stan_derived` | a Stan-level output no BRM declaration owns |
 
 - `declaration` — the `GenerativeDeclaration` this output came from, or
@@ -1505,10 +1506,36 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
                       if role === :linear_predictor)
     pop_lp = Dict{Symbol,Symbol}(e.block => e.logical for e in population_effects)
 
+    # A mixture response's membership matrix, recognized by the generated
+    # membership function the emitted model assigns it from (with or without
+    # a `censored` / `truncated` / `interval_censored` wrapper around the
+    # mixture), never parsed off an output name.
+    memberships = Dict{Symbol,NamedTuple}()
+    for (output, m) in _sb_mixture_membership_outputs(plan.model)
+        declaration = something(findfirst(d -> d.role === :observation &&
+                                              d.target === m.response,
+                                          plan.declarations), 0)
+        declaration == 0 && error(
+            "brm_descriptor: membership output `$output` names response " *
+            "`$(m.response)`, which no observation declares; re-derive the plan.")
+        memberships[output] = (; declaration=plan.declarations[declaration],
+            labels=[Symbol(:component_, k) for k in 1:m.components])
+    end
+
     # --- outputs ------------------------------------------------------------
     outputs = BRMOutput[]
     fresh_covariates = _sb_existing_covariates(plan.preproc)
     for o in stan.outputs
+        membership = o.kind === :generated_quantity ? get(memberships, o.name, nothing) :
+            nothing
+        if !isnothing(membership)
+            target = membership.declaration.target
+            push!(outputs, BRMOutput(o.name, o.kind, o.type, o.size, o.constraints,
+                                     o.generative, target, :membership,
+                                     membership.declaration, target,
+                                     membership.labels, _brm_output_segments(o)))
+            continue
+        end
         decl = _brm_owner(o, by_name, targets)
         # An observation's generated-quantities carrier is its predictive
         # draw — whether a `y_gen` twin (fitted) or the forward-simulated `y`
