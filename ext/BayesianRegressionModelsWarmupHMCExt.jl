@@ -76,6 +76,14 @@ _block_tau(x, block::BRM.AdaptiveCenteringBlock, i) = exp(x[block.log_scales[i]]
 _block_tau(x, block::BRM.R2D2AdaptiveCenteringBlock, i) =
     exp(BRM._adaptive_log_scale(x, block.table, i))
 
+# Canonical partial correlation `p` of a block's correlation factor, in Stan's
+# `cholesky_factor_corr` coordinate order: `tanh` of its coordinate, or the
+# constant of a known correlation (`cor(:, ID) = R`), which has no coordinates.
+_block_cpc(x, block::BRM.AdaptiveCenteringBlock, p) = tanh(x[block.cholesky_free[p]])
+_block_cpc(x, block::BRM.R2D2AdaptiveCenteringBlock, p) =
+    isempty(block.cholesky_cpc) ? tanh(x[block.cholesky_free[p]]) :
+        convert(eltype(x), block.cholesky_cpc[p])
+
 # The kind is a type parameter so Enzyme sees only the accessor branch it is
 # differentiating.  Every pair still has the same concrete
 # `(location, log_scale)` argument-tuple type, keeping WarmupHMC's pair vector
@@ -118,7 +126,7 @@ function _block_cholesky_entry(x, block, i, j)
     stick = one(eltype(x))
     offset = (i - 1) * (i - 2) ÷ 2
     for l in 1:i-1
-        z = tanh(x[block.cholesky_free[offset + l]])
+        z = _block_cpc(x, block, offset + l)
         l == j && return tau * (stick * z)
         stick *= sqrt(one(eltype(x)) - z * z)
     end
@@ -157,7 +165,7 @@ function _block_location(x, state::_BRMRanefCenteringState{N}, pair_number) wher
         stick = one(T)
         offset = (i - 1) * (i - 2) ÷ 2
         for l in 1:i-1
-            z = tanh(x[block.cholesky_free[offset + l]])
+            z = _block_cpc(x, block, offset + l)
             m += (tau * (stick * z)) * innovations[l]
             stick *= sqrt(one(T) - z * z)
         end
@@ -787,7 +795,7 @@ function _packed_block_cholesky(x, block, order, ::Val{KMAX}) where {KMAX}
         stick = one(T)
         offset = (i - 1) * (i - 2) ÷ 2
         for l in 1:i-1
-            z = tanh(x[block.cholesky_free[offset + l]])
+            z = _block_cpc(x, block, offset + l)
             C = _tset(C, tau * (stick * z), _tri(i, l))
             stick *= sqrt(one(T) - z * z)
         end
@@ -896,13 +904,19 @@ end
 _learned_order(controls, tiebreak=eachindex(controls)) =
     sortperm(collect(eachindex(controls)); by=k -> (-controls[k], tiebreak[k]))
 
+_known_correlation(::BRM.AdaptiveCenteringBlock) = false
+_known_correlation(block::BRM.R2D2AdaptiveCenteringBlock) = !isempty(block.cholesky_known)
+
 function _derive_orders!(ir::BRMOrderedCenteringReparametrization)
     state = ir.state.ranef
     for (bi, block) in enumerate(state.blocks)
         K, G = block.ranef.n_terms, block.ranef.n_groups
         lookup = state.pair_lookup[bi]
         controls = [state.sources[lookup[k, g]] for k in 1:K, g in 1:G]
-        block_order = _learned_order(vec(sum(controls; dims=2)) ./ G)
+        # A known correlation has no Cholesky coordinates to reorder, so its
+        # block keeps the declared order; its groups still learn their own.
+        block_order = _known_correlation(block) ? collect(1:K) :
+            _learned_order(vec(sum(controls; dims=2)) ./ G)
         position = invperm(block_order)
         order = reduce(hcat, [_learned_order(controls[:, g], position) for g in 1:G];
                        init=zeros(Int, K, 0))
