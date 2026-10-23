@@ -113,9 +113,10 @@ inventory and the equations' structure do not depend on the language.
 
 What the caller supplies is never translated: `labels` meanings, symbols and
 units, hook prose, and the model's own identifiers. Code-level names stay as
-they are in every language: distribution families (`Gamma`, `LogNormal`),
-standard operators (`\operatorname{diag}`, `\operatorname{logit}`) and BRM
-function names (`\operatorname{range}`, `\operatorname{constant}`).
+they are in every language: logical IDs and axis names (`random_effect`,
+`declared`), distribution families (`Gamma`, `LogNormal`), standard operators
+(`\operatorname{diag}`, `\operatorname{logit}`) and function names
+(`\operatorname{range}`, `\operatorname{constant}`, `rep_matrix`).
 
 Replace any text by keyword, e.g.
 `description_texts(:de; effective_priors="A-priori-Annahmen:")`. A word in
