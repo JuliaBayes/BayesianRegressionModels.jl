@@ -199,7 +199,27 @@ native translations); bespoke families, `Uniform` / `Pareto`
 (parameter-dependent continuous support), and `Categorical` (simplex
 parameters) are rejected. Binomial-family components must share one
 identical trial-count expression. Weights are a numeric vector summing to 1,
-a length-`K` numeric data column, or a Dirichlet-backed simplex parameter.
+a length-`K` numeric data column, a Dirichlet-backed simplex parameter, or a
+vector of `K` model expressions such as `[1 - w, w]` (a sampled scalar, or a
+per-row linear predictor `logit(w) ~ 1 + x`); expression weights are checked
+per row when the density is evaluated, and a row whose weights are negative
+or do not sum to 1 is rejected.
+
+`censored`, `truncated`, `interval_censored` and `weighted` wrap the whole
+mixture, for example `censored(MixtureModel([...], [1 - w, w]); lower=lloq)`
+for assay data below a quantification limit: a censored row contributes the
+mixture's CDF at the limit, `log(sum_k w_k F_k(lloq))`.
+
+Every mixture response also emits `<response>_membership`, an `n × K`
+generated quantity whose row `i` is the posterior probability that
+observation `i` came from each component,
+`w_ik f_k(y_i) / sum_j w_ij f_j(y_i)`, evaluated per draw; a censored row
+uses each component's probability beyond the limit in place of `f_k(y_i)`,
+and an interval-censored row its probability over the interval. Averaging a row
+over draws gives that observation's posterior membership, for example its
+probability of belonging to a contamination component. The descriptor lists
+it under role `:membership`:
+`brm_output(descriptor, :y; role=:membership)`.
 
 ## Adding another likelihood
 
