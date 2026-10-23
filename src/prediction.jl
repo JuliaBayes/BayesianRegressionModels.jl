@@ -900,12 +900,11 @@ function _ranef_mixing_nu(model, block::RanefBlock, unc_names)
     coordinates = _brm_element_coordinates(output, unc_names)
     length(coordinates) == 1 || refused(
         "has $(length(coordinates)) of the supplied unconstrained coordinates")
-    (; index=only(coordinates), plan=d.plan, constraints=output.constraints,
-       parameter=nu)
+    (; index=only(coordinates), descriptor=d, output, parameter=nu)
 end
 
 _ranef_mixing_nu_value(nu, x::AbstractVector) = haskey(nu, :value) ? nu.value :
-    _brm_constrain_value(nu.plan, nu.constraints, Float64(x[nu.index]), nu.parameter)
+    _brm_constrain_value(nu.descriptor, nu.output, Float64(x[nu.index]), nu.parameter)
 
 _ranef_name_positions(unc_names) =
     Dict{String,Int}(String(n) => i for (i, n) in enumerate(unc_names))
@@ -1686,10 +1685,10 @@ takes `to` itself. A `to` on or beyond a bound is refused (its unconstrained
 image is infinite). So is anything that is not a sampled, real-valued, top-level
 declared parameter: a population coefficient, random effect, linear predictor,
 plate-local value, transformed or generated quantity, a natively constrained
-type (simplex, correlation, Cholesky factor), and a bound that is not a numeric
-constant (one computed by arithmetic over data, or from another parameter; a
-literal, scalar data, and their `fmax`/`fmin` with a structural bound are
-constants).
+type (simplex, correlation, Cholesky factor), and a bound that is not one number
+fixed by the data (one that reads another parameter, or differs per coordinate;
+a literal, scalar data and arithmetic over them, `fmax`/`fmin` with a structural
+bound included, are fixed).
 
 Returns a fresh draws × `length(unc_names)` matrix; `draws` is left untouched.
 
@@ -1717,8 +1716,7 @@ function parameter_draws(d::BRMDescriptor, draws::AbstractMatrix, unc_names;
         "BRM prediction: declared parameter `$parameter` has Stan type ",
         "`$(output.type)`; only real-valued parameters (real, vector, ",
         "row_vector, matrix) map one coordinate per element.")
-    value = _brm_unconstrain_value(d.plan, output.constraints, Float64(to),
-                                   parameter)
+    value = _brm_unconstrain_value(d, output, Float64(to), parameter)
     coordinates = _brm_element_coordinates(output, unc_names)
     isempty(coordinates) && error(
         "BRM prediction: declared parameter `$parameter` (`$(output.name)`) is ",
@@ -1735,25 +1733,24 @@ function parameter_draws(d::BRMDescriptor, draws::AbstractMatrix, unc_names;
     out
 end
 
-# One declared constraint as a number: a literal, a scalar data value, or
-# their `fmax`/`fmin` (`_adaptive_constraint_value`). A bound computed from
-# other values is refused.
-function _brm_numeric_constraint(plan, constraints, key, parameter)
-    haskey(constraints, key) || return nothing
-    value = _adaptive_constraint_value(plan, constraints[key], parameter,
-                                       "declared-parameter")
+# One declared constraint as a number, as StanBlocks evaluates it against the
+# data (`_brm_constraint_value`). A bound that reads another parameter, or one
+# that differs per coordinate, is refused.
+function _brm_numeric_constraint(d, output::BRMOutput, key, parameter)
+    haskey(output.constraints, key) || return nothing
+    value = _brm_constraint_value(d, output, key)
     value isa Real || error(
         "BRM prediction: declared parameter `$parameter` has `$key = ",
-        "$(constraints[key])`, which is not a numeric constant; its ",
-        "unconstrained image depends on other values and is refused rather ",
-        "than guessed.")
+        "$(output.constraints[key])`, which is not one number fixed by the ",
+        "data; its unconstrained image depends on other values and is refused ",
+        "rather than guessed.")
     Float64(value)
 end
 
 # The numeric pieces of a declaration's Stan transform: its finite bounds or,
 # for an unbounded declaration, its affine offset and multiplier.
-function _brm_declared_transform(plan, constraints::NamedTuple, parameter::Symbol)
-    num(key) = _brm_numeric_constraint(plan, constraints, key, parameter)
+function _brm_declared_transform(d, output::BRMOutput, parameter::Symbol)
+    num(key) = _brm_numeric_constraint(d, output, key, parameter)
     lower, upper = num(:lower), num(:upper)
     lower = _brm_no_bound(lower, :lower) ? nothing : lower
     upper = _brm_no_bound(upper, :upper) ? nothing : upper
@@ -1767,10 +1764,10 @@ function _brm_declared_transform(plan, constraints::NamedTuple, parameter::Symbo
 end
 
 # The unconstrained image of the constrained value `to` under Stan's transform
-# for a declaration with these constraints.
-function _brm_unconstrain_value(plan, constraints::NamedTuple, to::Float64,
+# for the output's declaration.
+function _brm_unconstrain_value(d, output::BRMOutput, to::Float64,
                                 parameter::Symbol)
-    t = _brm_declared_transform(plan, constraints, parameter)
+    t = _brm_declared_transform(d, output, parameter)
     (; lower, upper) = t
     outside(bound) = error(
         "BRM prediction: `to = $to` is not strictly inside the support of ",
@@ -1792,9 +1789,9 @@ end
 
 # The constrained value of the unconstrained `u` under the same transform: the
 # inverse of `_brm_unconstrain_value`.
-function _brm_constrain_value(plan, constraints::NamedTuple, u::Float64,
+function _brm_constrain_value(d, output::BRMOutput, u::Float64,
                               parameter::Symbol)
-    t = _brm_declared_transform(plan, constraints, parameter)
+    t = _brm_declared_transform(d, output, parameter)
     (; lower, upper) = t
     !isnothing(lower) && !isnothing(upper) && return lower + (upper - lower) * logistic(u)
     !isnothing(lower) && return lower + exp(u)

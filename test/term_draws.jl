@@ -25,7 +25,7 @@ using Test
 using BayesianRegressionModels
 using StanBlocks
 using Random
-using Distributions: Exponential, LogNormal, Normal
+using Distributions: Exponential, LogNormal, Normal, truncated
 
 const RUNTIME = get(ENV, "BRM_TERM_RUNTIME", "1") != "0"
 const BS = StanBlocks.BridgeStan
@@ -351,6 +351,36 @@ end
     gone = brm_execute(dp, :predict; problem = pprob, draws = abl[1, :], seed = 7)
     @test length(gone.y_gen) == M
     @test full.y_gen != gone.y_gen
+end
+
+# A bound written as arithmetic over a data constant declares
+# `<lower=fmax(0.0, (2 * sigma_floor))>`; `parameter_draws` reads it as
+# StanBlocks evaluates it (`ModelOutput.constraint_values`).
+floored = @brm begin
+    sigma ~ truncated(Exponential(1); lower = 2 * sigma_floor)
+    mu ~ 1 + age
+    y ~ Normal(mu, sigma)
+end
+dfl = brm_descriptor(floored, merge(pop_df, (; sigma_floor = 0.1));
+                     mod = @__MODULE__, highlights = ())
+fprob = brm_execute(dfl, :fit)
+fsm   = fprob.model
+func  = BS.param_unc_names(fsm)
+
+@testset "parameter_draws reads an arithmetic bound over data" begin
+    @test occursin("(2 * sigma_floor)", StanBlocks.stan_code(dfl.plan.model))
+    fdraws = randn(MersenneTwister(5), 3, length(func))
+    abl = parameter_draws(dfl, fdraws, func; parameter = :sigma, to = 0.5)
+    fnames = BS.param_names(fsm)
+    s = only(brm_output_coordinates(dfl, :sigma, fnames))
+    for i in axes(fdraws, 1)
+        theta = BS.param_constrain(fsm, fdraws[i, :])
+        theta[s] = 0.5
+        @test abl[i, :] ≈ BS.param_unconstrain(fsm, theta)
+    end
+    # 0.15 is above the structural 0 but below the floor 2 * 0.1.
+    @test_throws "lower = 0.2" parameter_draws(
+        dfl, fdraws, func; parameter = :sigma, to = 0.15)
 end
 
 # A shared support-bounded population prior declares `lower=0`: unconstrained

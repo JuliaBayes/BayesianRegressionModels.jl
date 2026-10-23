@@ -10,9 +10,11 @@
 # and refused the whole `adaptive_centering_problem` wrapper. They now read
 # both declaration shapes and map the unconstrained coordinate with Stan's
 # `lb_constrain` / `lub_constrain`. A `truncated(D; lower=L, ...)` prior whose
-# `L` is `length_scale_floor`, a data scalar or a constant declares
-# `<lower=fmax(0.0, L)>`; the resolvers evaluate that intersection over the
-# bound data (snag adaptive-centeri-9426bb39).
+# `L` is `length_scale_floor`, a data scalar, a constant or arithmetic over them
+# declares `<lower=fmax(0.0, L)>`; the resolvers read that intersection as
+# StanBlocks evaluates it over the bound data, `ModelOutput.constraint_values`
+# (snag adaptive-centeri-9426bb39, todo
+# BayesianRegressionModels/todos/2026-10-23T01-46-40-802-18ug4zr).
 #
 # The wrapper's density identities hold for ANY deterministic function of the
 # untouched hyperparameter coordinates, so they cannot show that the cells read
@@ -438,28 +440,48 @@ end
         adaptive_centering_problem(sb, problem, DI.AutoEnzyme()), x)
 end
 
-@testset "bounded declarations outside the supported shapes still raise" begin
-    # Capability gap, not a refusal: a bound written as arithmetic over data
-    # (`lower = 2 * length_scale_floor`) declares `fmax(0.0, (2 * floor))`,
-    # which the resolvers do not evaluate yet; it raises a named error until
-    # then (todo BayesianRegressionModels/todos/2026-10-23T01-46-40-802-18ug4zr).
-    arithmetic = SBBRMI((@brm begin
-        mu ~ 0 + hsgp(x; k=6, domain=(-1.5, 1.5))
-        length_scale(mu, hsgp(x)) ~
-            truncated(LogNormal(0, 4); lower=2 * length_scale_floor)
-        y ~ Normal(mu, 0.5)
-    end)(bounded_floor_df()); mod=@__MODULE__)
-    arithmetic_names = BridgeStan.param_unc_names(
-        bounded_instantiate(arithmetic, "bounded_arithmetic").model)
-    @test_broken try
-        !isempty(BRM._adaptive_hsgp_centering_blocks(arithmetic, arithmetic_names))
-    catch
-        false
-    end
+# `lower = 2 * length_scale_floor` declares `fmax(0.0, (2 * floor))`: arithmetic
+# over data, which StanBlocks evaluates with Stan's semantics.
+const BOUNDED_ARITHMETIC_BUILDER = @brm begin
+    mu ~ 0 + hsgp(x; k=6, domain=(-1.5, 1.5))
+    length_scale(mu, hsgp(x)) ~
+        truncated(LogNormal(0, 4); lower=2 * length_scale_floor)
+    y ~ Normal(mu, 0.5)
+end
 
-    # A cdar persistence must stay a stationary interval.
+@testset "a truncated scale bound written as arithmetic over data adapts" begin
+    sb = SBBRMI(BOUNDED_ARITHMETIC_BUILDER(bounded_floor_df()); mod=@__MODULE__)
+    @test occursin("<lower=fmax(0.0, (2 * ", BRM.stan_code(sb))
+    problem = bounded_instantiate(sb, "bounded_arithmetic")
+    unc_names = BridgeStan.param_unc_names(problem.model)
+    block = only(BRM._adaptive_hsgp_centering_blocks(sb, unc_names))
+    d = brm_descriptor(sb)
+    floor = brm_length_scale_floor(d, :mu; term=:hsgp_x)
+    @test floor > 0
+    @test block.length_scale_lower == [2 * floor]
+    @test block.length_scale_upper == [Inf]
+    # A caller holding only the plan reads the same bounds.
+    rho_output = brm_term_coordinates(d, :mu, unc_names; term=:hsgp_x,
+                                      parameter=:length_scale).output
+    @test BRM._adaptive_bounds(d.plan, rho_output, 1, :hsgp_x, "length scale") ==
+          BRM._adaptive_bounds(d, rho_output, 1, :hsgp_x, "length scale") ==
+          ([2 * floor], [Inf])
+
+    x = collect(range(-0.7, 0.6; length=length(unc_names)))
+    i = only(block.length_scales)
+    rho = stan_constrained(problem, x, unc_names[i])
+    @test BRM._adaptive_constrain(x[i], only(block.length_scale_lower),
+        only(block.length_scale_upper)) ≈ rho rtol=4eps()
+    @test rho > 2 * floor
+    check_wrapper_identities(problem,
+        adaptive_centering_problem(sb, problem, DI.AutoEnzyme()), x)
+end
+
+@testset "bounded declarations outside the supported shapes still raise" begin
+    # A cdar persistence must stay a stationary interval. A descriptor without
+    # a Stan view reads its declared bounds as given.
     @test_throws "outside the stationary interval" BRM._adaptive_cdar_rho_bounds(
-        (; data=Dict{Symbol,Any}()),
+        (; stan=nothing),
         BRM.BRMOutput(:rho, :parameter, :real, (), (; lower=0.0, upper=1.5),
             :sampled, nothing, :parameter, nothing, nothing),
         :cdar_mu_week,
