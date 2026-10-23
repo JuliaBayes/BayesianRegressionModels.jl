@@ -69,6 +69,12 @@ function _brmd_call_component(env, id, callable, args, kwargs)
     _brmd_component(env, id, :call, callable, args, kwargs; argument_nodes=(family, args[2:start-1]...))
 end
 
+# The right side of `~` and a prior are in distribution position. There `vcat`
+# is SLIC's block-wise prior family `vcat(prior₁, prior₂, …)`; anywhere else in
+# an authored expression it concatenates values, as Stan's `append_row`.
+_brmd_distribution(x,env,id)=_brmd_value(x,env,id)
+_brmd_distribution(x::Expr,env,id)=_brmd_value(x,merge(env,(;distribution=true)),id)
+
 _brmd_value(x::Number, _env, _id) = x
 _brmd_value(x::AbstractString, _env, _id) = String(x)
 _brmd_value(x::QuoteNode, _env, _id) = _brmd_snapshot(x.value)
@@ -331,6 +337,9 @@ end
 function _brmd_value(x::Expr, env, id)
     declaration=_brmd_documented(x)
     declaration===x || return _brmd_value(declaration,env,(id...,:documented))
+    # Only this expression is in distribution position, never its arguments.
+    distribution=get(env,:distribution,false)
+    distribution && (env=merge(env,(;distribution=false)))
     if x.head===:tuple && length(x.args)==1 &&
        only(x.args) isa Expr && only(x.args).head===:parameters
         fields=only(x.args).args
@@ -370,9 +379,12 @@ function _brmd_value(x::Expr, env, id)
                 push!(rawargs, a)
             end
         end
-        args = Tuple(_brmd_value(a, env, (id..., :argument, i)) for (i,a) in enumerate(rawargs))
-        kwargs = (; (k => _brmd_value(v, env, (id..., :keyword, k)) for (k,v) in rawkeys)...)
         head=first(x.args)
+        # The right side of `~` is in distribution position.
+        argument(i,a,env)=head===:~ && i==2 ? _brmd_distribution(a,env,(id...,:argument,i)) :
+            _brmd_value(a,env,(id...,:argument,i))
+        args = Tuple(argument(i,a,env) for (i,a) in enumerate(rawargs))
+        kwargs = (; (k => _brmd_value(v, env, (id..., :keyword, k)) for (k,v) in rawkeys)...)
         if head===:~ && length(args)==2
             lhs=first(rawargs)
             aliases=filter(b->b.name===lhs && b.role===:alias,env.bindings)
@@ -394,7 +406,7 @@ function _brmd_value(x::Expr, env, id)
                 localenv=merge(localenv,(;outputs))
                 # Likelihood hooks and their observation parent share the
                 # actual response outputs, including held-out predictive twins.
-                args=Tuple(_brmd_value(a,localenv,(id...,:argument,i)) for (i,a) in enumerate(rawargs))
+                args=Tuple(argument(i,a,localenv) for (i,a) in enumerate(rawargs))
             end
             included=()
             rhs=last(rawargs)
@@ -415,7 +427,10 @@ function _brmd_value(x::Expr, env, id)
                 return _brmd_component(env,id,:call,bound,args,merge(kwargs,(;broadcast=true)))
             end
         end
-        return _brmd_call_component(env, id, _brmd_binding(head, env.mod), args, kwargs)
+        callable=_brmd_binding(head, env.mod)
+        callable===vcat && !distribution &&
+            (env=merge(env,(;provenance=merge(env.provenance,(;concatenation=true)))))
+        return _brmd_call_component(env, id, callable, args, kwargs)
     end
     args = Tuple(_brmd_value(a, env, (id..., x.head, i))
                  for (i,a) in enumerate(x.args) if !(a isa LineNumberNode))
@@ -518,7 +533,7 @@ function _brmd_constants(plan)
           if entry.kind !== :submodel_hook)
 end
 
-function _brmd_environment(d, owner, kind, priors, constants, notation=();groups=())
+function _brmd_environment(d, owner, kind, priors, constants, notation, texts;groups=())
     refs = Dict{Symbol,Symbol}(key => get(d.plan.data,key,nothing) isa Number ? :scalar : :observation for key in d.columns)
     for i in d.inputs
         isnothing(i.column) && continue
@@ -543,7 +558,8 @@ function _brmd_environment(d, owner, kind, priors, constants, notation=();groups
     provenance = (; model_id=d.id, owner, declaration=kind, attribution...,
         covariance_factor=_brmd_covariance_factor_binding(d,owner),
         design_columns=isnothing(design_columns) ? nothing : map(c->_brmd_design_column(d,c),design_columns),
-        random_effects=Tuple((;id=g.key,group=g.block.group,shared_id=g.block.id,margins=g.margins) for g in groups))
+        random_effects=Tuple((;id=g.key,group=g.block.group,shared_id=g.block.id,margins=g.margins) for g in groups),
+        description_texts=texts)
     bindings=Tuple((;name=last(p.id),role=:parameter,
                     value=BRMDescriptionReference(last(p.id),:scalar,p.id),prior_ids=(p.id,))
                    for p in priors if last(p.id) isa Symbol &&
@@ -571,7 +587,7 @@ function _brmd_design_column(d,c)
       effect_block=c.effect_block,preprocess,term=_brmd_snapshot(get(c,:term,nothing)))
 end
 
-function _brmd_components(d, priors, constants, notation=();groups=())
+function _brmd_components(d, priors, constants, notation, texts;groups=())
     program = _brm_prepare_program(d.plan.parent)
     byname = Dict(op.name => op for op in program.operations)
     result = BRMDescriptionComponent[]
@@ -594,7 +610,7 @@ function _brmd_components(d, priors, constants, notation=();groups=())
             f=_brmd_binding(only(sites).family,d.plan.model.mod)
             f isa StanBlocks.SlicModel && f.mod !== (@__MODULE__) && (role=:submodel_output)
         end
-        env = _brmd_environment(d, owner, role, priors, constants, notation;groups)
+        env = _brmd_environment(d, owner, role, priors, constants, notation, texts;groups)
         expr = _brmd_value(rhs, env, (role, owner, :expression))
         outputs = Tuple((; name=o.name, logical=o.logical, role=o.role,
                           kind=o.kind, segments=_brmd_snapshot(o.segments))

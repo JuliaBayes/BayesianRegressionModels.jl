@@ -1,13 +1,13 @@
 # Effective priors share the emitter's selector resolver. Never reinterpret
 # selector precedence in a reporting consumer.
-function _brmd_prior(d, id, expression, support, source, anchors, notation;bindings=())
-    env = _brmd_environment(d, id, :prior, (), _brmd_constants(d.plan), notation)
+function _brmd_prior(d, id, expression, support, source, anchors, notation, texts;bindings=())
+    env = _brmd_environment(d, id, :prior, (), _brmd_constants(d.plan), notation, texts)
     isempty(bindings) || (env=merge(env,(;bindings)))
     if expression isa ExprColumn
         support=merge(support,(; (k=>_brmd_snapshot(v) for (k,v) in pairs(getkwargs(expression))
             if k in (:lower,:upper))...))
     end
-    value = _brmd_value(expression, env, (:prior, id...))
+    value = _brmd_distribution(expression, env, (:prior, id...))
     if value isa BRMDescriptionComponent && _brmd_law(value.callable)===:uniform
         a=value.arguments
         support=merge((;lower=isempty(a) ? 0.0 : first(a),upper=isempty(a) ? 1.0 : a[2]),support)
@@ -52,7 +52,7 @@ _brmd_support(::typeof(StanBlocks.stan.builtin.vcat),blocks,mod) = _brmd_shared_
     merge(_brmd_support(_brmd_binding(first(b.args),mod)),last(_sb_plan_call_parts(b)))
     for b in blocks)
 
-function _brmd_population_priors!(priors,d,anchors,notation)
+function _brmd_population_priors!(priors,d,anchors,notation,texts)
     overrides = _sb_effect_prior_overrides(d.plan.parent; frozen_preproc=d.plan.preproc,provenance=true)
     totals = Dict(t.binding.logical => t for t in _brmd_total_bindings(d))
     for entry in _brm_population_effect_entries(d.plan.parent)
@@ -75,7 +75,7 @@ function _brmd_population_priors!(priors,d,anchors,notation)
             model=_brmd_binding(site.family,d.plan.model.mod)
             values=Dict(k=>_brmd_substitute(v,d.plan.data) for (k,v) in pairs(site.keywords))
             _brmd_submodel_priors!(priors,d,model,values,
-                (:population_internal,entry.logical),anchors,notation)
+                (:population_internal,entry.logical),anchors,notation,texts)
         end
         for (i,label) in enumerate(labels)
             configured = isnothing(settings) ? nothing : settings[i]
@@ -92,7 +92,7 @@ function _brmd_population_priors!(priors,d,anchors,notation)
             !isnothing(total) && i in total.binding.absorbed &&
                 (source=merge(source,(;integrated=(:total_effect,entry.logical))))
             push!(priors,_brmd_prior(d,(:population,entry.logical,label),expression,
-                _brmd_support(getf(expression)),source,anchors,notation))
+                _brmd_support(getf(expression)),source,anchors,notation,texts))
         end
         cats = _sb_cat_effect_overrides(overrides,entry.logical)
         for cat in _brm_categorical_effect_entries(d,entry.logical,entry.link)
@@ -113,7 +113,7 @@ function _brmd_population_priors!(priors,d,anchors,notation)
                         share=allocated.phi_start+i-1))
                 end
                 push!(priors,_brmd_prior(d,(:population,entry.logical,cat.address,:level,i),
-                    expression,_brmd_support(getf(expression)),source,anchors,notation))
+                    expression,_brmd_support(getf(expression)),source,anchors,notation,texts))
             end
         end
     end
@@ -192,7 +192,7 @@ _brmd_ranef_student_t_nu(group) =
     isnothing(group.configuration) || isnothing(group.configuration.dist) ? nothing :
         _sb_effect_prior_arg(group.configuration.dist.nu)
 
-function _brmd_ranef_priors!(priors,d,groups,anchors,notation)
+function _brmd_ranef_priors!(priors,d,groups,anchors,notation,texts)
     for group in groups
         if group.block.family === :brm_total
             # The sampled SD is the emitted scale prior itself; deviations are
@@ -202,7 +202,7 @@ function _brmd_ranef_priors!(priors,d,groups,anchors,notation)
             push!(priors,_brmd_prior(d,(group.key...,:sd,1),expression,
                 merge(_brmd_support(getf(expression)),(; lower=0.0)),
                 (; kind=group.total.binding.scale_configured[k] ? :selector : :default,
-                   margin=only(group.margins),representation=:exact_total),anchors,notation))
+                   margin=only(group.margins),representation=:exact_total),anchors,notation,texts))
             continue
         end
         cfg = group.configuration
@@ -210,7 +210,7 @@ function _brmd_ranef_priors!(priors,d,groups,anchors,notation)
             site=group.declaration
             model=_brmd_binding(site.family,d.plan.model.mod)
             values=Dict(k=>_brmd_substitute(v,d.plan.data) for (k,v) in pairs(site.keywords))
-            _brmd_submodel_priors!(priors,d,model,values,group.key,anchors,notation)
+            _brmd_submodel_priors!(priors,d,model,values,group.key,anchors,notation,texts)
             continue
         end
         # R2D2 derives these scales. Its emitted hyperpriors are inventoried
@@ -222,9 +222,9 @@ function _brmd_ranef_priors!(priors,d,groups,anchors,notation)
             :ranef_correlated_by,:ranef_correlated_by_draws)
         if logscale
             push!(priors,_brmd_prior(d,(group.key...,:log_scale),_brmd_default_normal(),NamedTuple(),
-                (;kind=:default,transformed_quantity=:sd,transform=:exp),anchors,notation))
+                (;kind=:default,transformed_quantity=:sd,transform=:exp),anchors,notation,texts))
             push!(priors,_brmd_prior(d,(group.key...,:sd,1),ExprColumn(LogNormal,0.0,1.0),
-                (;lower=0.0),(;kind=:induced,from=(group.key...,:log_scale)),anchors,notation))
+                (;lower=0.0),(;kind=:induced,from=(group.key...,:log_scale)),anchors,notation,texts))
         elseif !derived
             for i in 1:group.block.n_terms
                 expression = isnothing(cfg) ? nothing : cfg.sd_prior[i]
@@ -234,19 +234,19 @@ function _brmd_ranef_priors!(priors,d,groups,anchors,notation)
                 if expression isa _BRMKnownScale
                     push!(priors,_brmd_prior(d,(group.key...,:sd,i),
                         ExprColumn(Dirac,expression.value),(; lower=0.0),
-                        (; kind=:known, margin),anchors,notation))
+                        (; kind=:known, margin),anchors,notation,texts))
                     continue
                 end
                 expression = something(expression,_brmd_default_normal())
                 push!(priors,_brmd_prior(d,(group.key...,:sd,i),expression,
                     merge(_brmd_support(getf(expression)),(; lower=0.0)),
-                    (; kind=isnothing(cfg) ? :default : :selector, margin),anchors,notation))
+                    (; kind=isnothing(cfg) ? :default : :selector, margin),anchors,notation,texts))
             end
         end
         if group.block.noncentered
             push!(priors,_brmd_prior(d,(group.key...,:standardized_deviations),
                 ExprColumn(Normal,0.0,1.0),NamedTuple(),
-                (;kind=:generated,dimension=(group.block.n_terms,group.block.n_groups)),anchors,notation))
+                (;kind=:generated,dimension=(group.block.n_terms,group.block.n_groups)),anchors,notation,texts))
             nu = _brmd_ranef_student_t_nu(group)
             # A Student-t block scales each level's Gaussian deviations by the
             # square root of one inverse-gamma weight per level.
@@ -254,24 +254,24 @@ function _brmd_ranef_priors!(priors,d,groups,anchors,notation)
                 nu isa Real ? ExprColumn(InverseGamma,nu/2,nu/2) :
                     ExprColumn(InverseGamma,ExprColumn(/,group.configuration.dist.nu,2),
                                             ExprColumn(/,group.configuration.dist.nu,2)),(; lower=0.0),
-                (;kind=:generated,dimension=(group.block.n_groups,)),anchors,notation))
+                (;kind=:generated,dimension=(group.block.n_groups,)),anchors,notation,texts))
         else
             push!(priors,_brmd_prior(d,(group.key...,:deviations),
                 ExprColumn(MvNormalCholesky,zeros(group.block.n_terms),
                     BRMDescriptionReference(:C,:covariance,(group.key...,:cholesky_scale))),NamedTuple(),
-                (;kind=:conditional,dimension=(group.block.n_groups,group.block.n_terms),covariance=group.key),anchors,notation))
+                (;kind=:conditional,dimension=(group.block.n_groups,group.block.n_terms),covariance=group.key),anchors,notation,texts))
         end
         if group.correlated && !isnothing(cfg) && !isnothing(cfg.known_cor)
             # `cor(:, ID) = R`: the correlation is the point mass at `R`.
             push!(priors,_brmd_prior(d,(group.key...,:correlation),
                 ExprColumn(Dirac,cfg.known_cor),(; domain=:correlation),
-                (; kind=:known),anchors,notation))
+                (; kind=:known),anchors,notation,texts))
         elseif group.correlated
             eta = isnothing(cfg) ? 1.0 : cfg.lkj_eta
             push!(priors,_brmd_prior(d,(group.key...,:correlation),
                 ExprColumn(LKJCholesky,group.block.n_terms,eta),
                 (; domain=:cholesky_correlation),
-                (; kind=isnothing(cfg) ? :default : :selector),anchors,notation))
+                (; kind=isnothing(cfg) ? :default : :selector),anchors,notation,texts))
         end
     end
 end
@@ -286,7 +286,7 @@ _brmd_substitute(x::Expr, values) = Expr(x.head,
     (_brmd_substitute(a,values) for a in x.args)...)
 struct _BRMDFlatPrior end
 const _brmd_flat_prior = _BRMDFlatPrior()
-function _brmd_flat_priors!(priors,d,model,values,path,declarations,anchors,notation)
+function _brmd_flat_priors!(priors,d,model,values,path,declarations,anchors,notation,texts)
     sampled=Set(p.target for p in declarations)
     model.model isa Expr && model.model.head===:block || return
     for stmt in model.model.args
@@ -295,15 +295,15 @@ function _brmd_flat_priors!(priors,d,model,values,path,declarations,anchors,nota
         target in sampled && continue
         annotation=last(stmt.args)
         push!(priors,_brmd_prior(d,(path...,target),ExprColumn(_brmd_flat_prior),NamedTuple(),
-            (;kind=:flat,proper=false,annotation=_brmd_snapshot(annotation)),anchors,notation))
+            (;kind=:flat,proper=false,annotation=_brmd_snapshot(annotation)),anchors,notation,texts))
     end
 end
-function _brmd_submodel_priors!(priors,d,model,values,path,anchors,notation,stack=())
+function _brmd_submodel_priors!(priors,d,model,values,path,anchors,notation,texts,stack=())
     model isa StanBlocks.SlicModel || return
     model in stack && error("description: recursive SLIC submodel at $path")
     declarations = GenerativeDeclaration[]
     _sb_plan_collect!(declarations,model.model,Dict{Symbol,Symbol}(k=>k for k in keys(values)),(),Set{Symbol}(),Set{Symbol}(),Set())
-    _brmd_flat_priors!(priors,d,model,values,path,declarations,anchors,notation)
+    _brmd_flat_priors!(priors,d,model,values,path,declarations,anchors,notation,texts)
     bindings=Tuple((;name=p.target,role=:parameter,path=(p.context...,p.target),
         value=BRMDescriptionReference(p.target,:scalar,(path...,p.context...,p.target)),prior_ids=())
         for p in declarations if p.role===:prior && p.family!==:plate)
@@ -321,20 +321,20 @@ function _brmd_submodel_priors!(priors,d,model,values,path,anchors,notation,stac
         indices=lhs isa Expr && lhs.head===:ref ? Tuple(_brmd_snapshot(a) for a in lhs.args[2:end]) : ()
         logical=isempty(indices) ? binding_id : (binding_id...,:index,indices...)
         if f isa StanBlocks.SlicModel
-            _brmd_submodel_priors!(priors,d,f,nested_values,logical,anchors,notation,(stack...,model))
+            _brmd_submodel_priors!(priors,d,f,nested_values,logical,anchors,notation,texts,(stack...,model))
         else
             raw = ExprColumn(f,args...;kwargs...)
             support = merge(_brmd_support(f,args,model.mod),map(x -> _brmd_substitute(x,values),p.constraints))
             push!(priors,_brmd_prior(d,logical,raw,support,
                 (; kind=:generated, family=f, dimension=_brmd_snapshot(map(a->_brmd_substitute(a,values),p.dimension)),binding_id),
-                anchors,notation;bindings))
+                anchors,notation,texts;bindings))
         end
     end
 end
 
 # The joint density of sampled exact totals: their columns' SDs, the design
 # map A and each absorbed coefficient's prior location and precision.
-function _brmd_total_priors!(priors,d,groups,anchors,notation)
+function _brmd_total_priors!(priors,d,groups,anchors,notation,texts)
     for t in _brmd_total_bindings(d)
         b = t.binding.total
         sds = Tuple(BRMDescriptionReference(:sd,:scalar,(g.key...,:sd,1)) for g in groups
@@ -347,28 +347,28 @@ function _brmd_total_priors!(priors,d,groups,anchors,notation)
         density = ExprColumn(brm_total,sds,b.A,b.location,b.precision;keywords...)
         push!(priors,_brmd_prior(d,(:total_effect,b.predictor,:totals),density,NamedTuple(),
             (; kind=:conditional,representation=:exact_total,dimension=(d.plan.data[b.group_count],length(b.columns)),
-               integrated=Tuple((:population,b.predictor,label) for label in b.population_columns)),anchors,notation))
+               integrated=Tuple((:population,b.predictor,label) for label in b.population_columns)),anchors,notation,texts))
         isnothing(b.mixture_name) && continue
         mixture = only(x for x in d.plan.declarations if x.target === b.mixture_name && isempty(x.context))
-        push!(priors,_brmd_declared_prior(d,(:total_effect,b.predictor,:scale_mixture),mixture,anchors,notation))
+        push!(priors,_brmd_declared_prior(d,(:total_effect,b.predictor,:scale_mixture),mixture,anchors,notation,texts))
     end
 end
 
 # A top-level declaration's own family and keywords, with data substituted.
-function _brmd_declared_prior(d,logical,declaration,anchors,notation)
+function _brmd_declared_prior(d,logical,declaration,anchors,notation,texts)
     f = _brmd_binding(declaration.family,d.plan.model.mod)
     raw = Expr(:call,declaration.family,Expr(:parameters,
         (Expr(:kw,k,_brmd_substitute(v,d.plan.data)) for (k,v) in pairs(declaration.keywords))...),
         (_brmd_substitute(a,d.plan.data) for a in declaration.arguments)...)
     _brmd_prior(d,logical,raw,merge(_brmd_support(f),declaration.constraints),
-        (; kind=:declaration, family=f),anchors,notation)
+        (; kind=:declaration, family=f),anchors,notation,texts)
 end
 
-function _brmd_priors(d, anchors, notation;groups=_brmd_ranef_metadata(d))
+function _brmd_priors(d, anchors, notation, texts;groups=_brmd_ranef_metadata(d))
     priors = BRMPriorDescription[]
-    _brmd_population_priors!(priors,d,anchors,notation)
-    _brmd_ranef_priors!(priors,d,groups,anchors,notation)
-    _brmd_total_priors!(priors,d,groups,anchors,notation)
+    _brmd_population_priors!(priors,d,anchors,notation,texts)
+    _brmd_ranef_priors!(priors,d,groups,anchors,notation,texts)
+    _brmd_total_priors!(priors,d,groups,anchors,notation,texts)
     categories=Set(cat.emitted for entry in _brm_population_effect_entries(d.plan.parent)
         for cat in _brm_categorical_effect_entries(d,entry.logical,entry.link))
     # Exact-total carriers are inventoried semantically above.
@@ -391,13 +391,13 @@ function _brmd_priors(d, anchors, notation;groups=_brmd_ranef_metadata(d))
         if f isa StanBlocks.SlicModel
             values = Dict{Symbol,Any}(k => _brmd_substitute(v,d.plan.data)
                                      for (k,v) in pairs(declaration.keywords))
-            _brmd_submodel_priors!(priors,d,f,values,logical,anchors,notation)
+            _brmd_submodel_priors!(priors,d,f,values,logical,anchors,notation,texts)
         else
             sampled=any(o->o.role===:parameter && !isnothing(o.declaration) &&
                 o.declaration.target===declaration.target &&
                 o.declaration.context==declaration.context,d.outputs)
             declaration.role === :prior || sampled || continue
-            push!(priors,_brmd_declared_prior(d,logical,declaration,anchors,notation))
+            push!(priors,_brmd_declared_prior(d,logical,declaration,anchors,notation,texts))
         end
     end
     Tuple(priors), groups

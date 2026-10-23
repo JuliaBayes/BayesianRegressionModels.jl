@@ -21,6 +21,11 @@ Obtain `constrained_names` and values with matching transformed-parameter /
 generated-quantity settings. Resolution uses [`brm_output_coordinates`](@ref),
 so this works for named predictors, parameters, and predictive outputs without
 parsing emitted names. It does not simulate or transform the supplied values.
+
+`role` selects one of a target's several carriers. A `MixtureModel` response
+`y`'s per-row component-membership probabilities are
+`brm_output_draws(d, draws, names; logical=:y, role=:membership)`: `logical` is
+the response, not the emitted name `y_membership`.
 """
 function brm_output_draws(d::BRMDescriptor, draws::AbstractMatrix, names;
                           logical::Symbol, role=nothing)

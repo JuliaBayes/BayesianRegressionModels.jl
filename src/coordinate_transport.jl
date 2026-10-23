@@ -169,8 +169,11 @@ transforms' log-Jacobians are `sum(log, x)` and `sum(log, x) + log(K)/2`.
 `centered` lists each centered SB random-effect block: its `group`, `id`,
 ordered `margins`, SB `binding` and effect carrier `stan_carrier`, margin
 count `K`, level count `G`, the RK coordinates of its scales (`rk_scales`, one
-per margin, log scales) and of its correlation factor (`rk_cholesky`, empty
-for `K == 1`), and the `K × G` matrices `rk` / `stan` of standardized-draw and
+per sampled margin `scale_margins`, log scales) and of its correlation factor
+(`rk_cholesky`, empty for `K == 1` or a known correlation), the known values
+(`known_scales`, `nothing` at a sampled margin, and the known Cholesky factor
+`known_L` or `nothing`; `sd(...) = value`, `cor(:, ID) = R`, which enter the
+map as constants), and the `K × G` matrices `rk` / `stan` of standardized-draw and
 effect coordinates by (margin, SB level), with their positions
 (`scale_positions`, `cholesky_positions`, `rk_positions`, `stan_positions`).
 `stan_values` names each effect's constrained Stan value. The block's density
@@ -616,9 +619,9 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         "margins $(Tuple(margins)) on SB and $(record.margins) on RK; its " *
         "effects cannot be mapped margin by margin")
     base = (; group=record.group, id=record.id)
-    # Scales: one per margin.
-    rk_scales = Vector{Symbol}(undef, K)
-    rk_scale_values = Vector{Tuple{Symbol,Tuple}}(undef, K)
+    # Scales: one per sampled margin.
+    rk_scales = Symbol[]
+    rk_scale_values = Tuple{Symbol,Tuple}[]
     spec = _RANEF_FAMILIES[block.family]
     tau = get(spec, :tau, nothing)
     # A known-value block (`sd(...) = value`) samples only its free scales,
@@ -640,8 +643,8 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         rk_name, rk_decl, rk_index = isnothing(record.scales) ?
             (Symbol(record.scale, ".", k), record.scale, (k,)) :
             (record.scales[k], record.scales[k], ())
-        rk_scales[k] = rk_name
-        rk_scale_values[k] = (rk_decl, rk_index)
+        push!(rk_scales, rk_name)
+        push!(rk_scale_values, (rk_decl, rk_index))
         if length(free_margins) < block.n_terms
             carrier = string(block.binding, "_tau_free")
             name = string(carrier, ".", only(findall(==(sb_margin[k]), free_margins)))
@@ -705,8 +708,15 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
             end
         end
     end
+    # A known scale or correlation (`sd(...) = value`, `cor(:, ID) = R`) enters
+    # the centered map as its constant; `rk_scales` names the sampled margins
+    # `scale_margins` only.
+    known_cor = get(spec, :known, false) ? d.plan.bindings[block.binding].known_cor : nothing
     block.noncentered || push!(centered, (; base..., margins=record.margins,
         binding=block.binding, stan_carrier=String(block.z), K, G, rk_scales,
+        scale_margins=free_margins, known_scales=Tuple(known_scales),
+        known_L=isnothing(known_cor) ? nothing :
+            Matrix{Float64}(cholesky(Symmetric(known_cor)).L),
         rk_cholesky=isnothing(record.L) ? Symbol[] :
             [Symbol(record.L, ".", m) for m in 1:(K * (K - 1)) ÷ 2],
         rk=rk_z, stan=stan_b, stan_values, rk_declaration=record.z, rk_level,
@@ -1214,9 +1224,22 @@ end
 # with `tau` and `L`: the scales are `exp` of their coordinates, and RK and
 # Stan share the `cholesky_factor_corr` transform of the free values.
 function _brm_centered_factor(block, u::AbstractVector)
-    tau = exp.(u[block.scale_positions])
-    L = _adaptive_cholesky_corr(u[block.cholesky_positions], block.K)
+    tau = _brm_centered_scales(block, exp.(u[block.scale_positions]))
+    L = isnothing(block.known_L) ?
+        _adaptive_cholesky_corr(u[block.cholesky_positions], block.K) : block.known_L
     tau .* L, tau, L
+end
+
+# A centered block's scale of every margin from those of its sampled margins
+# `scale_margins`; a known margin holds its value.
+function _brm_centered_scales(block, sampled::AbstractVector)
+    length(sampled) == block.K && return sampled
+    tau = Vector{promote_type(eltype(sampled), Float64)}(undef, block.K)
+    for (k, value) in enumerate(block.known_scales)
+        isnothing(value) || (tau[k] = value)
+    end
+    tau[block.scale_margins] = sampled
+    tau
 end
 
 # `log |det(d b / d z)|` of a centered block at RK coordinates `u`: each of its
@@ -1254,8 +1277,9 @@ function _brm_centered_pullback!(out, block, u::AbstractVector, g::AbstractVecto
     Z = u[block.rk_positions]
     dB = g[block.stan_positions]
     out[block.rk_positions] = transpose(C) * dB
-    # `d B[k, h] / d log(tau[k]) == B[k, h]`.
-    out[block.scale_positions] .+= vec(sum(dB .* (C * Z); dims=2)) .+ block.G
+    # `d B[k, h] / d log(tau[k]) == B[k, h]`, for the sampled margins.
+    out[block.scale_positions] .+=
+        (vec(sum(dB .* (C * Z); dims=2)) .+ block.G)[block.scale_margins]
     isempty(block.cholesky_positions) && return out
     # `d B[i, h] / d L[i, j] == tau[i] * Z[j, h]`; `d log(L[i, i]) == 1 / L[i, i]`.
     GL = (tau .* dB) * transpose(Z)
@@ -1454,11 +1478,12 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
     end
     for block in t.centered
         z = _brm_rk_declaration_value(rk_values, block.rk_declaration)
-        tau = map(block.rk_scale_values) do (declaration, index)
+        tau = _brm_centered_scales(block, map(block.rk_scale_values) do (declaration, index)
             value = _brm_rk_declaration_value(rk_values, declaration)
             isempty(index) ? value : value[index...]
-        end
-        L = isnothing(block.rk_L) ? Matrix{Float64}(I, block.K, block.K) :
+        end)
+        L = !isnothing(block.known_L) ? block.known_L :
+            isnothing(block.rk_L) ? Matrix{Float64}(I, block.K, block.K) :
             _brm_rk_declaration_value(rk_values, block.rk_L)
         for h in 1:block.G, k in 1:block.K
             effect = tau[k] * sum(L[k, j] * z[block.rk_level[h], j] for j in 1:k)

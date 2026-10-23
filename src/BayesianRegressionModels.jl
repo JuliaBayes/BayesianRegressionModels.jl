@@ -224,6 +224,7 @@ export brm_description_math, brm_description_symbol
 export brm_description_binding, brm_description_prior
 export brm_description_record
 export brm_description_prior_anchor, brm_description_prior_references
+export BRMDescriptionTexts, description_texts, brm_description_texts
 export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        brm_population_effect_coordinates, brm_term_coordinates,
        brm_length_scale_floor,
@@ -310,6 +311,8 @@ export popefs, _popefs_normal, _popefs_coefs, _popefs_normal_coefs,
        ranef_correlated_draws_known_scale, ranef_correlated_draws_known_cor,
        ranef_correlated_draws_known_scale_student_t,
        ranef_correlated_draws_known_cor_student_t, brm_scatter_margins,
+       ranef_correlated_draws_centered_known_scale,
+       ranef_correlated_draws_centered_known_cor,
        ranef_correlated_draws_marginal, ranef_correlated_draws_centered_marginal,
        ranef_correlated_draws_completion,
        brm_col_variances, brm_r2d2_scale, brm_cat_variances,
