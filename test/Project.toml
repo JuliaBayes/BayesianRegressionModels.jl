@@ -52,8 +52,10 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # refuses a combinator's unknown keyword; 204e5a7 lists typed `=` in `stan_descriptor`;
 # 94e414bb lets a `ValueFamily` (BRM's generated `MixtureModel` family) be the base family
 # of `weighted` / `truncated` / `censored` / `interval_censored`, with CDF companions;
-# b233afbc evaluates every descriptor input/output bound as `constraint_values`.
-rev = "b233afbc525172cd55a9e728dffd5fb578419bea"
+# b233afbc evaluates every descriptor input/output bound as `constraint_values`;
+# c7293b88 evaluates Stan's vectorised builtins elementwise there, so a per-axis
+# `fmax(0.0, rho_lower_…)` floor reports one bound per coordinate.
+rev = "c7293b884363cf4d84da43bba7a775696ad81c70"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"

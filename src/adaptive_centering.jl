@@ -860,12 +860,13 @@ _adaptive_stan_expr_value(x) = x
 # (StanBlocks b233afbc, stanblocks-use §30), with Stan's semantics: a literal,
 # a data value, the `fmax`/`fmin` sbimpl writes where an explicit bound meets a
 # structural one (`_sb_bound_intersection`), arithmetic over data, and one
-# entry per coordinate for a per-coordinate bound. A bound that reads a
-# parameter has no value without a draw and comes back `nothing` for the caller
-# to refuse. A descriptor without a Stan view (Turing) declares its bounds as
-# numbers already. A caller holding only the `GenerativePlan` gets the view
-# from its model, at the cost of one more `stan_descriptor`. Shared by adaptive
-# centering and `parameter_draws`.
+# entry per coordinate for a per-coordinate bound (an anisotropic term's
+# `fmax(0.0, rho_lower_…)`, elementwise since StanBlocks c7293b88). A bound
+# that reads a parameter has no value without a draw and comes back `nothing`
+# for the caller to refuse. A descriptor without a Stan view (Turing) declares
+# its bounds as numbers already. A caller holding only the `GenerativePlan`
+# gets the view from its model, at the cost of one more `stan_descriptor`.
+# Shared by adaptive centering and `parameter_draws`.
 _brm_stan_view(d) = d.stan
 _brm_stan_view(plan::GenerativePlan) =
     Base.invokelatest(StanBlocks.stan_descriptor, plan.model)
