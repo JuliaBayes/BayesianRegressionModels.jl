@@ -10,7 +10,9 @@
 # the ordinary `reprocess`, which validates it — and records where each graph
 # input comes from: a column of the design, or a value no design changes.
 # Every later design of that kind is checked as `reprocess` checks its values,
-# and its raw columns are bound into the program lowered once for that kind.
+# and its raw columns are bound into the program lowered once for that kind,
+# with the values fitted from fixed inputs alone frozen as that replay bound
+# them.
 #
 # An input the planner derives from the design in Julia (a value BRM has not
 # moved into the graph, or data a custom hook writes) cannot be recomputed
@@ -33,6 +35,11 @@ into that replay's lowered program.
   values). Bind them once with
   `ReactiveKernels.prepare(spec; have, want, bound=binder.fitted)` and pass the
   rest per design; values that read only them are then computed once.
+- What the program fits from those inputs alone and binding evaluates (spline
+  and HSGP fits, fitted means and SDs, level sets) is taken from the first
+  design of each kind and bound frozen into every later one (RKPPL's
+  `bind_data(…; frozen)`): a later design computes only what its own columns
+  determine, such as a basis at its rows.
 - A design is refused exactly where `reprocess` refuses its values: unseen
   factor, `mo` or group levels, HSGP axis values past the fitted basis
   interval or fixed domain, ragged labels that name no cell, and per-cell
@@ -61,14 +68,18 @@ struct _RKDesignInput
     column::Symbol
 end
 
-# One kind of design: how its inputs are read, the program lowered for it, and
-# the value checks. `derived` names the inputs that force a planned replay.
+# One kind of design: how its inputs are read, the program lowered for it, the
+# value checks, and the definitions it binds frozen (RKPPL's `FrozenValues`, or
+# `nothing`). `derived` names the inputs that force a planned replay.
 struct _RKDesignClass
     sources::Vector{Pair{Symbol,Any}}
     lowering::Any
     checks::Vector{Any}
     derived::Vector{Symbol}
+    frozen::Any
 end
+_RKDesignClass(derived::Vector{Symbol}) =
+    _RKDesignClass(Pair{Symbol,Any}[], nothing, Any[], derived, nothing)
 _rk_design_planned(class::_RKDesignClass) = !isempty(class.derived)
 
 function rk_design_binder(rk::RKBRMI; resample_groups=(),
@@ -109,7 +120,7 @@ function _rk_design_plan(binder::RKDesignBinder, design)
     end
     columns = Dict{Symbol,Any}(name => _rk_design_input(source, design)
         for (name, source) in class.sources)
-    _rk_bind_design_plan(class.lowering, columns)
+    _rk_bind_design_plan(class.lowering, columns, class.frozen)
 end
 
 _rk_design_replay(binder::RKDesignBinder, design) = reprocess(binder.rk, design;
@@ -195,10 +206,8 @@ function _rk_design_class(binder::RKDesignBinder, replay::RKBRMI, design)
     rk = binder.rk
     # A provider that emits new callables per design binds its own program;
     # a plan whose value checks the binder cannot read replays in full.
-    replay.program === rk.program ||
-        return _RKDesignClass(Pair{Symbol,Any}[], nothing, Any[], [:callables])
-    _rk_design_checked(replay.plan) ||
-        return _RKDesignClass(Pair{Symbol,Any}[], nothing, Any[], [:plan])
+    replay.program === rk.program || return _RKDesignClass([:callables])
+    _rk_design_checked(replay.plan) || return _RKDesignClass([:plan])
     columns = _rk_source_data_columns(replay.plan, _rk_retained_program(rk))
     # A data-free replay binds its fitted values frozen, not the fit-role inputs
     # they are fitted from.
@@ -219,8 +228,12 @@ function _rk_design_class(binder::RKDesignBinder, replay::RKBRMI, design)
             push!(sources, name => _RKDesignInput(column))
     end
     checks = _rk_design_checks(binder, replay.plan, design, derived)
-    isempty(derived) || return _RKDesignClass(Pair{Symbol,Any}[], nothing, Any[], sort!(derived))
-    _RKDesignClass(sources, _rk_design_lowering(replay), checks, Symbol[])
+    isempty(derived) || return _RKDesignClass(sort!(derived))
+    # What the program fits from the fixed inputs alone is the same for every
+    # design: bound frozen, it is computed once, here, not on every binding.
+    fixed = Set{Symbol}(name for (name, source) in sources if source isa _RKFixedInput)
+    _RKDesignClass(sources, _rk_design_lowering(replay), checks, Symbol[],
+        _rk_design_frozen(replay, fixed))
 end
 
 _rk_design_checked(::Union{_RKStructuralPlan,_RKValuePlan}) = true
@@ -343,8 +356,9 @@ function _rk_design_cell_check(kernel, design)
     isempty(cells) && isempty(per_cell) && isempty(joins) ? (_design -> nothing) : check
 end
 
-# Lowering and binding live in the ReactiveKernels extension.
+# Lowering, freezing and binding live in the ReactiveKernels extension.
 function _rk_design_lowering end
+function _rk_design_frozen end
 function _rk_bind_design_plan end
 function _rk_plan_columns end
 

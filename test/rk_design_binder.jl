@@ -161,6 +161,38 @@ hooked_statement(d) = @brm d begin
     mu = loc + b
     y ~ Normal(mu, 0.8)
 end
+# One model per value the program fits from the training data alone.
+thin_plate(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + s(x)
+    y ~ Normal(mu, sigma)
+end
+tensor(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + t2(x, z; k=(4, 4))
+    y ~ Normal(mu, sigma)
+end
+interval(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + hsgp(x; k=5)
+    y ~ Normal(mu, sigma)
+end
+zscaled(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + zscale(x)
+    y ~ Normal(mu, sigma)
+end
+shrunk(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + g + (1 | h)
+    effect(mu, :) ~ r2d2(R2=Beta(1, 1), tau_bsv=0.5, alpha=1)
+    y ~ Normal(mu, sigma)
+end
+grouped(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + (1 | h)
+    y ~ Normal(mu, sigma)
+end
 end
 const BM = BinderModels
 
@@ -410,4 +442,54 @@ end
         end
         @test occursin("replayed in full", sprint(show, binder)) == planned
     end
+end
+
+# 24 training rows: a thin-plate basis needs 10 unique axis values.
+fit_data(rng, n) = (; x=collect(range(0.3, 4.1; length=n)) .+ 0.01 .* rand(rng, n),
+    z=sin.(1:n) .+ 0.1 .* rand(rng, n), g=["a", "b", "c"][mod1.(1:n, 3)],
+    h=["p", "q", "r", "s"][mod1.(1:n, 4)], y=randn(rng, n))
+
+@stestset "values fitted from the training data alone bind frozen" begin
+    rng = Xoshiro(19)
+    train = fit_data(rng, 24)
+    designs = [map(v -> v[rows], without(fit_data(rng, 24), :y)) for rows in (2:9, 5:20, 11:13)]
+    # The definitions each program fits from its fit-role inputs alone.
+    for (build, names) in ((BM.thin_plate, (:s_x_fit,)), (BM.tensor, (:t2_x_z_fit,)),
+            (BM.interval, (:hsgp_x_fit, :hsgp_x_rho_floor)),
+            (BM.zscaled, (:x_fit_mean, :x_fit_sd)),
+            (BM.shrunk, (:x_fit_var, :h_fit_levels, :mu_g_lvl_2_indicator_var)),
+            (BM.grouped, (:h_fit_levels,)))
+        rk = RKBRMI(build(train))
+        binder = check_binder(rk, designs; want=:mu)
+        # One kind, bound into its lowering: no input forces a replay.
+        @test length(binder.classes) == 1 && !occursin("replayed in full", sprint(show, binder))
+        frozen = only(values(binder.classes)).frozen
+        @test frozen !== nothing && all(name -> haskey(frozen.values, name), names)
+        # A later design binds them by value: its binding evaluates none of them.
+        @test all(name -> haskey(BRM._rk_design_plan(binder, designs[2]).frozen.values, name),
+            names)
+    end
+    # A resampled grouping's levels are the design's own, never frozen.
+    rk = RKBRMI(BM.grouped(train))
+    binder = check_binder(rk, designs; resample_groups=[:h], want=:mu,
+        runtime=d -> (:b_h => reshape(0.1 .* collect(1.0:length(unique(d.h))), :, 1),))
+    frozen = only(values(binder.classes)).frozen
+    @test frozen === nothing || !haskey(frozen.values, :h_fit_levels)
+end
+
+@stestset "a thin-plate fit is a packed vector the basis is evaluated from" begin
+    rng = Xoshiro(23)
+    x_fit, x = randn(rng, 30), randn(rng, 7)
+    for k in (4, 10)
+        fit = BRM.brm_tps_fit(x_fit, k)
+        @test length(fit) == 1 + 30 * (k - 1)
+        # The basis the emitted program evaluates from the packed fit is,
+        # bit for bit, the one fitted from the axis.
+        @test isequal(BRM.brm_tps_apply(x, fit, k),
+            BRM._brm_apply_spline(BRM._brm_fit_spline(x_fit; k), x))
+        @test isequal(BRM.brm_tps_basis(x, x_fit, k), BRM.brm_tps_apply(x, fit, k))
+    end
+    # refused: a packed fit's length fixes its knot count for its rank, so a
+    # vector of another length is no fit of that rank (dev §1: no silent misread).
+    @test_throws "packed thin-plate fit" BRM.brm_tps_apply(x, x_fit, 10)
 end
