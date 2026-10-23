@@ -109,23 +109,10 @@ _rk_fitted_state_boundary(term) = term.kind === :spline && term.options.kind ===
 # them, so the fitted values are all a replay needs from the training data.
 # Returns their names, and for each the fit-role inputs it is fitted from.
 function _rk_fitted_value_names(emitted, plan, fit_inputs::Set{Symbol}; prefix)
-    data = Set{Symbol}(keys(plan.columns))
-    for statement in emitted.main.args
-        _rk_source_assignments!(data, statement)
-        _rk_source_outputs!(data, statement)
-    end
-    fitted = Dict{Symbol,Set{Symbol}}()
+    fitted = _rk_fitted_definitions(emitted, plan, fit_inputs)
     terminal = Symbol[]
-    for statement in emitted.main.args
-        statement isa Expr || continue
-        reads = intersect(_rk_source_symbols!(Set{Symbol}(),
-            Meta.isexpr(statement, :(=), 2) ? statement.args[2] : statement), data)
-        if Meta.isexpr(statement, :(=), 2) && statement.args[1] isa Symbol &&
-                !isempty(reads) && all(name -> name in fit_inputs || haskey(fitted, name), reads)
-            fitted[statement.args[1]] = union(intersect(reads, fit_inputs),
-                (fitted[name] for name in reads if haskey(fitted, name))...)
-            continue
-        end
+    for (statement, reads) in _rk_statement_reads(emitted, plan)
+        _rk_fitted_definition(statement, fitted) === nothing || continue
         direct = intersect(reads, fit_inputs)
         isempty(direct) || error(
             "$prefix: `$(sprint(Base.show_unquoted, statement))` reads the " *
@@ -139,6 +126,37 @@ function _rk_fitted_value_names(emitted, plan, fit_inputs::Set{Symbol}; prefix)
     sort!(terminal), Dict{Symbol,Vector{Symbol}}(name => sort!(collect(fitted[name]))
         for name in terminal)
 end
+
+# Each top-level statement of an emitted program with the data it reads: data
+# columns and names the program defines.
+function _rk_statement_reads(emitted, plan)
+    data = Set{Symbol}(keys(plan.columns))
+    for statement in emitted.main.args
+        _rk_source_assignments!(data, statement)
+        _rk_source_outputs!(data, statement)
+    end
+    [(statement, intersect(_rk_source_symbols!(Set{Symbol}(),
+            Meta.isexpr(statement, :(=), 2) ? statement.args[2] : statement), data))
+        for statement in emitted.main.args if statement isa Expr]
+end
+
+# The definitions an emitted program fits from `inputs` alone: each `name = …`
+# that reads data, all of it `inputs` or such definitions before it. Maps each
+# to the inputs it is fitted from.
+function _rk_fitted_definitions(emitted, plan, inputs::Set{Symbol})
+    fitted = Dict{Symbol,Set{Symbol}}()
+    for (statement, reads) in _rk_statement_reads(emitted, plan)
+        Meta.isexpr(statement, :(=), 2) && statement.args[1] isa Symbol &&
+            !isempty(reads) && all(name -> name in inputs || haskey(fitted, name), reads) ||
+            continue
+        fitted[statement.args[1]] = union(intersect(reads, inputs),
+            (fitted[name] for name in reads if haskey(fitted, name))...)
+    end
+    fitted
+end
+_rk_fitted_definition(statement, fitted) = Meta.isexpr(statement, :(=), 2) &&
+    statement.args[1] isa Symbol && haskey(fitted, statement.args[1]) ?
+    statement.args[1] : nothing
 
 # The fits the planner computes in Julia, recorded while it plans the fit's own
 # data as a frozen replay of itself (`_brm_fitted`).
