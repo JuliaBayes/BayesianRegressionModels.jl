@@ -126,7 +126,7 @@ end
     @test isempty(setdiff(tabled, emitted))   # a row for a submodel that is gone
     # Pin the count too: both setdiffs stay empty if a submodel and its row are
     # deleted together, which is fine, but a silent DROP should still be read.
-    @test length(emitted) == 24 # twelve established layouts + generic centered/noncentered + scalar slope + two Student-t + three marginalized |ID| (active, centered active, completion) + known scale/correlation and their two Student-t forms
+    @test length(emitted) == 26 # twelve established layouts + generic centered/noncentered + scalar slope + two Student-t + three marginalized |ID| (active, centered active, completion) + known scale/correlation and their two Student-t forms + two centered Student-t
 end
 
 # The centered families are the reason `noncentered` is reported rather than

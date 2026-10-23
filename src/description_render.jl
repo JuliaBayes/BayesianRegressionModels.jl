@@ -47,6 +47,9 @@ function brm_description_math(c::BRMDescriptionContext,x::BRMDescriptionReferenc
         return _brmd_allocation_scale_math(x.logical)
     x.axis===:covariance && x.logical isa Tuple && last(x.logical)===:cholesky_scale &&
         return "C_{"*_brmd_block_math(c,x.logical[1:end-1])*"}"
+    # A Student-t block's level mixing weight, as in its scale-mixture equation.
+    x.logical isa Tuple && first(x.logical)===:random_effect && last(x.logical)===:mixing_weights &&
+        return "w_{"*_brmd_block_math(c,x.logical[1:end-1])*",i}"
     # A block SD margin, as in D=diag(SD); exact-total blocks have one margin.
     x.logical isa Tuple && first(x.logical)===:random_effect && length(x.logical)>=3 &&
         x.logical[end-1]===:sd && return "\\mathrm{SD}_{"*_brmd_block_math(c,x.logical[1:end-2])*

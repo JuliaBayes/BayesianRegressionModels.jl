@@ -243,22 +243,28 @@ function _brmd_ranef_priors!(priors,d,groups,anchors,notation)
                     (; kind=isnothing(cfg) ? :default : :selector, margin),anchors,notation))
             end
         end
+        nu = _brmd_ranef_student_t_nu(group)
+        # A Student-t block scales each level's Gaussian deviations by the
+        # square root of one inverse-gamma weight per level.
+        mixing = isnothing(nu) ? nothing : _brmd_prior(d,(group.key...,:mixing_weights),
+            nu isa Real ? ExprColumn(InverseGamma,nu/2,nu/2) :
+                ExprColumn(InverseGamma,ExprColumn(/,group.configuration.dist.nu,2),
+                                        ExprColumn(/,group.configuration.dist.nu,2)),(; lower=0.0),
+            (;kind=:generated,dimension=(group.block.n_groups,)),anchors,notation)
         if group.block.noncentered
             push!(priors,_brmd_prior(d,(group.key...,:standardized_deviations),
                 ExprColumn(Normal,0.0,1.0),NamedTuple(),
                 (;kind=:generated,dimension=(group.block.n_terms,group.block.n_groups)),anchors,notation))
-            nu = _brmd_ranef_student_t_nu(group)
-            # A Student-t block scales each level's Gaussian deviations by the
-            # square root of one inverse-gamma weight per level.
-            isnothing(nu) || push!(priors,_brmd_prior(d,(group.key...,:mixing_weights),
-                nu isa Real ? ExprColumn(InverseGamma,nu/2,nu/2) :
-                    ExprColumn(InverseGamma,ExprColumn(/,group.configuration.dist.nu,2),
-                                            ExprColumn(/,group.configuration.dist.nu,2)),(; lower=0.0),
-                (;kind=:generated,dimension=(group.block.n_groups,)),anchors,notation))
+            isnothing(mixing) || push!(priors,mixing)
         else
+            # Centered: the deviations are sampled, given a Student-t level's
+            # weight with the factor scaled by its square root.
+            isnothing(mixing) || push!(priors,mixing)
+            C = BRMDescriptionReference(:C,:covariance,(group.key...,:cholesky_scale))
+            scale = isnothing(nu) ? C : ExprColumn(*,ExprColumn(sqrt,
+                BRMDescriptionReference(:w,:scalar,(group.key...,:mixing_weights))),C)
             push!(priors,_brmd_prior(d,(group.key...,:deviations),
-                ExprColumn(MvNormalCholesky,zeros(group.block.n_terms),
-                    BRMDescriptionReference(:C,:covariance,(group.key...,:cholesky_scale))),NamedTuple(),
+                ExprColumn(MvNormalCholesky,zeros(group.block.n_terms),scale),NamedTuple(),
                 (;kind=:conditional,dimension=(group.block.n_groups,group.block.n_terms),covariance=group.key),anchors,notation))
         end
         if group.correlated && !isnothing(cfg) && !isnothing(cfg.known_cor)

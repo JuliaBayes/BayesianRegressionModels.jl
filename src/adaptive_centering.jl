@@ -672,8 +672,10 @@ end
 # rather than being silently left fixed. An R2D2 block needs the emitted
 # model's scale context `r2d2` (`_adaptive_r2d2_context`), which only
 # `adaptive_centering_blocks` builds: R2D2 blocks are never centered, so the
-# replay caller never reaches one.
-function _adaptive_block(ranef::RanefBlock, unc_names, pos; r2d2=nothing)
+# replay caller never reaches one. `effects` lets that caller pass a Student-t
+# block's own effect coordinates with its Gaussian family's frame.
+function _adaptive_block(ranef::RanefBlock, unc_names, pos; r2d2=nothing,
+                         effects=nothing)
     ranef.family in _ADAPTIVE_STRATIFIED_FAMILIES && error(
         "BRM adaptive centering: stratified block `$(ranef.binding)` ",
         "(`$(ranef.family)`, group `$(ranef.group)`, by `$(ranef.by)`) is ",
@@ -709,7 +711,7 @@ function _adaptive_block(ranef::RanefBlock, unc_names, pos; r2d2=nothing)
     AdaptiveCenteringBlock(
         ranef,
         target_c,
-        ranef_coordinates(ranef, unc_names),
+        isnothing(effects) ? ranef_coordinates(ranef, unc_names) : effects,
         _adaptive_named_indices(pos, cholesky_names, binding, "Cholesky"),
         _adaptive_named_indices(pos, scale_names, binding, "scale"),
     )
@@ -750,7 +752,11 @@ anything else raises naming the block and the expression.
 
 Stratified `gr(g, by=b)` blocks currently raise rather than being silently
 left fixed: they carry one `L,tau` frame per stratum and need a separate indexed
-metadata contract. Intercept-only `(1 | mm(...))` blocks adapt through the
+metadata contract. Student-t blocks (`ranef(:, ID) ~ TDist(nu)`) are not
+described yet: each level's factor is `sqrt(w[g]) * C`, which neither block type
+models, so such a block keeps its compiled parameterization (non-centered, or
+centered under `centered_groups`) while the model's other blocks adapt (todo
+`16jywsl`). Intercept-only `(1 | mm(...))` blocks adapt through the
 ordinary scalar path (their downstream gather is linear); an `mm` block with
 any slope term, including a slope-only `(0 + x | mm(...))`, shares the ordinary
 correlated emission and adapts with it.

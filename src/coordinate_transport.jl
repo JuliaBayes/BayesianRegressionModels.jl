@@ -127,8 +127,9 @@ coordinates are paired only as block positions; the block moves through the
 nonlinear map recorded in [`BRMCoordinateTransport`](@ref)`.simplexes`.
 A `:centered` pair joins RK's standardized draw `z` of one (level, margin) with
 the effect `b` of the same (level, margin) that a centered SB block
-(`centered_groups`) samples. At each point `b = diag(tau) * L * z` per level,
-with that point's scales `tau` and correlation factor `L`, so the block moves
+(`centered_groups`) samples. At each point `b = diag(tau) * L * z` per level
+(times `sqrt(w)` of the level's mixing weight for a Student-t block), with that
+point's scales `tau`, correlation factor `L` and weights, so the block moves
 through the map recorded in [`BRMCoordinateTransport`](@ref)`.centered`.
 """
 struct BRMCoordinatePair
@@ -169,14 +170,17 @@ transforms' log-Jacobians are `sum(log, x)` and `sum(log, x) + log(K)/2`.
 `centered` lists each centered SB random-effect block: its `group`, `id`,
 ordered `margins`, SB `binding` and effect carrier `stan_carrier`, margin
 count `K`, level count `G`, the RK coordinates of its scales (`rk_scales`, one
-per margin, log scales) and of its correlation factor (`rk_cholesky`, empty
-for `K == 1`), and the `K × G` matrices `rk` / `stan` of standardized-draw and
-effect coordinates by (margin, SB level), with their positions
-(`scale_positions`, `cholesky_positions`, `rk_positions`, `stan_positions`).
-`stan_values` names each effect's constrained Stan value. The block's density
-offset depends on the point: at transported points the RK log density equals
-Stan's plus `logdensity_offset` plus `G * log(det(diag(tau) * L))` per
-centered block, the log-Jacobian of `z -> b`; use
+per margin, log scales), of its correlation factor (`rk_cholesky`, empty
+for `K == 1`) and, for a Student-t block, of its mixing weights (`rk_mixing`,
+one per SB level, log weights; empty otherwise), and the `K × G` matrices
+`rk` / `stan` of standardized-draw and effect coordinates by (margin, SB
+level), with their positions (`scale_positions`, `cholesky_positions`,
+`mixing_positions`, `rk_positions`, `stan_positions`). `stan_values` names each
+effect's constrained Stan value. The block's density offset depends on the
+point: at transported points the RK log density equals Stan's plus
+`logdensity_offset` plus `G * log(det(diag(tau) * L))` per centered block
+(plus `K/2 * sum(log, w)` for a Student-t block), the log-Jacobian of
+`z -> b`; use
 [`brm_stan_logdensity_to_rk`](@ref). Reading `logdensity_offset` from a
 transport with a centered block is an error naming that function.
 
@@ -272,7 +276,9 @@ A block in `centered_groups` samples the effects `b` themselves, with
 draws `z`. Its effects pair with RK's draws by (level, margin) as `:centered`
 pairs, its scales and correlation factor pair as for a non-centered block, and
 the block moves through the exact per-point map `b = diag(tau) * L * z`, using
-that point's `tau` and `L` (`t.centered`). Its SB margins must be in RK's
+that point's `tau` and `L` (`t.centered`). A centered Student-t block's mixing
+weights pair by level label as for a non-centered one, and its map is
+`b = sqrt(w) * diag(tau) * L * z` per level. Its SB margins must be in RK's
 margin order.
 
 Every non-simplex, non-centered pair has equal unconstrained values on both
@@ -322,13 +328,14 @@ function brm_coordinate_transport(rk::RKBRMI, sb::SBBRMI, stan_names::AbstractVe
     t
 end
 
-# The centered map rebuilds each block's scales as `exp` of their coordinates:
-# RK's `:exp` transform, or `:floored` (`lo + exp(u)`) at a zero floor.
+# The centered map rebuilds each block's scales (and a Student-t block's mixing
+# weights) as `exp` of their coordinates: RK's `:exp` transform, or `:floored`
+# (`lo + exp(u)`) at a zero floor.
 function _brm_transport_centered_scales(rk, t)
     isempty(t.centered) && return nothing
     transforms = _rk_layout_coordinate_transforms(rk)
     floors = _rk_layout_coordinate_floors(rk)
-    for block in t.centered, i in block.scale_positions
+    for block in t.centered, i in vcat(block.scale_positions, block.mixing_positions)
         transforms[i] === :exp || transforms[i] === :floored && iszero(floors[i]) ||
             _brm_transport_error(:unsupported_coverage,
                 "brm_coordinate_transport: centered block `$(block.binding)` scale " *
@@ -406,6 +413,7 @@ function _brm_transport_validate(rk_names, stan, pairs, correlations, simplexes,
     centered_blocks = NamedTuple[(; block...,
             scale_positions=[rk_pos[n] for n in block.rk_scales],
             cholesky_positions=[rk_pos[n] for n in block.rk_cholesky],
+            mixing_positions=[rk_pos[n] for n in block.rk_mixing],
             rk_positions=map(n -> rk_pos[n], block.rk),
             stan_positions=map(n -> stan_pos[n], block.stan))
         for block in centered]
@@ -705,15 +713,20 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
             end
         end
     end
+    # A centered Student-t level's effect is `sqrt(w) * diag(tau) * L * z`, so
+    # the map also reads its mixing weight, by SB level.
+    rk_mixing = get(record, :mixing, nothing)
     block.noncentered || push!(centered, (; base..., margins=record.margins,
         binding=block.binding, stan_carrier=String(block.z), K, G, rk_scales,
         rk_cholesky=isnothing(record.L) ? Symbol[] :
             [Symbol(record.L, ".", m) for m in 1:(K * (K - 1)) ÷ 2],
+        rk_mixing=isnothing(rk_mixing) ? Symbol[] :
+            [Symbol(rk_mixing, ".", rk_level[h]) for h in 1:G],
+        rk_mixing_declaration=rk_mixing,
         rk=rk_z, stan=stan_b, stan_values, rk_declaration=record.z, rk_level,
         rk_scale_values, rk_L=record.L))
     # Student-t mixing weights: one per level, paired by level label. Both
     # backends must agree that the block is Student-t.
-    rk_mixing = get(record, :mixing, nothing)
     stan_mixing = _ranef_mixing_coordinates(block, stan)
     isnothing(rk_mixing) == isnothing(stan_mixing) || _brm_transport_error(
         :parameterization_mismatch,
@@ -1219,10 +1232,18 @@ function _brm_centered_factor(block, u::AbstractVector)
     tau .* L, tau, L
 end
 
+# Each level's multiplier of `C`: `sqrt(w)` for a Student-t block, whose
+# weights' coordinates are `log(w)`, and `1` otherwise.
+_brm_centered_level_scales(block, u::AbstractVector) =
+    isempty(block.mixing_positions) ? ones(eltype(u), block.G) :
+        exp.(u[block.mixing_positions] ./ 2)
+
 # `log |det(d b / d z)|` of a centered block at RK coordinates `u`: each of its
-# `G` levels maps `z -> C * z` with a triangular `C`.
+# `G` levels maps `z -> s * C * z` with a triangular `C` and its multiplier
+# `s` (`_brm_centered_level_scales`).
 _brm_centered_logjacobian(block, u::AbstractVector) =
-    block.G * sum(log, diag(first(_brm_centered_factor(block, u))))
+    block.G * sum(log, diag(first(_brm_centered_factor(block, u)))) +
+    block.K * sum(log, _brm_centered_level_scales(block, u))
 
 # `J' * GL` for `L = _adaptive_cholesky_corr(raw, K)`, where `GL` is a gradient
 # with respect to the entries of `L`. Row `i` holds `L[i, j] = s[j] * z[j]` for
@@ -1246,18 +1267,24 @@ function _brm_cholesky_corr_pullback(raw::AbstractVector, K::Int, GL::AbstractMa
 end
 
 # Adds a centered block's pullback to `out`, the permuted Stan gradient `g`:
-# the effects `B = C * Z` pull back to `C' * dB` on the standardized draws and
-# to the block's scale and correlation coordinates, plus the gradient of its
-# log-Jacobian `G * (sum(log, tau) + sum(log, diag(L)))`.
+# the effects `B = C * Z * diag(s)` pull back to `C' * dB * diag(s)` on the
+# standardized draws and to the block's scale, correlation and (Student-t)
+# mixing-weight coordinates, plus the gradient of its log-Jacobian
+# `G * (sum(log, tau) + sum(log, diag(L))) + K * sum(log, s)`.
 function _brm_centered_pullback!(out, block, u::AbstractVector, g::AbstractVector)
     C, tau, L = _brm_centered_factor(block, u)
+    s = transpose(_brm_centered_level_scales(block, u))
     Z = u[block.rk_positions]
-    dB = g[block.stan_positions]
+    dB = g[block.stan_positions] .* s
+    B = C * Z
     out[block.rk_positions] = transpose(C) * dB
     # `d B[k, h] / d log(tau[k]) == B[k, h]`.
-    out[block.scale_positions] .+= vec(sum(dB .* (C * Z); dims=2)) .+ block.G
+    out[block.scale_positions] .+= vec(sum(dB .* B; dims=2)) .+ block.G
+    # `d B[k, h] / d log(w[h]) == B[k, h] / 2`, with `s = sqrt(w)`.
+    isempty(block.mixing_positions) ||
+        (out[block.mixing_positions] .+= vec(sum(dB .* B; dims=1)) ./ 2 .+ block.K / 2)
     isempty(block.cholesky_positions) && return out
-    # `d B[i, h] / d L[i, j] == tau[i] * Z[j, h]`; `d log(L[i, i]) == 1 / L[i, i]`.
+    # `d B[i, h] / d L[i, j] == s[h] * tau[i] * Z[j, h]`; `d log(L[i, i]) == 1 / L[i, i]`.
     GL = (tau .* dB) * transpose(Z)
     for i in 1:block.K
         GL[i, i] += block.G / L[i, i]
@@ -1291,7 +1318,8 @@ function brm_rk_point_to_stan(t::BRMCoordinateTransport, u::AbstractVector)
     end
     for block in t.centered
         out[block.stan_positions] =
-            first(_brm_centered_factor(block, u)) * u[block.rk_positions]
+            first(_brm_centered_factor(block, u)) * u[block.rk_positions] .*
+            transpose(_brm_centered_level_scales(block, u))
     end
     out
 end
@@ -1302,10 +1330,11 @@ function brm_stan_point_to_rk(t::BRMCoordinateTransport, y::AbstractVector)
         out[block.rk_positions] =
             _brm_rk_simplex_free(_brm_stan_simplex_log(y[block.stan_positions]))
     end
-    # A block's scales and correlation factor are already in RK order.
+    # A block's scales, correlation factor and mixing weights are already in
+    # RK order.
     for block in t.centered
         out[block.rk_positions] = LowerTriangular(first(_brm_centered_factor(block, out))) \
-            y[block.stan_positions]
+            (y[block.stan_positions] ./ transpose(_brm_centered_level_scales(block, out)))
     end
     out
 end
@@ -1348,7 +1377,7 @@ RK's log density at `u_rk`, from Stan's normalized log density with Jacobian
 `brm_rk_point_to_stan(t, u_rk)`: `stan_value + t.logdensity_offset` (the
 constant simplex offset) plus, for each centered block, the log-Jacobian
 `G * log(det(diag(tau) * L))` of its map `z -> b` over its `G` levels at
-`u_rk`. Works for every transport; without centered blocks it equals
+`u_rk` (plus `K/2 * sum(log, w)` over a Student-t block's mixing weights). Works for every transport; without centered blocks it equals
 `stan_value + t.logdensity_offset`.
 """
 function brm_stan_logdensity_to_rk(t::BRMCoordinateTransport, u::AbstractVector,
@@ -1383,7 +1412,8 @@ same physical parameter point: every paired constrained value agrees under its
 its structurally fixed unit diagonal norm and zero upper triangle, every
 simplex agrees as a whole vector of `K` elements, and every centered block's
 Stan effects equal `diag(tau) * L * z` computed from RK's own constrained
-scales, correlation factor and standardized draws. The Stan point is
+scales, correlation factor and standardized draws (times `sqrt(w)` of the
+level's own mixing weight for a Student-t block). The Stan point is
 `brm_rk_point_to_stan(t, u_rk)`. `stan_model` is the compiled
 `BridgeStan.StanModel` whose `param_unc_names` built `t`.
 Returns `(; pairs::Int, factors::Int, simplexes::Int, centered::Int,
@@ -1460,8 +1490,11 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
         end
         L = isnothing(block.rk_L) ? Matrix{Float64}(I, block.K, block.K) :
             _brm_rk_declaration_value(rk_values, block.rk_L)
+        w = isnothing(block.rk_mixing_declaration) ? nothing :
+            _brm_rk_declaration_value(rk_values, block.rk_mixing_declaration)
         for h in 1:block.G, k in 1:block.K
             effect = tau[k] * sum(L[k, j] * z[block.rk_level[h], j] for j in 1:k)
+            isnothing(w) || (effect *= sqrt(w[block.rk_level[h]]))
             compare("centered effect `$(block.stan_values[k, h])`", effect,
                 stan_value(block.stan_values[k, h]))
         end
