@@ -2,9 +2,10 @@
 # reparametrizers, the learned-order wrapper included. On Julia 1.10, Enzyme's
 # reverse pass corrupts Julia's GC once another thread collects while a
 # differentiated accessor allocates a heap work vector, reads a struct holding
-# vectors inside its row loop, or reaches two
+# vectors inside its row loop, reaches two
 # `_block_location` instantiations (see `_block_location` in
-# BayesianRegressionModelsWarmupHMCExt). Completion and multi-chain workers do
+# BayesianRegressionModelsWarmupHMCExt), or passes a car cell to an outlined
+# call (see `BRM._CARAdaptiveCell`). Completion and multi-chain workers do
 # exactly that; `threaded_gradient_stress.jl` runs the stress in a child Julia.
 #
 #     julia --project=test test/adaptive_centering_threads.jl
@@ -129,6 +130,45 @@ function _cdar_problem()
     _with_controls(AC_EXT._adaptive_cdar_centering_reparametrizer([block])..., P * W + 2)
 end
 
+# Areal car cells: a BYM2 field over 7 areas (two components and an island;
+# its `theta` cells read the intercept and their area's `phi` coordinate) and an
+# ICAR field.
+# `offset` shifts every coordinate past another family's.
+function _car_blocks(offset=0)
+    struct_idx = [1, 2, 3, 0, 4, 5, 6]
+    bym2 = BRM._CARAdaptiveCenteringBlock(:mu, :car_mu_area, true,
+        offset .+ collect(1:6), offset .+ collect(7:13), struct_idx, [1, 2, 3, 5, 6, 7],
+        log.([1.4, 1.4, 1.4, 4.0, 4.0, 4.0]), offset + 14, 0.0, Inf, offset + 15, 0.0, 1.0,
+        offset + 22, collect(Any, 1:7))
+    icar = BRM._CARAdaptiveCenteringBlock(:sigma, :car_sigma_area, false,
+        offset .+ collect(16:20), Int[], [1, 2, 3, 4, 5], [1, 2, 3, 4, 5], zeros(5),
+        offset + 21, 0.0, Inf, 0, 0.0, 1.0, 0, collect(Any, 1:5))
+    [bym2, icar], offset + 22
+end
+
+function _car_problem()
+    blocks, d = _car_blocks()
+    _with_controls(AC_EXT._adaptive_car_centering_reparametrizer(blocks)..., d)
+end
+
+# Car cells after ordinary, R2D2, HSGP and scalar cells in the joint wrapper.
+function _joint_car_problem(; learned=false)
+    blocks, o = _ordinary_blocks()
+    M = 12
+    hsgp = BRM._HSGPAdaptiveCenteringBlock(:hsgp, :gp_x, zeros(M), collect(o .+ (1:M)),
+        [o + M + 1], [0.0], [Inf], o + M + 2, 0.0, Inf,
+        reshape([(pi * j / 8)^2 for j in 1:M], M, 1), Float64[])
+    d = o + M + 2
+    n = 12
+    cells = (; indices=collect(d .+ (1:n)), scales=d + n .+ mod1.(1:n, 3),
+               locations=collect(range(-1, 1; length=n)), targets=zeros(n))
+    car, d = _car_blocks(d + n + 3)
+    build = learned ? AC_EXT._adaptive_ordered_centering_reparametrizer :
+        AC_EXT._adaptive_joint_centering_reparametrizer
+    _with_controls(build(blocks, [hsgp], BRM.R2D2AdaptiveCenteringBlock[], cells, car)...,
+                   d)
+end
+
 # Scalar total / S2Z cells: twelve cells sharing three log-scale coordinates.
 function _scalar_problem()
     n = 12
@@ -140,6 +180,8 @@ const _CASES = ("ordinary" => _ordinary_problem, "joint" => _joint_problem,
                 "joint_scalar" => () -> _joint_problem(; scalar=true),
                 "learned_order" => () -> _joint_problem(; scalar=true, learned=true),
                 "s2z" => _s2z_problem, "hsgp" => _hsgp_problem,
-                "cdar" => _cdar_problem, "scalar" => _scalar_problem)
+                "cdar" => _cdar_problem, "scalar" => _scalar_problem,
+                "car" => _car_problem, "joint_car" => _joint_car_problem,
+                "learned_order_car" => () -> _joint_car_problem(; learned=true))
 
 run_threaded_gradient_gate(@__FILE__, _CASES, _GRADIENTS_PER_WORKER)
