@@ -889,6 +889,29 @@ end
     @test isequal(data, saved)
 end
 
+@stestset "coordinate transport centered Student-t blocks" begin
+    # A centered Student-t level's effect is `sqrt(w) * diag(tau) * L * z`
+    # (snag fit-dbsvergleich-c1bb7586): a configured-scale K=2 block with a
+    # declared df and a default K=1 block with a fixed df, both centered.
+    data = (; subject=[1,1,2,2,3,3,4,4],
+        site=["s1","s2","s1","s2","s3","s3","s1","s2"],
+        x=[0.1,0.4,-0.2,0.3,0.7,0.5,0.2,-0.1],
+        y=[0.4,1.1,-0.3,0.6,1.7,1.2,0.2,-0.5], y2=[0.3,0.2,0.1,-0.4,0.6,0.8,0.1,0.0])
+    saved = deepcopy(data)
+    fixture = coordinate_transport_fixture(PublicCoordinateTransport.student_t(data),
+        "student_t_centered"; centered_groups=[:subject, :site])
+    (; sb, transport) = fixture
+    @test Set(b.family for b in ranef_blocks(sb)) == Set([
+        :ranef_correlated_draws_centered_generic_student_t,
+        :ranef_correlated_draws_centered_student_t])
+    @test Set((b.group, b.K, b.G, length(b.mixing_positions)) for b in transport.centered) ==
+        Set([(:subject, 2, 4, 4), (:site, 1, 3, 3)])
+    weights = [p for p in transport.pairs if p.address.kind === :ranef_mixing]
+    @test length(weights) == 7 && all(p -> p.relation === :identity, weights)
+    check_coordinate_transport(fixture)
+    @test isequal(data, saved)
+end
+
 @stestset "coordinate transport response threshold vectors" begin
     # Gappy raw codes for OrderedLogistic on an authored location (K = max = 4,
     # as SBBRMI); contiguous codes on the formula route; fitted 1:3 levels for
