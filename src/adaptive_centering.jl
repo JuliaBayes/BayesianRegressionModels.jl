@@ -296,6 +296,11 @@ a known scale's constant. Those coordinates are read, never transformed. A
 known correlation is the constant Cholesky factor `cholesky_known` (empty when
 the block samples `L`), and `cholesky_free` is then empty.
 
+A Student-t block (`ranef(:, ID) ~ TDist(nu)`) is described in this form too:
+`mixing[g]` indexes level `g`'s mixing weight `w[g]` (its unconstrained value is
+`log w[g]`), and level `g`'s factor is `sqrt(w[g]) * diag(tau) * L`. The weights
+are read, never transformed. `mixing` is empty for a Gaussian block.
+
 Construct with [`adaptive_centering_blocks`](@ref).
 """
 struct R2D2AdaptiveCenteringBlock <: AbstractAdaptiveCenteringBlock
@@ -312,16 +317,48 @@ struct R2D2AdaptiveCenteringBlock <: AbstractAdaptiveCenteringBlock
     # block samples `L`.
     cholesky_known::Matrix{Float64}
     cholesky_cpc::Vector{Float64}
+    # A Student-t block's per-level mixing-weight coordinates; empty otherwise.
+    mixing::Vector{Int}
     function R2D2AdaptiveCenteringBlock(ranef, target_c, effects, cholesky_free,
-                                        scales; cholesky_known=zeros(0, 0))
+                                        scales; cholesky_known=zeros(0, 0),
+                                        mixing=Int[])
         isempty(cholesky_known) || isempty(cholesky_free) || error(
             "BRM adaptive centering: block `$(ranef.binding)` has both a known ",
             "correlation and Cholesky coordinates")
+        isempty(mixing) || length(mixing) == ranef.n_groups || error(
+            "BRM adaptive centering: Student-t block `$(ranef.binding)` has ",
+            "$(ranef.n_groups) levels but $(length(mixing)) mixing weights")
         new(ranef, target_c, effects, cholesky_free, scales,
             _AdaptiveLogScaleTable(scales), cholesky_known,
-            _adaptive_cholesky_cpc(cholesky_known))
+            _adaptive_cholesky_cpc(cholesky_known), mixing)
     end
 end
+
+# An ordinary block in derived-scale form: term `k`'s log-scale is the single
+# atom `1.0 * x[log_scales[k]]`, which every accessor evaluates bit-identically
+# to `x[log_scales[k]]`. `ranef` and `mixing` turn a Gaussian frame into its
+# Student-t block.
+_adaptive_derived_block(b::AdaptiveCenteringBlock; ranef=b.ranef, mixing=Int[]) =
+    R2D2AdaptiveCenteringBlock(
+        ranef, b.target_c, b.effects, b.cholesky_free,
+        [_AdaptiveLogScale(0.0, [(1.0, i)], Tuple{Float64,Float64,Int}[],
+                           _AdaptiveSimplexLog[]) for i in b.log_scales];
+        mixing)
+_adaptive_derived_block(b::R2D2AdaptiveCenteringBlock; ranef=b.ranef, mixing=Int[]) =
+    R2D2AdaptiveCenteringBlock(ranef, b.target_c, b.effects, b.cholesky_free,
+                               b.scales; cholesky_known=b.cholesky_known, mixing)
+
+# Level `g`'s log mixing scale, `log(sqrt(w[g])) = x[mixing[g]] / 2`, of a
+# Student-t block; zero for a Gaussian block.
+_adaptive_log_mixing(x::AbstractVector, ::AdaptiveCenteringBlock, g) = zero(eltype(x))
+_adaptive_log_mixing(x::AbstractVector, block::R2D2AdaptiveCenteringBlock, g) =
+    isempty(block.mixing) ? zero(eltype(x)) : x[block.mixing[g]] / 2
+
+# Every unconstrained coordinate a derived-scale block reads without
+# transforming it: its scales' inputs and a Student-t block's weights.
+_adaptive_read_coordinates(block::R2D2AdaptiveCenteringBlock) =
+    vcat(Int[], (_adaptive_scale_coordinates(s) for s in block.scales)...,
+         block.mixing)
 
 # The canonical partial correlations of a correlation Cholesky factor `L`, in
 # Stan's `cholesky_factor_corr` coordinate order: row `i`'s `z[l] = L[i, l] /
@@ -708,8 +745,9 @@ end
 # `adaptive_centering_blocks` builds: R2D2 blocks are never centered, so the
 # replay caller never reaches one. A known-value block needs its binding
 # record `known` (`_adaptive_known_record`), which carries the known values.
-# `effects` lets the replay caller pass a Student-t block's own effect
-# coordinates with its Gaussian family's frame.
+# A Student-t family resolves its Gaussian family's frame over its own effect
+# coordinates (`effects`, which the replay caller also passes) and returns it
+# in derived-scale form with its mixing weights.
 function _adaptive_block(ranef::RanefBlock, unc_names, pos; r2d2=nothing,
                          known=nothing, effects=nothing)
     ranef.family in _ADAPTIVE_STRATIFIED_FAMILIES && error(
@@ -719,16 +757,29 @@ function _adaptive_block(ranef::RanefBlock, unc_names, pos; r2d2=nothing,
         "Cholesky/scale frame per stratum and must not be treated as an ",
         "ordinary single-frame block.",
     )
-    # A Student-t block scales each level's factor by `sqrt(w[g])`, which
-    # neither block type models: it keeps its compiled parameterization, with
-    # or without known values (todo `16jywsl`).
-    haskey(get(_RANEF_FAMILIES, ranef.family, (;)), :mixing) && return nothing
+    # A Student-t block is its Gaussian family's frame with level `g`'s factor
+    # scaled by `sqrt(w[g])`: the Gaussian frame is resolved over the block's
+    # own effect coordinates, then carried in derived-scale form with the
+    # weights.
+    base = get(_RANEF_STUDENT_T_BASES, ranef.family, nothing)
+    if !isnothing(base)
+        gaussian = RanefBlock((f === :family ? base : getfield(ranef, f)
+                               for f in fieldnames(RanefBlock))...)
+        frame = _adaptive_block(gaussian, unc_names, pos; r2d2, known,
+            effects=isnothing(effects) ? ranef_coordinates(ranef, unc_names) : effects)
+        isnothing(frame) && error(
+            "BRM adaptive centering: Student-t block `$(ranef.binding)` ",
+            "(`$(ranef.family)`) has a Gaussian family `$base` that adaptive ",
+            "centering does not describe.")
+        return _adaptive_derived_block(frame; ranef,
+            mixing=_ranef_mixing_coordinates(ranef, unc_names))
+    end
     if get(get(_RANEF_FAMILIES, ranef.family, (;)), :known, false)
         isnothing(known) && error(
             "BRM adaptive centering: known-value block `$(ranef.binding)` ",
             "needs its binding record; resolve it through ",
             "`adaptive_centering_blocks(model, unc_names)`.")
-        return _adaptive_known_block(ranef, unc_names, pos, known)
+        return _adaptive_known_block(ranef, unc_names, pos, known; effects)
     end
     if ranef.family in _ADAPTIVE_R2D2_FAMILIES
         isnothing(r2d2) && error(
@@ -769,7 +820,8 @@ _adaptive_known_record(plan, ranef::RanefBlock) =
 # `<binding>_tau_free` when some scale is known and `<binding>_tau` otherwise
 # (each `lower=0`, so its unconstrained value is that log). A known correlation
 # is a constant Cholesky factor in place of the `<binding>_L` coordinates.
-function _adaptive_known_block(ranef::RanefBlock, unc_names, pos, record)
+function _adaptive_known_block(ranef::RanefBlock, unc_names, pos, record;
+                               effects=nothing)
     K = ranef.n_terms
     binding = ranef.binding
     known = collect(record.known_scales)
@@ -790,7 +842,7 @@ function _adaptive_known_block(ranef::RanefBlock, unc_names, pos, record)
     R2D2AdaptiveCenteringBlock(
         ranef,
         ranef.noncentered ? 0.0 : 1.0,
-        ranef_coordinates(ranef, unc_names),
+        isnothing(effects) ? ranef_coordinates(ranef, unc_names) : effects,
         _adaptive_named_indices(pos, cholesky_names, binding, "Cholesky"),
         scales;
         cholesky_known=isnothing(known_cor) ? zeros(0, 0) :
@@ -841,13 +893,16 @@ When every scale and the correlation are known, every control of the block is
 a fixed per-coordinate rescaling of the compiled draw, so it cannot change the
 sampling geometry under an adapted diagonal metric.
 
+Student-t blocks (`ranef(:, ID) ~ TDist(nu)`), with sampled, configured or
+known scales and either emission, are `R2D2AdaptiveCenteringBlock`s whose
+level `g` has the factor `C_g = sqrt(w[g]) * diag(tau) * L`, with `w[g]` the
+block's mixing weight. The same map then reads `C_g` in place of `C`, so `c=0`
+is the emitted standardised draw and `c=1` the level's effect `b[g]`. The
+weights are read, never transformed.
+
 Stratified `gr(g, by=b)` blocks currently raise rather than being silently
 left fixed: they carry one `L,tau` frame per stratum and need a separate indexed
-metadata contract. Student-t blocks (`ranef(:, ID) ~ TDist(nu)`), with or
-without known values, are not described yet: each level's factor is
-`sqrt(w[g]) * C`, which neither block type models, so such a block keeps its
-compiled parameterization (non-centered, or centered under `centered_groups`)
-while the model's other blocks adapt (todo `16jywsl`). Intercept-only `(1 | mm(...))` blocks adapt through the
+metadata contract. Intercept-only `(1 | mm(...))` blocks adapt through the
 ordinary scalar path (their downstream gather is linear); an `mm` block with
 any slope term, including a slope-only `(0 + x | mm(...))`, shares the ordinary
 correlated emission and adapts with it.
@@ -895,12 +950,10 @@ function adaptive_centering_blocks(model, unc_names)
     effects = Set{Int}(Iterators.flatten(vec(b.effects) for b in out))
     for block in out
         block isa R2D2AdaptiveCenteringBlock || continue
-        for s in block.scales
-            isdisjoint(_adaptive_scale_coordinates(s), effects) || error(
-                "BRM adaptive centering: R2D2 block `$(block.ranef.binding)` ",
-                "derives its scale from a random-effect coordinate this ",
-                "transform rewrites; refusing an inexact transform.")
-        end
+        isdisjoint(_adaptive_read_coordinates(block), effects) || error(
+            "BRM adaptive centering: block `$(block.ranef.binding)` ",
+            "derives its scale from a random-effect coordinate this ",
+            "transform rewrites; refusing an inexact transform.")
     end
     out
 end
@@ -1759,6 +1812,14 @@ function _adaptive_block_cholesky(x::AbstractVector, block::AbstractAdaptiveCent
     L = _adaptive_block_correlation(x, block)
     tau = _adaptive_block_taus(x, block)
     tau .* L
+end
+
+# Level `g`'s factor: `diag(tau) * L`, scaled by `sqrt(w[g])` for a Student-t
+# block. A Gaussian block's factor is the same for every level.
+function _adaptive_block_cholesky(x::AbstractVector, block::AbstractAdaptiveCenteringBlock, g)
+    C = _adaptive_block_cholesky(x, block)
+    block isa R2D2AdaptiveCenteringBlock && !isempty(block.mixing) || return C
+    exp(_adaptive_log_mixing(x, block, g)) .* C
 end
 
 _adaptive_block_correlation(x::AbstractVector, block::AbstractAdaptiveCenteringBlock) =

@@ -76,6 +76,19 @@ _block_tau(x, block::BRM.AdaptiveCenteringBlock, i) = exp(x[block.log_scales[i]]
 _block_tau(x, block::BRM.R2D2AdaptiveCenteringBlock, i) =
     exp(BRM._adaptive_log_scale(x, block.table, i))
 
+# A Student-t block (`mixing` non-empty) scales level `g`'s factor by
+# `sqrt(w[g])`, the level's mixing weight read from its coordinate `log w[g]`.
+_block_mixed(::BRM.AdaptiveCenteringBlock) = false
+_block_mixed(block::BRM.R2D2AdaptiveCenteringBlock) = !isempty(block.mixing)
+_block_mixing_scale(x, ::BRM.AdaptiveCenteringBlock, g) = one(eltype(x))
+_block_mixing_scale(x, block::BRM.R2D2AdaptiveCenteringBlock, g) =
+    exp(x[block.mixing[g]] / 2)
+
+# Level `g`'s marginal scale of term `i`. A Gaussian block's levels share
+# `tau[i]` and keep its operations exactly.
+_block_tau(x, block, i, g) = _block_mixed(block) ?
+    _block_tau(x, block, i) * _block_mixing_scale(x, block, g) : _block_tau(x, block, i)
+
 # Canonical partial correlation `p` of a block's correlation factor, in Stan's
 # `cholesky_factor_corr` coordinate order: `tanh` of its coordinate, or the
 # constant of a known correlation (`cor(:, ID) = R`), which has no coordinates.
@@ -121,8 +134,8 @@ end
 # `stick * z`, then `tau * L[i,j]`.  WarmupHMC's discrete window winners can
 # change after a one-ulp gradient drift, so operation order — not just the
 # limiting value — is the contract.
-function _block_cholesky_entry(x, block, i, j)
-    tau = _block_tau(x, block, i)
+function _block_cholesky_entry(x, block, i, j, g)
+    tau = _block_tau(x, block, i, g)
     stick = one(eltype(x))
     offset = (i - 1) * (i - 2) ÷ 2
     for l in 1:i-1
@@ -161,7 +174,7 @@ function _block_location(x, state::_BRMRanefCenteringState{N}, pair_number) wher
     m = zero(T)
     for i in 1:k
         m = zero(T)
-        tau = _block_tau(x, block, i)
+        tau = _block_tau(x, block, i, g)
         stick = one(T)
         offset = (i - 1) * (i - 2) ÷ 2
         for l in 1:i-1
@@ -184,9 +197,9 @@ function (arg::BRMAdaptiveCenteringArgument{:location})(x)
 end
 
 function (arg::BRMAdaptiveCenteringArgument{:log_scale})(x)
-    bi, k, _ = _pair_location(arg.state, arg.pair_number)
+    bi, k, g = _pair_location(arg.state, arg.pair_number)
     block = arg.state.blocks[bi]
-    log(_block_cholesky_entry(x, block, k, k))
+    log(_block_cholesky_entry(x, block, k, k, g))
 end
 
 struct BRMR2D2AdaptiveCenteringArgument{KIND,N} <: Function
@@ -208,8 +221,8 @@ function (arg::BRMR2D2AdaptiveCenteringArgument{:location})(x)
 end
 
 function (arg::BRMR2D2AdaptiveCenteringArgument{:log_scale})(x)
-    bi, k, _ = _pair_location(arg.state, arg.pair_number)
-    log(_block_cholesky_entry(x, arg.state.blocks[bi], k, k))
+    bi, k, g = _pair_location(arg.state, arg.pair_number)
+    log(_block_cholesky_entry(x, arg.state.blocks[bi], k, k, g))
 end
 
 function _sync_sources!(state, ir)
@@ -257,7 +270,7 @@ function _centering_frame(state::_BRMRanefCenteringState{N}, position, gradient,
     for (bi, block) in enumerate(state.blocks), g in 1:block.ranef.n_groups
         K = block.ranef.n_terms
         order = isnothing(ordered) ? (1:K) : view(ordered.orders[bi], :, g)
-        C = isnothing(ordered) ? BRM._adaptive_block_cholesky(position, block) :
+        C = isnothing(ordered) ? BRM._adaptive_block_cholesky(position, block, g) :
             _unpacked(_source_group_factor(position, ordered, bi, g), K)
         A = zeros(T, K, K)
         z = Vector{T}(undef, K)
@@ -533,7 +546,7 @@ end
 # historical ordinary-then-HSGP pair order.
 #
 # Ordinary and R2D2 cells share one derived-scale state: an ordinary block
-# joins it in derived-scale form (`_derived_scale_block`), whose `tau` is
+# joins it in derived-scale form (`BRM._adaptive_derived_block`), whose `tau` is
 # `exp(0.0 + 1.0 * x[i])`, bit-identical to `exp(x[i])`. On Julia 1.10, a
 # differentiated joint accessor that reaches two `_block_location`
 # instantiations (ordinary and R2D2) corrupts Julia's GC under Enzyme's reverse
@@ -548,14 +561,6 @@ struct BRMJointAdaptiveCenteringState{N}
     n_r2d2::Int
     n_hsgp::Int
 end
-
-# An ordinary block in derived-scale form: term `k`'s log-scale is the single
-# atom `1.0 * x[log_scales[k]]`.
-_derived_scale_block(b::BRM.AdaptiveCenteringBlock) = BRM.R2D2AdaptiveCenteringBlock(
-    b.ranef, b.target_c, b.effects, b.cholesky_free,
-    [BRM._AdaptiveLogScale(0.0, [(1.0, i)], Tuple{Float64,Float64,Int}[],
-                           BRM._AdaptiveSimplexLog[]) for i in b.log_scales],
-)
 
 struct BRMJointAdaptiveCenteringArgument{KIND,N} <: Function
     state::BRMJointAdaptiveCenteringState{N}
@@ -584,8 +589,8 @@ function (arg::BRMJointAdaptiveCenteringArgument{:log_scale})(x)
     p = arg.pair_number
     s = arg.state
     if p <= s.n_ranef + s.n_r2d2
-        bi, k, _ = _pair_location(s.ranef, p)
-        log(_block_cholesky_entry(x, s.ranef.blocks[bi], k, k))
+        bi, k, g = _pair_location(s.ranef, p)
+        log(_block_cholesky_entry(x, s.ranef.blocks[bi], k, k, g))
     elseif p <= s.n_ranef + s.n_r2d2 + s.n_hsgp
         bi, basis = _hsgp_pair_location(s.hsgp, p - s.n_ranef - s.n_r2d2)
         BRM._adaptive_hsgp_log_scale(x, s.hsgp.blocks[bi], basis)
@@ -656,14 +661,15 @@ function _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells)
         "BRM joint adaptive centering: ordinary, R2D2, HSGP and total/S2Z cells " *
         "claim overlapping unconstrained coordinates; refusing an ambiguous transform.",
     )
-    for block in r2d2_blocks, s in block.scales
-        isdisjoint(BRM._adaptive_scale_coordinates(s), hsgp_state.effect_indices) ||
-            error("BRM joint adaptive centering: R2D2 block " *
+    for block in r2d2_blocks
+        read = BRM._adaptive_read_coordinates(block)
+        isdisjoint(read, hsgp_state.effect_indices) ||
+            error("BRM joint adaptive centering: block " *
                   "`$(block.ranef.binding)` derives its scale from an HSGP " *
                   "basis weight this transform rewrites; refusing an inexact " *
                   "transform.")
-        isdisjoint(BRM._adaptive_scale_coordinates(s), scalar_state.indices) ||
-            error("BRM joint adaptive centering: R2D2 block " *
+        isdisjoint(read, scalar_state.indices) ||
+            error("BRM joint adaptive centering: block " *
                   "`$(block.ranef.binding)` derives its scale from a total/S2Z " *
                   "coordinate this transform rewrites; refusing an inexact " *
                   "transform.")
@@ -677,7 +683,7 @@ function _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells)
     # basis-weight cells, then scalar total and S2Z cells
     # (`_scalar_centering_cells` order).
     ranef_state = BRMR2D2AdaptiveCenteringState(vcat(
-        BRM.R2D2AdaptiveCenteringBlock[_derived_scale_block(b) for b in blocks],
+        BRM.R2D2AdaptiveCenteringBlock[BRM._adaptive_derived_block(b) for b in blocks],
         r2d2_blocks,
     ))
     n_ranef = sum(b -> b.ranef.n_terms * b.ranef.n_groups, blocks; init=0)
@@ -852,6 +858,11 @@ function _permuted_cholesky(C::NTuple{M,T}, order, K, ::Val{KMAX}) where {M,T,KM
 end
 
 _unpacked(C, K) = [j <= i ? C[_tri(i, j)] : zero(eltype(C)) for i in 1:K, j in 1:K]
+
+# A packed factor times the scalar `r`: a Student-t level's `sqrt(w[g]) * C`,
+# and its permuted factor, since `cholesky(P * (r^2 * Sigma) * P') =
+# r * cholesky(P * Sigma * P')`.
+_tscale(C::NTuple, r) = map(v -> r * v, C)
 
 # Stan's `cholesky_factor_corr` log-Jacobian from its unconstrained coordinates
 # to the correlation matrix, at the packed factor `F` (rows may carry scales):
@@ -1094,10 +1105,16 @@ function _ordered_block_map!(y, x, ir::BRMOrderedCenteringReparametrization{N},
         Cp = declared ? C : kinds[q] == 1 ? Cs :
             _permuted_cholesky(Cs, view(rows, :, q), K, Val(N + 1))
         for r in starts[q]:starts[q + 1] - 1
+            g = groups[r]
+            # A Student-t level's factors carry its `sqrt(w[g])`; the block's
+            # correlation coordinates and their Jacobian above are scale-free.
+            Cg, Cpg = _block_mixed(block) ?
+                (_tscale(C, _block_mixing_scale(x, block, g)),
+                 _tscale(Cp, _block_mixing_scale(x, block, g))) : (C, Cp)
             ljac += ir.direction > 0 ?
-                _ordered_group_forward!(y, x, state, block, lookup, groups[r], C, Cp,
+                _ordered_group_forward!(y, x, state, block, lookup, g, Cg, Cpg,
                                         perms, q, declared, Val(N + 1)) :
-                _ordered_group_inverse!(y, x, state, block, lookup, groups[r], C, Cp,
+                _ordered_group_inverse!(y, x, state, block, lookup, g, Cg, Cpg,
                                         perms, q, declared, Val(N + 1))
         end
     end
@@ -1176,7 +1193,8 @@ function _source_group_factor(position, ir::BRMOrderedCenteringReparametrization
     K = block.ranef.n_terms
     Cs = _packed_block_cholesky(position, block, ir.block_orders[bi], Val(N + 1))
     rows = ir.positions[bi][ir.orders[bi][:, g]]
-    rows == 1:K ? Cs : _permuted_cholesky(Cs, rows, K, Val(N + 1))
+    Cp = rows == 1:K ? Cs : _permuted_cholesky(Cs, rows, K, Val(N + 1))
+    _block_mixed(block) ? _tscale(Cp, _block_mixing_scale(position, block, g)) : Cp
 end
 
 const _CENTERING_CANDIDATES = range(0.0, 1.0; length=11)
@@ -1664,6 +1682,12 @@ and endpoints — except that `tau` is the emitted model's derived scale,
 re-derived from the `R2`, Dirichlet share and reference/total-scale coordinates
 on every evaluation (see [`adaptive_centering_blocks`](@ref)). Those
 coordinates are read, never transformed, so the wrapped density stays exact.
+
+A Student-t block (`ranef(:, ID) ~ TDist(nu)`, either emission) adapts the same
+way with level `g`'s factor `sqrt(w[g]) * diag(tau) * L`, `w[g]` being the
+level's mixing weight: `c=0` is the emitted standardised draw and `c=1` the
+effect `b[g]`, which is the compiled `centered_groups` frame. Its cells join
+the R2D2 cells, and its weights are read, never transformed.
 
 For a `cdar` walk, each of the `P * W` innovations is one scalar cell with
 zero location and its marginal prior spread
