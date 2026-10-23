@@ -402,6 +402,22 @@ end); total_groups=(), mod=@__MODULE__)
           vcat(fill(:ranef, n_ranef), fill(:car, n_car))
 end
 
+# WarmupHMC scores every (cell, candidate) of every leaf from the plan's frame,
+# so the frame must infer: an `Any` frame made each score a dynamic dispatch
+# (711 KB and 0.46 ms per leaf on a 411-area field; snag adaptive-car-cen-fe6ee5a4).
+@testset "car scoring frames infer ($label)" for (label, sb) in (
+        ("bym2", CAR_AC_SB[:bym2]), ("icar", CAR_AC_SB[:icar]), ("joint", CAR_AC_JOINT_SB))
+    problem = car_ac_instantiate(sb)
+    wrapped = adaptive_centering_problem(sb, problem, DI.AutoEnzyme())
+    ir = WarmupHMC.reparametrizer(wrapped)
+    plan = WarmupHMC.candidate_scoring_plan(wrapped)
+    x = 0.3 .* randn(Xoshiro(5), LogDensityProblems.dimension(wrapped))
+    _, g = LogDensityProblems.logdensity_and_gradient(wrapped, x)
+    frame = @inferred plan.prepare(ir, x, g)
+    @test frame isa CAR_AC_EXT.BRMAdaptiveCenteringFrame{Float64}
+    @test length(frame.source) == length(ir.pairs)
+end
+
 @testset "car fields refuse cdar plans; generated fields are skipped" begin
     @test_throws "cdar walk cells with random-effect, HSGP or car cells" begin
         cdar_df = merge(CAR_AC_DF, (; week=repeat(1:3; outer=3),

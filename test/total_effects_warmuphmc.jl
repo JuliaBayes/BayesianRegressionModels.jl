@@ -39,7 +39,7 @@ println("TOTAL_WHMC_COMPILED");flush(stdout)
         # Candidate coordinates and marginal gradients must be independent of
         # which source frame supplied the same physical observation.
         plan = WarmupHMC.candidate_scoring_plan(rp)
-        frame = plan.prepare(ir,source,g)
+        frame = @inferred plan.prepare(ir,source,g)
         for (p,(index,value)) in enumerate(ir.pairs), candidate in (0.,0.5,1.)
             _,position,gradient = plan.score(frame,p,index,value,WarmupHMC.PartiallyCentered(candidate))
             mu=2.;ell=physical[only(coords.scales)]

@@ -781,8 +781,14 @@ function _centering_frame(state::BRMJointAdaptiveCenteringState, position, gradi
               _centering_frame(state.hsgp, position, gradient),
               _centering_frame(state.scalar, position, gradient),
               _centering_frame(state.car, position, gradient))
+    # Field by field: a splatted generator over `fieldnames` does not infer, and
+    # an uninferred frame makes every candidate score a dynamic dispatch.
     BRMAdaptiveCenteringFrame(
-        (reduce(vcat, getfield.(frames, f)) for f in fieldnames(BRMAdaptiveCenteringFrame))...,
+        vcat(map(f -> f.source, frames)...),
+        vcat(map(f -> f.location, frames)...),
+        vcat(map(f -> f.scale, frames)...),
+        vcat(map(f -> f.innovation, frames)...),
+        vcat(map(f -> f.invariant_gradient, frames)...),
     )
 end
 
@@ -1917,6 +1923,19 @@ on a block's `C = diag(tau) * L`, an intermediate source coordinate is Gaussian
 with covariance `A(c) * A(c)'` whenever the block innovation is standard normal;
 the wrapped density and Jacobian still represent the original BRM prior exactly.
 """
+# The candidate-scoring plan over one centering state, built behind a function
+# barrier so its closures capture `state` by its concrete type. Formed inside
+# `adaptive_centering_problem`, which assigns `state` on two paths, they
+# captured a `Core.Box`: `prepare` inferred `Any`, and WarmupHMC then scored
+# every (cell, candidate) of every leaf through dynamic dispatch (411 car cells:
+# 711 KB and 0.46 ms per leaf, against 17 KB and 0.18 ms; snag
+# adaptive-car-cen-fe6ee5a4).
+_candidate_scoring_plan(state) = WarmupHMC.CandidateScoringPlan(
+    (ir_, position, gradient) -> _prepare_frame(state, ir_, position, gradient),
+    _score_candidate;
+    synchronize! = ir_ -> _sync_sources!(state, ir_),
+)
+
 function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=nothing,
                                        centeredness=nothing, s2z_rule=:cells,
                                        ranef_order=:declared)
@@ -1951,10 +1970,8 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
     if scalar && isempty(blocks) && isempty(hsgp_blocks) && isempty(car_blocks)
         state,ir = _adaptive_scalar_centering_reparametrizer(model,names)
         _initial_centering!(state,ir,centeredness)
-        scoring = WarmupHMC.CandidateScoringPlan(
-            (ir_,q,g) -> _prepare_frame(state,ir_,q,g), _score_candidate;
-            synchronize! = ir_ -> _sync_sources!(state,ir_))
-        return WarmupHMC.ReparametrizedProblem(ir,problem,ad_backend;scoring_plan=scoring)
+        return WarmupHMC.ReparametrizedProblem(ir,problem,ad_backend;
+                                               scoring_plan=_candidate_scoring_plan(state))
     end
     if isempty(blocks) && isempty(hsgp_blocks) && isempty(cdar_blocks) &&
             isempty(car_blocks)
@@ -2004,13 +2021,8 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
         _adaptive_centering_reparametrizer(ordinary)
     end
     _initial_centering!(state,ir,centeredness)
-    plan = WarmupHMC.CandidateScoringPlan(
-        (ir_, position, gradient) -> _prepare_frame(state, ir_, position, gradient),
-        _score_candidate;
-        synchronize! = ir_ -> _sync_sources!(state, ir_),
-    )
     WarmupHMC.ReparametrizedProblem(
-        ir, problem, ad_backend; scoring_plan=plan,
+        ir, problem, ad_backend; scoring_plan=_candidate_scoring_plan(state),
     )
 end
 
