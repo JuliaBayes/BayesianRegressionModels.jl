@@ -1431,7 +1431,8 @@ would mean something else:
 
 - a grouped `hsgp(…; by = …)` (a correlated random-effect block — zero its
   levels with [`population_draws`](@ref)), and other terms whose contribution
-  is not one coefficient column (`dar`/`rw`/`cdar` processes, `s(...)` splines);
+  is not one coefficient column (`dar`/`rw`/`cdar` processes, `car` areal
+  fields, `s(...)` splines);
 - a population carrier whose declaration spells a bound, offset or multiplier
   (for example `effect(mu, :) ~ Exponential(1)` declares every coefficient with
   `lower=0`: its unconstrained 0 is the constrained 1, and the term's removal

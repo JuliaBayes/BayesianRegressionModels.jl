@@ -325,6 +325,9 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
         elseif term.kind === :dar
             # A trajectory whose recurrence and axis are stated in the preamble.
             push!(summands, refref[index])
+        elseif term.kind === :car
+            # Each row's area effect, returned by the term's areal block.
+            push!(summands, refref[index])
         elseif term.kind === :offset
             push!(summands, colref[index])
         elseif term.kind === :structured
@@ -1288,6 +1291,68 @@ function _rk_ast_dar_block!(definitions, taken, term, nsteps)
     _rk_ast_block_call!(definitions, taken, "brm_differenced_ar1", block, level)
 end
 
+# An areal field, as StanBlocks' `_sb_car_icar` / `_sb_car_bym2`: the ICAR field
+# over the structured areas with one soft sum-to-zero per connected component,
+# alone or in the BYM2 convolution, returning each row's area effect. RKPPL
+# factors a scalar definition, so each component's sum is its own scalar
+# `Normal(0, 0.001 n_c)` factor, unrolled from the fitted graph's components
+# (a replay keeps the graph). Islands read the zero padding slot of `phi`.
+function _rk_ast_car_block!(definitions, taken, term, positions)
+    options = term.options
+    bym2 = options.type === :bym2
+    sigma_prior = last(_rk_ast_sampled(options.sigma_param).args)
+    rho_prior = bym2 ? last(_rk_ast_sampled(options.rho_param).args) : nothing
+    block = bym2 ? _rk_block_body(sigma_prior, rho_prior) : _rk_block_body(sigma_prior)
+    node1 = _rk_block_argument!(block, :node1, options.node1)
+    node2 = _rk_block_argument!(block, :node2, options.node2)
+    struct_pos = _rk_block_argument!(block, :struct_pos, options.struct_pos)
+    rows = _rk_block_argument!(block, :area, positions)
+    S = _rk_block_argument!(block, :S, options.n_struct)
+    if bym2
+        inv_scale = _rk_block_argument!(block, :inv_scale, options.inv_scale)
+        is_struct = _rk_block_argument!(block, :is_struct, options.is_struct)
+    end
+    sigma, phi = _rk_block_local!(block, :sigma), _rk_block_local!(block, :phi)
+    cs, field = _rk_block_local!(block, :cs), _rk_block_local!(block, :phi_full)
+    effects = _rk_block_local!(block, :effects)
+    push!(block.statements, Expr(:call, :~, sigma, sigma_prior))
+    if bym2
+        rho, theta = _rk_block_local!(block, :rho), _rk_block_local!(block, :theta)
+        push!(block.statements, Expr(:call, :~, rho, rho_prior),
+            Expr(:call, :.~, Expr(:ref, theta, Expr(:call, :axes, inv_scale, 1)),
+                _rk_ast_dotted(:Normal, 0, 1)))
+    end
+    push!(block.statements,
+        Expr(:call, :~, Expr(:ref, phi, Expr(:call, :(:), 1, S)),
+            Expr(:call, :ICAR, node1, node2)),
+        Expr(:(=), cs, Expr(:call, :cumsum, Expr(:call, :vcat, 0.0, phi))))
+    for (c, (start, size)) in enumerate(options.components)
+        total = _rk_block_local!(block, Symbol(:phi_sum_, c))
+        push!(block.statements,
+            Expr(:(=), total, Expr(:call, :-, Expr(:ref, cs, start + size),
+                Expr(:ref, cs, start))),
+            Expr(:call, :~, total, Expr(:call, :Normal, 0.0, 0.001 * size)))
+    end
+    push!(block.statements,
+        Expr(:(=), field, Expr(:ref, Expr(:call, :vcat, phi, 0.0), struct_pos)))
+    value = bym2 ?
+        Expr(:call, :.*, sigma, Expr(:call, :.+,
+            Expr(:call, :.*, _rk_ast_dotted(:sqrt, Expr(:call, :.*, rho, inv_scale)), field),
+            Expr(:call, :.*, _rk_ast_dotted(:sqrt, Expr(:call, :.-, 1.0,
+                Expr(:call, :.*, rho, is_struct))), theta))) :
+        Expr(:call, :.*, sigma, field)
+    push!(block.statements, Expr(:(=), effects, value))
+    call = _rk_ast_block_call!(definitions, taken, bym2 ? "brm_car_bym2" : "brm_car_icar",
+        block, Expr(:ref, effects, rows))
+    locals = bym2 ? (; sigma, rho, phi, theta) : (; sigma, phi)
+    call, locals
+end
+
+function _rk_ast_car_names(plan::_RKStructuralPlan)
+    Set{Symbol}(term.options.value for predictor in plan.predictors
+        for term in predictor.terms if term.kind === :car)
+end
+
 function _rk_ast_dar_names(plan::_RKStructuralPlan)
     names = Set{Symbol}()
     for predictor in plan.predictors, term in predictor.terms
@@ -1343,6 +1408,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         _rk_ast_hsgp_ids(plan),
         _rk_ast_gp_names(plan),
         _rk_ast_dar_names(plan),
+        _rk_ast_car_names(plan),
         _rk_ast_ar_names(plan),
         _rk_ast_me_names(plan))
     union!(taken, (t.options.id for p in plan.predictors for t in p.terms
@@ -1528,6 +1594,18 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 refactual[index] = _rk_ast_fresh_name(string(term.label, "_level"), taken)
                 push!(stmts, Expr(:call, :~, refactual[index], _rk_ast_dar_block!(defs,
                     taken, term, length(plan.columns[term.options.source]))))
+            elseif kind === :car
+                # rows find their graph position by the fitted area labels
+                positions = _rk_ast_fresh_name(string(term.label, "_area"), taken)
+                push!(stmts, Expr(:(=), positions, _rk_ast_statistical_call!(defs, taken,
+                    :brm_prepared_indices, term.options.area,
+                    _rk_ast_level_values(term.options.nodes); kernel=true)))
+                call, locals = _rk_ast_car_block!(defs, taken, term, positions)
+                refactual[index] = term.options.value
+                push!(stmts, Expr(:call, :~, term.options.value, call))
+                _rk_coordinate_record!(coordinates, (; kind=:car,
+                    declaration=term.options.value, predictor=predictor.name,
+                    area=term.options.source, type=term.options.type, locals))
             elseif kind === :ranef_gather
                 refactual[index] = ranef_effects[(predictor.name,
                     term.options.bucket_group, term.options.bucket_id)]
@@ -1535,7 +1613,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             (kind === :offset || kind === :ranef_gather ||
                 kind === :spline || kind === :hsgp ||
                 kind === :structured ||
-                kind === :gp || kind === :dar ||
+                kind === :gp || kind === :dar || kind === :car ||
                 kind === :monotonic_summand) && continue
             hs_spec = get(hs_priors, (predictor.name, term.addressee),
                 nothing)

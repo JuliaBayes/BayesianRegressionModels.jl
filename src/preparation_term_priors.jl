@@ -28,6 +28,11 @@ _brm_term_prior_slots(::typeof(rw)) =
 _brm_term_prior_slots(::typeof(cdar)) = (
     _BRMTermPriorSlot(:sigma, :term_sd, :positive),
     _BRMTermPriorSlot(:ar, :term_ar, :unit_interval))
+# `car` owns its scale and, under `type=:bym2`, the spatial mixing share; an
+# `:icar` term refuses a `mixing(...)` address with the term's own message.
+_brm_term_prior_slots(::typeof(car)) = (
+    _BRMTermPriorSlot(:sigma, :term_sd, :positive),
+    _BRMTermPriorSlot(:mixing, :term_mixing, :unit_interval))
 _brm_term_prior_slots(::typeof(mo)) =
     (_BRMTermPriorSlot(:simplex, :term_simplex, :simplex),)
 _brm_term_prior_slots(::typeof(mo1)) = _brm_term_prior_slots(mo)
@@ -42,11 +47,13 @@ _brm_term_prior_class(::Val{:term_ar}) = "bounded persistence coefficient"
 _brm_term_prior_class(::Val{:term_length_scale}) = "length scale"
 _brm_term_prior_class(::Val{:term_simplex}) = "simplex"
 _brm_term_prior_class(::Val{:term_latent}) = "latent covariate"
+_brm_term_prior_class(::Val{:term_mixing}) = "mixing share"
 _brm_term_prior_label(::Val{:term_sd}) = "sd"
 _brm_term_prior_label(::Val{:term_ar}) = "ar"
 _brm_term_prior_label(::Val{:term_length_scale}) = "length_scale"
 _brm_term_prior_label(::Val{:term_simplex}) = "simplex"
 _brm_term_prior_label(::Val{:term_latent}) = "latent"
+_brm_term_prior_label(::Val{:term_mixing}) = "mixing"
 function _brm_term_prior_spelling(spec)
     head = _brm_term_prior_label(Val(spec.class))
     lp = isnothing(spec.predictor) ? ":" : string(spec.predictor)
@@ -66,6 +73,7 @@ end
 # under the term's FULL key, which also spells every keyword, and every reader
 # looks that key up first. A predictor with one such term keeps the plain key.
 _brm_term_key_value(value::NamedColumn) = name(value)
+_brm_term_key_value(value::Tuple) = map(_brm_term_key_value, value)
 _brm_term_key_value(value) = value
 function _brm_term_full_key(term::ExprColumn)
     kwargs = getkwargs(term)

@@ -22,6 +22,7 @@ signature — the rest are covered by their docstrings on the [API](@ref) page.
 | `dar(time; p=1)` | direct differenced-AR(1) trajectory with bounded persistence and scaled innovations | — |
 | `rw(time)` | direct random-walk trajectory: `dar` with the persistence fixed at zero | — |
 | `cdar(step; by=group, cor=C)` | per-group deviations following a damped walk over `step` with innovations correlated across groups by `C` | — |
+| `car(area; edges=(from, to), type=:icar \| :bym2)` | areal spatial effect over an adjacency graph: an intrinsic CAR field, alone or in the BYM2 convolution | — |
 | `mo(c)`, `mo1(c)` | monotonic effect of an ordered factor via Dirichlet increments | — |
 | `me(x, sd)` | measurement-error covariate — `x` is observed with known `sd` | — |
 | `interval_censored(x; upper=lloq, lower=0)` | quantified/BLOQ covariate with bounded latent values on BLOQ rows | — |
@@ -144,6 +145,62 @@ end)((;
     C=[1.0 0.6; 0.6 1.0],
 ))
 """, :grouped_walk; title="Grouped correlated damped walk", require_stan=true)
+```
+
+### Areal spatial fields (ICAR and BYM2)
+
+`car(area; edges=(from, to), type=...)` gives every area of an adjacency
+graph its own effect and adds each row's area effect as a direct summand.
+`edges` names two data vectors of equal length whose `k`-th entries are the
+labels of two neighbouring areas, in the labels of `area`; each undirected
+pair is listed once. The graph's areas are every label in `edges` and in
+`area`, so an area without rows keeps its place, and an area without
+neighbours is an island. The spatial field `phi` on the areas with neighbours
+has the intrinsic CAR (ICAR) density
+
+```
+log p(phi) = -1/2 * sum over edges (phi[i] - phi[j])^2
+             + sum over components c of log Normal(sum(phi[c]) | 0, 0.001 * n_c)
+```
+
+with one soft sum-to-zero per connected component (Morris et al. 2019).
+`type=:icar` adds `sigma * phi[area]`; an island has no spatial effect.
+`type=:bym2` adds the BYM2 convolution (Riebler et al. 2016)
+
+```
+b[k] = sigma * (sqrt(rho / s_c) * phi[k] + sqrt(1 - rho) * theta[k])
+```
+
+with independent standard-normal `theta`, the spatially structured variance
+share `rho` in `[0, 1]`, and `s_c` the scaling factor of area `k`'s component:
+the geometric mean of the diagonal of the generalized inverse of its ICAR
+precision, computed exactly (by eigendecomposition) when the model is
+prepared, so that `sigma` is a marginal standard deviation. The Stan case
+study and R-INLA invert a slightly perturbed precision instead, which gives a
+value about 3e-5 (relative) lower on posteriordb's 1921-area NYC graph. An island's BYM2 effect is
+`sigma * theta[k]` (Freni-Sterrantino et al. 2018). The defaults are
+`sigma ~ Normal(0, 1)` truncated at zero and `rho ~ Beta(0.5, 0.5)`; address
+them as `sd(:, car(area))` and `mixing(:, car(area))`. On replay the graph is
+frozen from the fit and every row must name one of its areas;
+`freeze_constants=false` rebuilds it from the new data. `SBBRMI` and `RKBRMI`
+lower the term to the same density. brms spells the same model
+`car(M, gr = area, type = "bym2")`.
+
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+areal = (@brm begin
+    mu ~ 1 + x + car(district; edges=(from, to), type=:bym2)
+    sd(:, car(district)) ~ Normal(0.0, 0.5)
+    mixing(:, car(district)) ~ Beta(2.0, 2.0)
+    y ~ Normal(mu, 0.3)
+end)((;
+    district=["a", "b", "c", "d", "e", "a", "c"],
+    x=[0.1, -0.3, 0.4, 0.0, 0.2, -0.1, 0.3],
+    y=[0.2, -0.1, 0.5, 0.0, 0.3, 0.1, 0.4],
+    from=["a", "b", "c", "d"],
+    to=["b", "c", "d", "a"],
+))
+""", :areal; title="BYM2 areal effect", require_stan=true)
 ```
 
 ### HSGP over a model-derived predictor
