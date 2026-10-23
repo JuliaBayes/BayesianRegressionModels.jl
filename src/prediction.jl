@@ -1605,10 +1605,10 @@ takes `to` itself. A `to` on or beyond a bound is refused (its unconstrained
 image is infinite). So is anything that is not a sampled, real-valued, top-level
 declared parameter: a population coefficient, random effect, linear predictor,
 plate-local value, transformed or generated quantity, a natively constrained
-type (simplex, correlation, Cholesky factor), and a bound that is not a numeric
-constant (one computed by arithmetic over data, or from another parameter; a
-literal, scalar data, and their `fmax`/`fmin` with a structural bound are
-constants).
+type (simplex, correlation, Cholesky factor), and a bound that is not one number
+fixed by the data (one that reads another parameter, or differs per coordinate;
+a literal, scalar data and arithmetic over them, `fmax`/`fmin` with a structural
+bound included, are fixed).
 
 Returns a fresh draws × `length(unc_names)` matrix; `draws` is left untouched.
 
@@ -1636,8 +1636,7 @@ function parameter_draws(d::BRMDescriptor, draws::AbstractMatrix, unc_names;
         "BRM prediction: declared parameter `$parameter` has Stan type ",
         "`$(output.type)`; only real-valued parameters (real, vector, ",
         "row_vector, matrix) map one coordinate per element.")
-    value = _brm_unconstrain_value(d.plan, output.constraints, Float64(to),
-                                   parameter)
+    value = _brm_unconstrain_value(d, output, Float64(to), parameter)
     coordinates = _brm_element_coordinates(output, unc_names)
     isempty(coordinates) && error(
         "BRM prediction: declared parameter `$parameter` (`$(output.name)`) is ",
@@ -1654,26 +1653,25 @@ function parameter_draws(d::BRMDescriptor, draws::AbstractMatrix, unc_names;
     out
 end
 
-# One declared constraint as a number: a literal, a scalar data value, or
-# their `fmax`/`fmin` (`_adaptive_constraint_value`). A bound computed from
-# other values is refused.
-function _brm_numeric_constraint(plan, constraints, key, parameter)
-    haskey(constraints, key) || return nothing
-    value = _adaptive_constraint_value(plan, constraints[key], parameter,
-                                       "declared-parameter")
+# One declared constraint as a number, as StanBlocks evaluates it against the
+# data (`_brm_constraint_value`). A bound that reads another parameter, or one
+# that differs per coordinate, is refused.
+function _brm_numeric_constraint(d, output::BRMOutput, key, parameter)
+    haskey(output.constraints, key) || return nothing
+    value = _brm_constraint_value(d, output, key)
     value isa Real || error(
         "BRM prediction: declared parameter `$parameter` has `$key = ",
-        "$(constraints[key])`, which is not a numeric constant; its ",
-        "unconstrained image depends on other values and is refused rather ",
-        "than guessed.")
+        "$(output.constraints[key])`, which is not one number fixed by the ",
+        "data; its unconstrained image depends on other values and is refused ",
+        "rather than guessed.")
     Float64(value)
 end
 
 # The unconstrained image of the constrained value `to` under Stan's transform
-# for a declaration with these constraints.
-function _brm_unconstrain_value(plan, constraints::NamedTuple, to::Float64,
+# for the output's declaration.
+function _brm_unconstrain_value(d, output::BRMOutput, to::Float64,
                                 parameter::Symbol)
-    num(key) = _brm_numeric_constraint(plan, constraints, key, parameter)
+    num(key) = _brm_numeric_constraint(d, output, key, parameter)
     lower, upper = num(:lower), num(:upper)
     lower = _brm_no_bound(lower, :lower) ? nothing : lower
     upper = _brm_no_bound(upper, :upper) ? nothing : upper

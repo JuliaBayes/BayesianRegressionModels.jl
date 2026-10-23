@@ -411,7 +411,7 @@ function _adaptive_r2d2_context(model, pos)
     for lhs in ambiguous
         delete!(assignments, lhs)
     end
-    (; plan, data=plan.data, parameters, assignments, ambiguous, pos)
+    (; descriptor, plan, data=plan.data, parameters, assignments, ambiguous, pos)
 end
 
 # Accumulates `w * log(expr)` while compiling; `_adaptive_log_scale_program`
@@ -449,9 +449,15 @@ function _adaptive_scalar_constraint(ctx, owner, o::BRMOutput)
         "BRM adaptive centering: R2D2 block `$owner` reads `$(o.name)`, whose ",
         "Stan type carries $(Tuple(extra)); only lower/upper bounds are ",
         "supported.")
-    bound(key) = haskey(o.constraints, key) ?
-        Float64(_adaptive_constraint_value(ctx.plan, o.constraints[key],
-                                           owner, "R2D2 scale input")) : nothing
+    function bound(key)
+        haskey(o.constraints, key) || return nothing
+        value = _brm_constraint_value(ctx.descriptor, o, key)
+        value isa Real || error(
+            "BRM adaptive centering: R2D2 block `$owner` reads `$(o.name)`, ",
+            "whose `$key` bound `$(o.constraints[key])` is not one number ",
+            "fixed by the data.")
+        Float64(value)
+    end
     (bound(:lower), bound(:upper))
 end
 
@@ -849,35 +855,38 @@ _adaptive_stan_expr_value(x::StanBlocks.StanExpr) =
     _adaptive_stan_expr_value(x.expr)
 _adaptive_stan_expr_value(x) = x
 
-# A declared constraint's value: a literal, the compiler-owned data value a
-# bare symbol names, or the `fmax`/`fmin` sbimpl writes where an explicit bound
-# meets a structural one (`_sb_bound_intersection`): a positive scale with
-# `truncated(D; lower=length_scale_floor)`, a data scalar or a constant as its
-# lower end declares `<lower=fmax(0.0, ...)>`. That intersection is evaluated
-# over the same values, elementwise for a vector bound as in Stan. Anything
-# else is returned unevaluated for the caller to refuse. Shared by adaptive
+# A declared constraint's value. StanBlocks evaluates every output's
+# `constraints` against the model's current data as `constraint_values`
+# (StanBlocks b233afbc, stanblocks-use §30), with Stan's semantics: a literal,
+# a data value, the `fmax`/`fmin` sbimpl writes where an explicit bound meets a
+# structural one (`_sb_bound_intersection`), arithmetic over data, and one
+# entry per coordinate for a per-coordinate bound. A bound that reads a
+# parameter has no value without a draw and comes back `nothing` for the caller
+# to refuse. A descriptor without a Stan view (Turing) declares its bounds as
+# numbers already. A caller holding only the `GenerativePlan` gets the view
+# from its model, at the cost of one more `stan_descriptor`. Shared by adaptive
 # centering and `parameter_draws`.
-_adaptive_constraint_value(plan, raw, owner, role) =
-    _adaptive_constraint_eval(plan, _adaptive_stan_expr_value(raw), owner, role)
+_brm_stan_view(d) = d.stan
+_brm_stan_view(plan::GenerativePlan) =
+    Base.invokelatest(StanBlocks.stan_descriptor, plan.model)
 
-_adaptive_constraint_eval(plan, value, owner, role) = value
-function _adaptive_constraint_eval(plan, value::Symbol, owner, role)
-    haskey(plan.data, value) || error(
-        "BRM: `$owner` $role constraint refers to " *
-        "compiler-owned data `$value`, but the generative plan does not " *
-        "carry that value.",
+function _brm_constraint_value(d, output::BRMOutput, key::Symbol)
+    raw = output.constraints[key]
+    view = _brm_stan_view(d)
+    isnothing(view) && return raw
+    i = findfirst(o -> o.name === output.name, view.outputs)
+    isnothing(i) && error(
+        "BRM: output `$(output.name)` is not in the descriptor's StanBlocks " *
+        "view, so its `$key` bound cannot be read.",
     )
-    plan.data[value]
+    stan = view.outputs[i]
+    hasproperty(stan, :constraint_values) || error(
+        "BRM: reading the `$key` bound of `$(output.name)` needs StanBlocks' " *
+        "`ModelOutput.constraint_values` (StanBlocks b233afbc or later); the " *
+        "loaded StanBlocks predates it.",
+    )
+    getproperty(stan, :constraint_values)[key]
 end
-for (f, op) in ((StanBlocks.stan.builtin.fmax, max), (StanBlocks.stan.builtin.fmin, min))
-    @eval function _adaptive_constraint_eval(
-            plan, x::StanBlocks.CanonicalExpr{typeof($f)}, owner, role)
-        a, b = map(arg -> _adaptive_constraint_value(plan, arg, owner, role), x.args)
-        _adaptive_numeric_bound(a) && _adaptive_numeric_bound(b) ?
-            broadcast($op, a, b) : x
-    end
-end
-_adaptive_numeric_bound(x) = x isa Real || x isa AbstractArray{<:Real}
 
 # The scalar hyperparameters an adaptive cell's spread reads (HSGP length
 # scales and marginal SDs, cdar marginal SDs and persistences) are declared by
@@ -886,11 +895,11 @@ _adaptive_numeric_bound(x) = x isa Real || x isa AbstractArray{<:Real}
 # two-sided `truncated` prior, see `_sb_gp_scale_prior` / `_sb_dar_ar_prior`,
 # and every cdar persistence). Both are Stan's ordinary scalar transforms, so
 # the physical value is a closed-form function of the unconstrained
-# coordinate, reproduced by `_adaptive_constrain`. Each end is a constant
-# (`_adaptive_constraint_value`). An absent upper bound reads as `Inf`. A
-# declaration without a finite lower bound, or with an offset/multiplier, still
-# raises.
-function _adaptive_bounds(plan, output::BRMOutput, n::Int, owner, role)
+# coordinate, reproduced by `_adaptive_constrain`. Each end is fixed by the
+# data (`_brm_constraint_value`). An absent upper bound reads as `Inf`. A
+# declaration without a finite lower bound, with an offset/multiplier, or with a
+# bound that reads a parameter still raises.
+function _adaptive_bounds(descriptor, output::BRMOutput, n::Int, owner, role)
     constraints = output.constraints
     unsupported = setdiff(collect(keys(constraints)), [:lower, :upper])
     isempty(unsupported) || error(
@@ -903,9 +912,9 @@ function _adaptive_bounds(plan, output::BRMOutput, n::Int, owner, role)
         "BRM adaptive centering: `$owner` $role is not lower-bounded; " *
         "the compiled unconstrained-to-physical transform is unsupported.",
     )
-    lower = _adaptive_bound_values(plan, constraints.lower, n, owner, role, "lower")
+    lower = _adaptive_bound_values(descriptor, output, :lower, n, owner, role)
     upper = haskey(constraints, :upper) ?
-        _adaptive_bound_values(plan, constraints.upper, n, owner, role, "upper") :
+        _adaptive_bound_values(descriptor, output, :upper, n, owner, role) :
         fill(Inf, n)
     all(lower .< upper) || error(
         "BRM adaptive centering: `$owner` $role has lower bounds $lower not " *
@@ -914,13 +923,13 @@ function _adaptive_bounds(plan, output::BRMOutput, n::Int, owner, role)
     lower, upper
 end
 
-function _adaptive_bound_values(plan, raw, n::Int, owner, role, side)
-    value = _adaptive_constraint_value(plan, raw, owner, role)
-    _adaptive_numeric_bound(value) || error(
-        "BRM adaptive centering: `$owner` $role has the $side bound `$raw`, " *
-        "which is computed from other values; this contract reads a literal, " *
-        "compiler-owned data (a data scalar, a constant or `length_scale_floor`) " *
-        "or the `fmax`/`fmin` that intersects them with a structural bound.",
+function _adaptive_bound_values(descriptor, output::BRMOutput, side::Symbol,
+                                n::Int, owner, role)
+    value = _brm_constraint_value(descriptor, output, side)
+    value isa Real || value isa AbstractArray{<:Real} || error(
+        "BRM adaptive centering: `$owner` $role has the $side bound " *
+        "`$(output.constraints[side])`, which reads a parameter; this contract " *
+        "needs a bound fixed by the data.",
     )
     values = value isa Real ? fill(Float64(value), n) : collect(Float64, value)
     length(values) == n || error(
@@ -1101,11 +1110,11 @@ function _adaptive_hsgp_centering_blocks(model, unc_names)
                 length(weights.coordinates), length(rho.coordinates))
 
             rho_lower, rho_upper = _adaptive_bounds(
-                plan, rho.output, length(rho.coordinates), entry.term,
+                descriptor, rho.output, length(rho.coordinates), entry.term,
                 "length scale",
             )
             sigma_lower, sigma_upper = only.(_adaptive_bounds(
-                plan, sigma.output, 1, entry.term, "marginal SD",
+                descriptor, sigma.output, 1, entry.term, "marginal SD",
             ))
             push!(out, _HSGPAdaptiveCenteringBlock(
                 logical, entry.term,
@@ -1225,11 +1234,11 @@ function _adaptive_periodic_hsgp_block!(
     )
 
     rho_lower, rho_upper = _adaptive_bounds(
-        plan, rho.output, length(rho.coordinates), entry.term,
+        descriptor, rho.output, length(rho.coordinates), entry.term,
         "length scale",
     )
     sigma_lower, sigma_upper = only.(_adaptive_bounds(
-        plan, sigma.output, 1, entry.term, "marginal SD",
+        descriptor, sigma.output, 1, entry.term, "marginal SD",
     ))
     target_c = _brm_hsgp_centeredness(kw, n_weights)
     all(iszero, target_c) || error(
@@ -1326,11 +1335,11 @@ function _adaptive_grouped_hsgp_blocks!(
         "BRM adaptive centering: grouped HSGP `$(entry.term)`",
         B, length(rho.coordinates))
     rho_lower, rho_upper = _adaptive_bounds(
-        plan, rho.output, length(rho.coordinates), entry.term,
+        descriptor, rho.output, length(rho.coordinates), entry.term,
         "length scale",
     )
     sigma_lower, sigma_upper = only.(_adaptive_bounds(
-        plan, sigma.output, 1, entry.term, "marginal SD",
+        descriptor, sigma.output, 1, entry.term, "marginal SD",
     ))
     target_c = _brm_hsgp_centeredness(kw, B)
     rho_idx = collect(rho.coordinates)
@@ -1483,8 +1492,8 @@ function _adaptive_cdar_log_scale(x::AbstractVector,
     log(sigma) + 0.5 * log(block.cdiag[p]) + 0.5 * log(spread)
 end
 
-function _adaptive_cdar_rho_bounds(plan, output::BRMOutput, owner)
-    lower, upper = only.(_adaptive_bounds(plan, output, 1, owner, "persistence"))
+function _adaptive_cdar_rho_bounds(descriptor, output::BRMOutput, owner)
+    lower, upper = only.(_adaptive_bounds(descriptor, output, 1, owner, "persistence"))
     0 <= lower && upper <= 1 || error(
         "BRM adaptive centering: cdar `$owner` persistence is declared on " *
         "[$lower, $upper], outside the stationary interval [0, 1].",
@@ -1595,10 +1604,10 @@ function _adaptive_cdar_centering_blocks(model, unc_names)
             )
 
             sigma_lower, sigma_upper = only.(_adaptive_bounds(
-                plan, sigma.output, 1, entry.term, "marginal SD",
+                descriptor, sigma.output, 1, entry.term, "marginal SD",
             ))
             rho_lower, rho_upper =
-                _adaptive_cdar_rho_bounds(plan, rho.output, entry.term)
+                _adaptive_cdar_rho_bounds(descriptor, rho.output, entry.term)
             push!(out, _CDARAdaptiveCenteringBlock(
                 logical, entry.term, P, W,
                 collect(innovations.coordinates),
