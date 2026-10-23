@@ -46,6 +46,20 @@ membership_matrix(values, name, n, K) = [values["$name.$i.$k"] for i in 1:n, k i
         [1 - values["w"], values["w"]])
     @test membership ≈ permutedims(reduce(hcat,
         [reference_membership(mixture, y) for y in data.y])) atol=1e-12
+    # Read as draws through the descriptor (snag read-the-new-per-62e2b0bf):
+    # the logical target is the response and `role` selects the carrier; the
+    # columns follow the supplied names, Stan's column-major `y_membership.i.k`.
+    names = BridgeStan.param_names(problem.model; include_tp=true, include_gq=true)
+    draws = permutedims([values[name] for name in names])
+    membership_draws = brm_output_draws(descriptor, draws, names;
+        logical=:y, role=:membership)
+    @test size(membership_draws) == (1, 10)
+    @test reshape(vec(membership_draws), 5, 2) == membership
+    # refused: an emitted name is not a logical target, since the descriptor
+    # resolves BRM meaning rather than emitter-owned names (`brm_output`); the
+    # membership matrix's target is its response (decision 1l78mxi).
+    @test_throws "pass `logical=:y, role=:membership`" brm_output_draws(
+        descriptor, draws, names; logical=:y_membership)
 end
 
 @testset "per-row weights from a linked linear predictor" begin

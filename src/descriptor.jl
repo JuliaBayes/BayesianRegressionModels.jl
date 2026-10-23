@@ -105,7 +105,7 @@ BRM adds:
   | `:posterior_predictive` | a predictive draw of an observation |
   | `:covariate_draw` | the selected modeled covariate value consumed by later operations |
   | `:pointwise_loglik` | an observation's per-element log-likelihood |
-  | `:membership` | a `MixtureModel` response's `n x K` matrix of per-row component-membership probabilities (`<response>_membership`); `source` and `logical` name the response, `labels` the components |
+  | `:membership` | a `MixtureModel` response's `n x K` matrix of per-row component-membership probabilities (`<response>_membership`); `source` and `logical` name the response, `labels` the components, so it is addressed as `logical=<response>, role=:membership` |
   | `:stan_derived` | a Stan-level output no BRM declaration owns |
 
 - `declaration` — the `GenerativeDeclaration` this output came from, or
@@ -2244,6 +2244,16 @@ function _brm_submodel_hint(d::BRMDescriptor, name::Symbol)
         "$choices to address one."
 end
 
+# The address to suggest when a bare `logical` misses but names an emitted
+# carrier: `y_membership`, `pk_conc_gen` and `y_likelihood` are the names of
+# carriers whose logical target is the response, selected by `role`.
+function _brm_emitted_name_hint(d::BRMDescriptor, name::Symbol)
+    named = [o for o in d.outputs if o.name === name && !isnothing(o.logical)]
+    isempty(named) && return ""
+    join((" `$name` is the emitted name of logical output `$(o.logical)`'s " *
+          "`:$(o.role)` carrier; pass `logical=:$(o.logical), role=:$(o.role)`." for o in named))
+end
+
 """
     brm_output(d::BRMDescriptor, logical::Symbol; role=nothing, submodel=nothing)
         -> BRMOutput
@@ -2269,7 +2279,11 @@ brm_output(d, :pk_conc; role=:pointwise_loglik)       # the per-element loglik
 ```
 
 The emitted names (`pk_conc_gen`, …) are StanBlocks' to choose and are NOT part
-of this contract; that is the whole point of asking by role.
+of this contract; that is the whole point of asking by role. A mixture
+response's membership matrix is addressed the same way,
+`brm_output(d, :y; role=:membership)`, although it is emitted as `y_membership`.
+Passing an emitted name as `logical` is an error that names the
+`logical=`/`role=` address of that carrier.
 
 **A consumer `@slic` submodel's own values are addressed through
 `submodel=`.** A submodel called by `effect ~ saturating(dose)` whose body
@@ -2301,7 +2315,8 @@ function brm_output(d::BRMDescriptor, logical::Symbol; role=nothing, submodel=no
     qualifier = isnothing(role) ? "" : " with role `$role`"
     if isempty(found)
         available = unique!(Symbol[o.role for o in d.outputs if o.logical === logical])
-        hint = isempty(available) ? _brm_submodel_hint(d, logical) :
+        hint = isempty(available) ?
+            _brm_emitted_name_hint(d, logical) * _brm_submodel_hint(d, logical) :
             " That target does emit carriers with role(s) $(Tuple(available))."
         error("brm_descriptor: logical output `$logical`$qualifier has no emitted " *
               "posterior carrier in model `$(d.name)`.$hint")
