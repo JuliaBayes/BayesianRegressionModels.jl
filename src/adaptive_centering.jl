@@ -714,8 +714,10 @@ end
 # `adaptive_centering_blocks` builds: R2D2 blocks are never centered, so the
 # replay caller never reaches one. A known-value block needs its binding
 # record `known` (`_adaptive_known_record`), which carries the known values.
+# `effects` lets the replay caller pass a Student-t block's own effect
+# coordinates with its Gaussian family's frame.
 function _adaptive_block(ranef::RanefBlock, unc_names, pos; r2d2=nothing,
-                         known=nothing)
+                         known=nothing, effects=nothing)
     ranef.family in _ADAPTIVE_STRATIFIED_FAMILIES && error(
         "BRM adaptive centering: stratified block `$(ranef.binding)` ",
         "(`$(ranef.family)`, group `$(ranef.group)`, by `$(ranef.by)`) is ",
@@ -723,6 +725,10 @@ function _adaptive_block(ranef::RanefBlock, unc_names, pos; r2d2=nothing,
         "Cholesky/scale frame per stratum and must not be treated as an ",
         "ordinary single-frame block.",
     )
+    # A Student-t block scales each level's factor by `sqrt(w[g])`, which
+    # neither block type models: it keeps its compiled parameterization, with
+    # or without known values (todo `16jywsl`).
+    haskey(get(_RANEF_FAMILIES, ranef.family, (;)), :mixing) && return nothing
     if get(get(_RANEF_FAMILIES, ranef.family, (;)), :known, false)
         isnothing(known) && error(
             "BRM adaptive centering: known-value block `$(ranef.binding)` ",
@@ -751,7 +757,7 @@ function _adaptive_block(ranef::RanefBlock, unc_names, pos; r2d2=nothing,
     AdaptiveCenteringBlock(
         ranef,
         target_c,
-        ranef_coordinates(ranef, unc_names),
+        isnothing(effects) ? ranef_coordinates(ranef, unc_names) : effects,
         _adaptive_named_indices(pos, cholesky_names, binding, "Cholesky"),
         _adaptive_named_indices(pos, scale_names, binding, "scale"),
     )
@@ -843,7 +849,11 @@ sampling geometry under an adapted diagonal metric.
 
 Stratified `gr(g, by=b)` blocks currently raise rather than being silently
 left fixed: they carry one `L,tau` frame per stratum and need a separate indexed
-metadata contract. Intercept-only `(1 | mm(...))` blocks adapt through the
+metadata contract. Student-t blocks (`ranef(:, ID) ~ TDist(nu)`), with or
+without known values, are not described yet: each level's factor is
+`sqrt(w[g]) * C`, which neither block type models, so such a block keeps its
+compiled parameterization (non-centered, or centered under `centered_groups`)
+while the model's other blocks adapt (todo `16jywsl`). Intercept-only `(1 | mm(...))` blocks adapt through the
 ordinary scalar path (their downstream gather is linear); an `mm` block with
 any slope term, including a slope-only `(0 + x | mm(...))`, shares the ordinary
 correlated emission and adapts with it.
@@ -1478,7 +1488,10 @@ end
 # whose spread underflows to zero, and its candidate frames underflow and
 # overflow to NaN losses. Floored, every frame of such a weight is a fixed
 # rescaling of `z` (the non-centred geometry), and `exp(±2c * log_scale)` stays
-# a normal Float64 for every control `c`. The transform is exact for any
+# a normal Float64 for every control `c`. Because those frames cannot be told
+# apart, the HSGP scoring frame scores a floored observation in the non-centred
+# frame for every candidate, so a weight scored only on the floor keeps
+# `c = 0` (snag adaptive-centeri-eca5a77c). The transform is exact for any
 # function of coordinates it does not rewrite, so the floor moves coordinates,
 # never the posterior. Between the two bounds the softplus differs from the
 # exact value by less than `exp(-40)`; above `exp(-110)` they are identical.

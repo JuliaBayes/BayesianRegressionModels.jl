@@ -654,21 +654,82 @@ end
 #
 # Given `w` the block is still Gaussian, so each Student-t submodel is DERIVED
 # from its Gaussian one instead of being written a second time: the weight
-# statement goes before the `return` and the returned value is rescaled by its
-# shape. `n_groups` sizes `w` exactly as it sizes the standardized draws, so a
-# cv-tainted size moves `w` to generated quantities together with them and a
-# fresh level draws its own weight. `nu` is a submodel input: a numeric formula
-# constant, or an already-declared sampled scalar passed by name.
+# statement is inserted and the level's Gaussian deviation is scaled by
+# `sqrt(w)` where the shape puts it. `n_groups` sizes `w` exactly as it sizes
+# the standardized draws, so a cv-tainted size moves `w` to generated
+# quantities together with them and a fresh level draws its own weight. `nu` is
+# a submodel input: a numeric formula constant, or an already-declared sampled
+# scalar passed by name.
+#
+# Shapes (`_sb_student_t_mix!`):
+#   :level_rows      non-centered draws; the returned `n_groups x n_terms`
+#                    matrix is rescaled row by row.
+#   :centered_rows   centered (`centered_groups`); the effect `b[j]` is the
+#                    parameter, so its law gets level `j`'s Cholesky factor
+#                    scaled by `sqrt(w[j])` (`multi_normal_cholesky0_scaled`).
+#   :centered_plate  the configured-scale centered plate; the same scaling
+#                    inside the plate cell, `sqrt(w[g]) * C`.
+# The centered shapes keep the effect itself as the parameter, so the centered
+# Student-t block is `b[j] | w[j] ~ MVN(0, w[j] * Sigma)` exactly.
 const _SB_STUDENT_T_RANEF_SHAPES = Dict{Symbol,Symbol}(
     :ranef_correlated_draws => :level_rows,
     :ranef_correlated_draws_generic => :level_rows,
     :ranef_correlated_draws_known_scale => :level_rows,
     :ranef_correlated_draws_known_cor => :level_rows,
+    :ranef_correlated_draws_centered => :centered_rows,
+    :ranef_correlated_draws_centered_generic => :centered_plate,
 )
 
 _sb_student_t_ranef_family(family::Symbol) = Symbol(family, :_student_t)
 
-_sb_student_t_scaled(::Val{:level_rows}, value) = :(diag_pre_multiply(sqrt(w), $value))
+# Index of the body's top-level `~` statement whose right side satisfies `f`.
+function _sb_student_t_law_at(body, family, f, what)
+    at = findall(s -> Meta.isexpr(s, :call) && s.args[1] === :~ && f(s.args[3]),
+                 body.args)
+    length(at) == 1 || error(
+        "sbimpl: random-effect submodel `$family` has $(length(at)) $what " *
+        "statements; its Student-t form needs exactly one")
+    only(at)
+end
+
+# Rewrite the Gaussian body in place; returns the statement index the weight
+# statement goes before.
+function _sb_student_t_mix!(::Val{:level_rows}, body, family)
+    at = findfirst(s -> Meta.isexpr(s, :return), body.args)
+    isnothing(at) && error("sbimpl: random-effect submodel `$family` has no `return`")
+    returned = only(body.args[at].args)
+    body.args[at] = Expr(:return, :(diag_pre_multiply(sqrt(w), $returned)))
+    at
+end
+
+function _sb_student_t_mix!(::Val{:centered_rows}, body, family)
+    at = _sb_student_t_law_at(body, family,
+        rhs -> Meta.isexpr(rhs, :call) && rhs.args[1] === :multi_normal_cholesky0,
+        "`multi_normal_cholesky0`")
+    law = body.args[at].args[3]
+    body.args[at].args[3] = :(multi_normal_cholesky0_scaled(sqrt(w), $(only(law.args[2:end]))))
+    at
+end
+
+function _sb_student_t_mix!(::Val{:centered_plate}, body, family)
+    at = _sb_student_t_law_at(body, family,
+        rhs -> Meta.isexpr(rhs, :do) && Meta.isexpr(rhs.args[1], :call) &&
+               rhs.args[1].args[1] === :plate,
+        "`plate`")
+    cell = body.args[at].args[3].args[2]
+    g = only(cell.args[1].args)
+    laws = findall(s -> Meta.isexpr(s, :call) && s.args[1] === :~ &&
+                        Meta.isexpr(s.args[3], :call) &&
+                        s.args[3].args[1] === :multi_normal_cholesky,
+                   cell.args[2].args)
+    length(laws) == 1 || error(
+        "sbimpl: the plate cell of `$family` has $(length(laws)) " *
+        "`multi_normal_cholesky` statements; its Student-t form needs exactly one")
+    law = cell.args[2].args[only(laws)].args[3]
+    location, scale = law.args[2:end]
+    law.args[3] = :(sqrt(w[$g]) * $scale)
+    at
+end
 
 function _sb_student_t_ranef(base::StanBlocks.SlicModel, family::Symbol)
     shape = get(_SB_STUDENT_T_RANEF_SHAPES, family, nothing)
@@ -676,10 +737,7 @@ function _sb_student_t_ranef(base::StanBlocks.SlicModel, family::Symbol)
         "sbimpl: Student-t random effects are not implemented for the " *
         "`$family` emission")
     body = deepcopy(base.model)
-    at = findfirst(s -> Meta.isexpr(s, :return), body.args)
-    isnothing(at) && error("sbimpl: random-effect submodel `$family` has no `return`")
-    returned = only(body.args[at].args)
-    body.args[at] = Expr(:return, _sb_student_t_scaled(Val(shape), returned))
+    at = _sb_student_t_mix!(Val(shape), body, family)
     insert!(body.args, at, :(w ~ inv_gamma(0.5 * nu, 0.5 * nu; n=n_groups)))
     StanBlocks.SlicModel(body, base.data, base.mod, base.observations)
 end
@@ -1004,6 +1062,24 @@ StanBlocks.@deffun begin
     @lhs @lpxf multi_normal_cholesky0_lpdf(x::vector[m, n], scale::matrix[n, n])::real = begin
         multi_normal_cholesky_lpdf(x, rep_vector(0., n), scale)
     end
+    # The same law with row `i`'s Cholesky factor scaled by `s[i] > 0`: the
+    # centered Student-t block, `x[i] ~ MVN(0, s[i]^2 * scale * scale')`. The
+    # density is the unscaled one at `x[i] / s[i]` times `s[i]^-n`, so the
+    # Cholesky log-determinant is still paid once, by one vectorised call.
+    multi_normal_cholesky0_scaled_rng(vector[m, n], s::vector[m], scale::matrix[n, n])::vector[m, n] = begin
+        rv::vector[m, n]
+        for i in 1:m
+            rv[i] = s[i] * multi_normal_cholesky_rng(rep_vector(0., n), scale)
+        end
+        rv
+    end
+    @lhs @lpxf multi_normal_cholesky0_scaled_lpdf(x::vector[m, n], s::vector[m], scale::matrix[n, n])::real = begin
+        u::vector[m, n]
+        for i in 1:m
+            u[i] = x[i] / s[i]
+        end
+        multi_normal_cholesky0_lpdf(u, scale) - n * sum(log(s))
+    end
     @stanonly ranef_b_matrix(b::vector[m, n])::matrix[m, n] = begin
         rv::matrix[m, n]
         for i in 1:m
@@ -1103,6 +1179,15 @@ ranef_correlated_draws_centered_generic = StanBlocks.@slic begin
     return b_cols'
 end
 
+# The centered Student-t families (`_sb_student_t_ranef`, shapes
+# `:centered_rows` / `:centered_plate`): the effect stays the parameter and each
+# level's Cholesky factor is scaled by `sqrt(w[j])`.
+ranef_correlated_draws_centered_student_t =
+    _sb_student_t_ranef(ranef_correlated_draws_centered, :ranef_correlated_draws_centered)
+ranef_correlated_draws_centered_generic_student_t =
+    _sb_student_t_ranef(ranef_correlated_draws_centered_generic,
+                        :ranef_correlated_draws_centered_generic)
+
 # Centered siblings of the known-value families (`sd(...) = value`,
 # `cor(:, ID) = R`): the effect itself is the parameter, under the block's
 # covariance. `tau` -- and `L` for `_known_cor` -- arrive as caller kwargs
@@ -1120,7 +1205,8 @@ ranef_correlated_draws_centered_known_cor = StanBlocks.@slic begin
 end
 
 # The centered emission of a known-value block, keyed by whether its
-# correlation is known. A Student-t block has no centered emission.
+# correlation is known. A known-value Student-t block has no centered emission
+# (`_sb_refuse_centered_student_t`).
 const _SB_KNOWN_CENTERED_RANEF_FAMILIES = Dict{Bool,Tuple{Symbol,StanBlocks.SlicModel}}(
     false => (:ranef_correlated_draws_centered_known_scale,
               ranef_correlated_draws_centered_known_scale),
@@ -11756,16 +11842,17 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
 end
 
 # Emit a Student-t `|ID|` block: the bucket's Gaussian draws submodel -- the
-# default one, or the generic one when `sd(...)` / `cor(...)` configure it --
-# turned into its scale mixture by `_sb_student_t_ranef`. Only the non-centered
-# emission has a Student-t form; cv sizing works unchanged because `w` shares
-# the standardized draws' size expression.
+# default one, or the generic one when `sd(...)` / `cor(...)` configure it,
+# non-centered or, for a group in `centered_groups`, centered -- turned into its
+# scale mixture by `_sb_student_t_ranef`. cv sizing works unchanged because `w`
+# shares the standardized draws' size expression; `SBBRMI` refuses a group in
+# both `cv_groups` and `centered_groups`.
 function _sb_emit_student_t_id_bucket!(stmts, data, bucket_name, n_terms_name,
                                        gname, idx_name, n_name,
                                        dist::_BRMRanefStudentT;
                                        cv_groups, centered_groups, id_sym,
                                        ranef_effect, mod::Module)
-    _sb_refuse_centered_student_t(gname, centered_groups, id_sym)
+    centered = gname in centered_groups
     n_groups = n_name
     if gname in cv_groups
         n_groups = Symbol(bucket_name, :_n_g)
@@ -11779,15 +11866,19 @@ function _sb_emit_student_t_id_bucket!(stmts, data, bucket_name, n_terms_name,
     kwargs = Any[Expr(:kw, :group_idx, idx_name), Expr(:kw, :n_groups, n_groups),
                  Expr(:kw, :n_terms, n_terms_name)]
     if ranef_effect.has_sd || ranef_effect.has_cor
-        config = _sb_generic_ranef_submodel(ranef_effect.sd_prior,
-            ranef_correlated_draws_generic_student_t; mod)
+        family, base = centered ?
+            (:ranef_correlated_draws_centered_generic_student_t,
+             ranef_correlated_draws_centered_generic_student_t) :
+            (:ranef_correlated_draws_generic_student_t,
+             ranef_correlated_draws_generic_student_t)
+        config = _sb_generic_ranef_submodel(ranef_effect.sd_prior, base; mod)
         model = config.model
-        _sb_record_binding!(data, bucket_name, :random_effect, gname;
-                            family=:ranef_correlated_draws_generic_student_t)
+        _sb_record_binding!(data, bucket_name, :random_effect, gname; family)
         push!(kwargs, Expr(:kw, :lkj_eta, ranef_effect.lkj_eta))
         append!(kwargs, [Expr(:kw, k, v) for (k, v) in config.inputs])
     else
-        model = :ranef_correlated_draws_student_t
+        model = centered ? :ranef_correlated_draws_centered_student_t :
+                           :ranef_correlated_draws_student_t
     end
     push!(kwargs, Expr(:kw, :nu, nu))
     push!(stmts, Expr(:call, :~, bucket_name,
@@ -11795,12 +11886,15 @@ function _sb_emit_student_t_id_bucket!(stmts, data, bucket_name, n_terms_name,
     nothing
 end
 
-# A Student-t `|ID|` block has only the non-centered emission (its mixing
-# weights scale the standardized draws), with or without known values.
+# A Student-t `|ID|` block that holds a known scale or correlation has only the
+# non-centered emission (its mixing weights scale the standardized draws): the
+# centered Student-t families derive from the sampled-scale Gaussian ones only
+# (`ranef_correlated_draws_centered*_student_t`).
 _sb_refuse_centered_student_t(gname, centered_groups, id_sym) =
     gname in centered_groups && error(
         "sbimpl: group `$gname` is in `centered_groups`, but its `|$id_sym|` " *
-        "block is Student-t; the centered Student-t emission is not " *
+        "block is Student-t and holds a known scale or correlation; the " *
+        "centered emission of a known-value Student-t block is not " *
         "implemented. Use the default non-centered emission for this group")
 
 # Emit a shared `|ID|` block that holds some marginal scales and/or its
