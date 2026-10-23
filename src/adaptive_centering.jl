@@ -1665,6 +1665,9 @@ struct _CARAdaptiveCenteringBlock
     rho::Int
     rho_lower::Float64
     rho_upper::Float64
+    # The predictor's sampled population intercept, which every `theta` cell's
+    # location adds (`_adaptive_car_intercept`); 0 when it has none.
+    intercept::Int
     # The fitted graph's area labels in sorted order (`effects` order).
     areas::Vector{Any}
 end
@@ -1709,6 +1712,8 @@ struct _CARAdaptiveCell
     # The `phi` cell a `theta` cell is centred on, numbered from `phi_offset + 1`
     # (`_adaptive_car_cell`); 0 for a `phi` cell or an island.
     phi::Int
+    # The intercept coordinate a `theta` cell's location adds; 0 for a `phi` cell.
+    intercept::Int
 end
 
 function _adaptive_car_cell(block::_CARAdaptiveCenteringBlock, cell::Int,
@@ -1718,11 +1723,11 @@ function _adaptive_car_cell(block::_CARAdaptiveCenteringBlock, cell::Int,
              block.rho, block.rho_lower, block.rho_upper)
     if cell <= n
         return _CARAdaptiveCell(block.structured[cell], block.bym2 ? 1 : 0, hyper...,
-                                block.log_inv_scale[cell], 0)
+                                block.log_inv_scale[cell], 0, 0)
     end
     j = block.struct_idx[cell - n]
     _CARAdaptiveCell(block.unstructured[cell - n], j > 0 ? 2 : 0, hyper..., 0.0,
-                     j > 0 ? phi_offset + j : 0)
+                     j > 0 ? phi_offset + j : 0, block.intercept)
 end
 _adaptive_car_index(block::_CARAdaptiveCenteringBlock, cell::Int) =
     _adaptive_car_cell(block, cell).index
@@ -1878,6 +1883,7 @@ function _adaptive_car_centering_blocks(model, unc_names)
                 struct_idx, area_of, log_inv_scale,
                 only(sigma.coordinates), sigma_lower, sigma_upper,
                 isnothing(rho) ? 0 : only(rho.coordinates), rho_lower, rho_upper,
+                bym2 ? _adaptive_car_intercept(descriptor, logical, unc_names) : 0,
                 collect(Any, areas),
             ))
         end
@@ -1894,6 +1900,25 @@ function _adaptive_car_centering_blocks(model, unc_names)
         "unconstrained coordinates; refusing an ambiguous transform.",
     )
     out
+end
+
+# The sampled population intercept of predictor `logical`, or 0. A BYM2 `theta`
+# cell is centred on `intercept + a * phi`, so its `c=1` coordinate is the
+# area's total (Gelfand, Sahu and Carlin 1995) rather than its deviation `b[k]`:
+# beside a free intercept, centring `b[k]` ties every centred area to the
+# intercept along the direction `(intercept + d, b .- d)`, which a likelihood
+# that pins each area's total does not resolve. An intercept absorbed into exact
+# totals, or one declared with bounds (its coordinate is then not the value), is
+# not read. `phi` cells are not centred on it: the ICAR's sum-to-zero already
+# separates the field from the intercept.
+function _adaptive_car_intercept(descriptor, logical, unc_names)
+    :Intercept in popcoefnames(descriptor.plan.parent, logical) || return 0
+    resolved = brm_population_effect_coordinates(descriptor, logical, unc_names;
+                                                 coefficient=:Intercept)
+    (resolved.recovered || length(resolved.coordinates) != 1 ||
+     resolved.output.kind !== :parameter ||
+     !isempty(resolved.output.constraints)) && return 0
+    only(resolved.coordinates)
 end
 
 # Stan's native `cholesky_factor_corr[K]` constrain transform.  Its

@@ -4,8 +4,9 @@
 # Every area is a triangular pair of cells: its structured `phi` cell (location
 # 0, scale `a = sigma * sqrt(rho / s_c)`, `sigma` under `:icar`) and, under
 # `:bym2`, its unstructured `theta` cell (scale `sigma * sqrt(1 - rho)`, `sigma`
-# for an island, location `a * phi`). `c=0` is the emitted standardized frame;
-# `c=1` is the spatial component and the area's total effect. Covers metadata
+# for an island, location `intercept + a * phi`). `c=0` is the emitted
+# standardized frame; `c=1` is the spatial component and the area's total
+# `intercept + effects[k]`. Covers metadata
 # resolution against the compiled model, the exact transform against an
 # independent map, the c=1 meaning against BridgeStan's transformed `effects`,
 # candidate-frame invariance, Enzyme gradients, the joint and learned-order
@@ -69,9 +70,10 @@ inv_logit(x) = 1 / (1 + exp(-x))
 
 # The independent map, written from the emitted law alone (`_sb_car_bym2`):
 # per area, `phi` from its coordinate `a^c * phi`, then `theta` from
-# `c * a * phi + s^c * theta`. Indices come from the compiled names, the graph
-# from the Stan data. `controls` follow the wrapper's documented pair order:
-# the `phi` cells in emitted order, then one `theta` cell per area.
+# `c * (intercept + a * phi) + s^c * theta`. Indices come from the compiled
+# names, the graph from the Stan data. `controls` follow the wrapper's
+# documented pair order: the `phi` cells in emitted order, then one `theta` cell
+# per area.
 function manual_car_map(x, names, data, type, controls)
     phi_idx = indices_of(names, "car_mu_area_phi")
     sigma = exp(x[index_of(names, "car_mu_area_sigma")])
@@ -86,6 +88,7 @@ function manual_car_map(x, names, data, type, controls)
         return ljac, y
     end
     rho = inv_logit(x[index_of(names, "car_mu_area_rho")])
+    intercept = x[index_of(names, "pop_mu_beta_pop.1")]
     inv_scale = data[:car_mu_area_inv_scale]
     theta_idx = indices_of(names, "car_mu_area_theta")
     n = length(phi_idx)
@@ -100,7 +103,7 @@ function manual_car_map(x, names, data, type, controls)
         j = struct_idx[k]
         c = controls[n + k]
         s = j > 0 ? sigma * sqrt(1 - rho) : sigma
-        m = j > 0 ? a[j] * phi[j] : 0.0
+        m = intercept + (j > 0 ? a[j] * phi[j] : 0.0)
         y[i] = (x[i] - c * m) / s^c
         ljac -= c * log(s)
     end
@@ -140,6 +143,7 @@ end for i in eachindex(x)]
     @test block.rho == index_of(names, "car_mu_area_rho")
     @test (block.sigma_lower, block.sigma_upper) == (0.0, Inf)
     @test (block.rho_lower, block.rho_upper) == (0.0, 1.0)
+    @test block.intercept == index_of(names, "pop_mu_beta_pop.1")
 
     # Cell scales against the emitted law at sigma = 0.7, rho = 0.3.
     x = zeros(length(names))
@@ -160,6 +164,7 @@ end for i in eachindex(x)]
     @test !icar.bym2
     @test isempty(icar.unstructured)
     @test icar.rho == 0
+    @test icar.intercept == 0
     @test length(icar.structured) == 7
 
     # A configured scale and a narrowed share are read through their bounds.
@@ -231,7 +236,9 @@ end
         position, gradient = copy(x), zeros(length(x))
         for cell in 1:n_cells
             j = BRM._adaptive_car_phi_cell(block, cell)
-            m = j == 0 ? 0.0 : scales[j] * innovations[j]
+            intercept = BRM._adaptive_car_cell(block, cell).intercept
+            m = (intercept == 0 ? 0.0 : x[intercept]) +
+                (j == 0 ? 0.0 : scales[j] * innovations[j])
             position[BRM._adaptive_car_index(block, cell)] =
                 c[cell] * m + scales[cell]^c[cell] * innovations[cell]
         end
@@ -261,7 +268,7 @@ end
     end
 end
 
-@testset "car c=1 is the spatial component and the area's total effect ($type)" for type in (:bym2, :icar)
+@testset "car c=1 is the spatial component and the area's total ($type)" for type in (:bym2, :icar)
     problem = CAR_AC_PROBLEM[type]
     sm = problem.model
     names = car_ac_names(type)
@@ -291,8 +298,9 @@ end
         rho = constrained[index_of(cnames, "car_mu_area_rho")]
         @test rho ≈ inv_logit(x[block.rho])
         inv_scale = sb.data[:car_mu_area_inv_scale]
-        # theta sources are every area's effect, islands and row-less areas included
-        @test x[block.unstructured] ≈ effects atol=1e-12
+        # theta sources are every area's total, islands and row-less areas included
+        intercept = constrained[index_of(cnames, "pop_mu_beta_pop.1")]
+        @test x[block.unstructured] ≈ intercept .+ effects atol=1e-12
         @test x[block.structured] ≈
               [sigma * sqrt(rho * inv_scale[k]) for k in block.phi_area] .* phi atol=1e-12
     else

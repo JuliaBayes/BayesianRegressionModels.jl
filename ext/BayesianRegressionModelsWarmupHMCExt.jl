@@ -556,11 +556,20 @@ function _car_spatial(x, state, q, c)
     exp(log_a) * (x[cell.index] * exp(-c * log_a))
 end
 
-# Pair `p`'s location in the source frame (its accessors read source coordinates).
+# Pair `p`'s location in the source frame (its accessors read source
+# coordinates): for a `theta` cell, the intercept plus its area's spatial
+# component; 0 for a `phi` cell.
 function _car_location(x, state, p)
-    q = state.cells[p].phi
-    q == 0 && return zero(eltype(x))
-    _car_spatial(x, state, q, state.sources[q])
+    _car_theta_location(x, state, p, state.cells[p].phi == 0 ? 0.0 :
+                        state.sources[state.cells[p].phi])
+end
+
+# The same with the `phi` cell's frame `c` given (the learned-order map reads
+# either frame).
+function _car_theta_location(x, state, p, c)
+    cell = state.cells[p]
+    m = cell.intercept == 0 ? zero(eltype(x)) : x[cell.intercept]
+    cell.phi == 0 ? m : m + _car_spatial(x, state, cell.phi, c)
 end
 
 struct BRMCARAdaptiveCenteringArgument{KIND} <: Function
@@ -617,7 +626,7 @@ function _centering_frame(state::BRMCARAdaptiveCenteringState, position, gradien
         c = source[p]
         s = exp(_car_log_scale(position, state, p))
         q = state.cells[p].phi
-        m = q == 0 ? zero(T) : _car_spatial(position, state, q, source[q])
+        m = convert(T, _car_theta_location(position, state, p, q == 0 ? 0.0 : source[q]))
         scale[p] = s
         location[p] = m
         innovation[p] = (position[idx] - c * m) / s^c
@@ -794,10 +803,11 @@ function _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells,
         "ambiguous transform.",
     )
     for block in car_blocks
-        scales = block.bym2 ? (block.sigma, block.rho) : (block.sigma,)
-        isdisjoint(scales, union(effects...)) || error(
+        reads = filter(!=(0), [block.sigma, block.rho, block.intercept])
+        isdisjoint(reads, union(effects...)) || error(
             "BRM joint adaptive centering: car `$(block.term)` reads its scale " *
-            "from a coordinate another cell rewrites; refusing an inexact transform.")
+            "or intercept from a coordinate another cell rewrites; refusing an " *
+            "inexact transform.")
     end
     for block in r2d2_blocks, s in block.scales
         isdisjoint(BRM._adaptive_scale_coordinates(s), car_state.effect_indices) ||
@@ -1300,7 +1310,7 @@ function _ordered_car_map!(y, x, state::BRMCARAdaptiveCenteringState, targets,
     for reads_phi in (true, false), p in eachindex(state.sources)
         q = state.cells[p].phi
         (q > 0) == reads_phi || continue
-        location = q == 0 ? zero(eltype(x)) : _car_spatial(x, state, q,
+        location = _car_theta_location(x, state, p, q == 0 ? 0.0 :
             direction > 0 ? state.sources[q] : targets[offset + q])
         ljac += _cell_map!(y, x, _car_pair_index(state, p), location,
             _car_log_scale(x, state, p), targets[offset + p], state.sources[p],

@@ -130,18 +130,19 @@ function _cdar_problem()
 end
 
 # Areal car cells: a BYM2 field over 7 areas (two components and an island,
-# whose `theta` cells read their `phi` cell's coordinate) and an ICAR field.
+# whose `theta` cells read their intercept and `phi` cell's coordinates) and an
+# ICAR field.
 # `offset` shifts every coordinate past another family's.
 function _car_blocks(offset=0)
     struct_idx = [1, 2, 3, 0, 4, 5, 6]
     bym2 = BRM._CARAdaptiveCenteringBlock(:mu, :car_mu_area, true,
         offset .+ collect(1:6), offset .+ collect(7:13), struct_idx, [1, 2, 3, 5, 6, 7],
         log.([1.4, 1.4, 1.4, 4.0, 4.0, 4.0]), offset + 14, 0.0, Inf, offset + 15, 0.0, 1.0,
-        collect(Any, 1:7))
+        offset + 22, collect(Any, 1:7))
     icar = BRM._CARAdaptiveCenteringBlock(:sigma, :car_sigma_area, false,
         offset .+ collect(16:20), Int[], [1, 2, 3, 4, 5], [1, 2, 3, 4, 5], zeros(5),
-        offset + 21, 0.0, Inf, 0, 0.0, 1.0, collect(Any, 1:5))
-    [bym2, icar], offset + 21
+        offset + 21, 0.0, Inf, 0, 0.0, 1.0, 0, collect(Any, 1:5))
+    [bym2, icar], offset + 22
 end
 
 function _car_problem()
