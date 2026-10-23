@@ -48,9 +48,12 @@ end
             projection = copy(fit.range_projection)
             @test has_canonical_signs(projection)
             Xnull, Zpen = _brm_apply_spline(fit, x)
-            @test size(Xnull) == (80, 2)
+            # Only the centered linear column: the intercept owns the constant.
+            @test size(Xnull) == (80, 1)
+            @test Xnull[:, 1] ≈ x .- sum(x) / length(x)
             @test size(Zpen) == (80, k - 2)
-            @test transpose(Xnull) * projection ≈ zeros(2, k - 2) atol=1e-9
+            T = hcat(ones(80), Xnull)
+            @test transpose(T) * projection ≈ zeros(2, k - 2) atol=1e-9
             _brm_apply_spline(fit, [-7.0, 0.0, 8.0])
             @test fit.range_projection == projection
         end

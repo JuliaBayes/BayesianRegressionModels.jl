@@ -2334,9 +2334,8 @@ end
     backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 12
-    # Preserve the original BridgeStan point by emitted coordinate identity:
-    # [mu.Intercept, log(sigma), b_fixed.1, b_raw.1..8, log(sd)].
-    # Fold SB's flat constant coefficient (-0.2) into its intercept (-0.3).
+    # The BridgeStan point of test/spline_sb_parity.jl, by emitted coordinate
+    # identity: [mu.Intercept, log(sigma), b_fixed.1, b_raw.1..8, log(sd)].
     u = [-0.5, -0.25, -0.15, -0.1, -0.05, 0.0, 0.05, 0.1,
         0.15, 0.2, 0.25, 0.3]
     # Values route through the bound translated plan (see the helper):
@@ -2350,7 +2349,7 @@ end
     sig = nt.sigma
     sd = nt.s_x.sd1
     Xnull, Zpen = BRM._brm_apply_spline(BRM._brm_fit_spline(x; k=10), x)
-    mu_hat = _parity_population(nt, backend, :mu)[1] .+ Xnull[:, 2:2] * nt.s_x.fixed .+ Zpen * (sd .* nt.s_x.raw1)
+    mu_hat = _parity_population(nt, backend, :mu)[1] .+ Xnull * nt.s_x.fixed .+ Zpen * (sd .* nt.s_x.raw1)
     ll = sum(logpdf.(Normal.(mu_hat, sig), y))
     pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) + logpdf(Normal(), sd) +
         sum(logpdf.(Normal(), nt.s_x.raw1)) + logpdf(Exponential(1), sig)
@@ -2359,12 +2358,11 @@ end
     @test _rk_query_translated(backend, translated, :prior, u) ≈ pr
     @test logjac(layout, u) ≈ jac
     @test _rk_query_translated(backend, translated, :sampler, u) ≈ ll + pr + jac
-    # Independent BridgeStan anchor at SB's original 13-coordinate point
-    # (test/spline_sb_parity.jl). Folding its constant into the intercept
-    # preserves the likelihood; only the Normal(0,5) intercept prior moves.
-    intercept_bridge = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) - logpdf(Normal(0, 5), -0.3)
+    # Independent BridgeStan anchor (test/spline_sb_parity.jl): both backends
+    # hold the same 12 coordinates, the TPS fixed block being the centered
+    # linear column alone.
     @test _rk_query_translated(backend, translated, :sampler, u) ≈
-        SPLINE_S_SB_ANCHOR + intercept_bridge atol=1e-9
+        SPLINE_S_SB_ANCHOR atol=1e-9
     problem = BRM.rk_logdensity_problem(backend;
         ad_backend = _PARITY_BACKEND, u0 = u)
     value, grad = LogDensityProblems.logdensity_and_gradient(problem, u)

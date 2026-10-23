@@ -849,30 +849,47 @@ _adaptive_stan_expr_value(x::StanBlocks.StanExpr) =
     _adaptive_stan_expr_value(x.expr)
 _adaptive_stan_expr_value(x) = x
 
-# A declared constraint's value: a literal, or the compiler-owned data value a
-# bare symbol names. Shared by adaptive centering and `parameter_draws`.
-function _adaptive_constraint_value(plan, raw, owner, role)
-    value = _adaptive_stan_expr_value(raw)
-    value isa Symbol && begin
-        haskey(plan.data, value) || error(
-            "BRM: `$owner` $role constraint refers to " *
-            "compiler-owned data `$value`, but the generative plan does not " *
-            "carry that value.",
-        )
-        value = plan.data[value]
-    end
-    value
+# A declared constraint's value: a literal, the compiler-owned data value a
+# bare symbol names, or the `fmax`/`fmin` sbimpl writes where an explicit bound
+# meets a structural one (`_sb_bound_intersection`): a positive scale with
+# `truncated(D; lower=length_scale_floor)`, a data scalar or a constant as its
+# lower end declares `<lower=fmax(0.0, ...)>`. That intersection is evaluated
+# over the same values, elementwise for a vector bound as in Stan. Anything
+# else is returned unevaluated for the caller to refuse. Shared by adaptive
+# centering and `parameter_draws`.
+_adaptive_constraint_value(plan, raw, owner, role) =
+    _adaptive_constraint_eval(plan, _adaptive_stan_expr_value(raw), owner, role)
+
+_adaptive_constraint_eval(plan, value, owner, role) = value
+function _adaptive_constraint_eval(plan, value::Symbol, owner, role)
+    haskey(plan.data, value) || error(
+        "BRM: `$owner` $role constraint refers to " *
+        "compiler-owned data `$value`, but the generative plan does not " *
+        "carry that value.",
+    )
+    plan.data[value]
 end
+for (f, op) in ((StanBlocks.stan.builtin.fmax, max), (StanBlocks.stan.builtin.fmin, min))
+    @eval function _adaptive_constraint_eval(
+            plan, x::StanBlocks.CanonicalExpr{typeof($f)}, owner, role)
+        a, b = map(arg -> _adaptive_constraint_value(plan, arg, owner, role), x.args)
+        _adaptive_numeric_bound(a) && _adaptive_numeric_bound(b) ?
+            broadcast($op, a, b) : x
+    end
+end
+_adaptive_numeric_bound(x) = x isa Real || x isa AbstractArray{<:Real}
 
 # The scalar hyperparameters an adaptive cell's spread reads (HSGP length
 # scales and marginal SDs, cdar marginal SDs and persistences) are declared by
 # the compiler in exactly two shapes: `<lower=a>` (a default or non-Uniform
-# scale prior) and `<lower=a, upper=b>` (an explicit `Uniform(a, b)` prior, see
-# `_sb_gp_scale_prior` / `_sb_dar_ar_prior`, and every cdar persistence). Both
-# are Stan's ordinary scalar transforms, so the physical value is a closed-form
-# function of the unconstrained coordinate, reproduced by
-# `_adaptive_constrain`. An absent upper bound reads as `Inf`. A declaration
-# without a finite lower bound, or with an offset/multiplier, still raises.
+# scale prior) and `<lower=a, upper=b>` (an explicit `Uniform(a, b)` or
+# two-sided `truncated` prior, see `_sb_gp_scale_prior` / `_sb_dar_ar_prior`,
+# and every cdar persistence). Both are Stan's ordinary scalar transforms, so
+# the physical value is a closed-form function of the unconstrained
+# coordinate, reproduced by `_adaptive_constrain`. Each end is a constant
+# (`_adaptive_constraint_value`). An absent upper bound reads as `Inf`. A
+# declaration without a finite lower bound, or with an offset/multiplier, still
+# raises.
 function _adaptive_bounds(plan, output::BRMOutput, n::Int, owner, role)
     constraints = output.constraints
     unsupported = setdiff(collect(keys(constraints)), [:lower, :upper])
@@ -899,6 +916,12 @@ end
 
 function _adaptive_bound_values(plan, raw, n::Int, owner, role, side)
     value = _adaptive_constraint_value(plan, raw, owner, role)
+    _adaptive_numeric_bound(value) || error(
+        "BRM adaptive centering: `$owner` $role has the $side bound `$raw`, " *
+        "which is computed from other values; this contract reads a literal, " *
+        "compiler-owned data (a data scalar, a constant or `length_scale_floor`) " *
+        "or the `fmax`/`fmin` that intersects them with a structural bound.",
+    )
     values = value isa Real ? fill(Float64(value), n) : collect(Float64, value)
     length(values) == n || error(
         "BRM adaptive centering: `$owner` $role has $(length(values)) " *
