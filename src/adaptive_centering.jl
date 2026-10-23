@@ -1478,7 +1478,10 @@ end
 # whose spread underflows to zero, and its candidate frames underflow and
 # overflow to NaN losses. Floored, every frame of such a weight is a fixed
 # rescaling of `z` (the non-centred geometry), and `exp(±2c * log_scale)` stays
-# a normal Float64 for every control `c`. The transform is exact for any
+# a normal Float64 for every control `c`. Because those frames cannot be told
+# apart, the HSGP scoring frame scores a floored observation in the non-centred
+# frame for every candidate, so a weight scored only on the floor keeps
+# `c = 0` (snag adaptive-centeri-eca5a77c). The transform is exact for any
 # function of coordinates it does not rewrite, so the floor moves coordinates,
 # never the posterior. Between the two bounds the softplus differs from the
 # exact value by less than `exp(-40)`; above `exp(-110)` they are identical.

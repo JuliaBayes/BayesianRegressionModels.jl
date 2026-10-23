@@ -417,9 +417,18 @@ function _centering_frame(state::BRMHSGPAdaptiveCenteringState, position, gradie
         bi, basis = _hsgp_pair_location(state, p)
         block = state.blocks[bi]
         idx = block.effects[basis]
-        s = exp(BRM._adaptive_hsgp_log_scale(position, block, basis))
+        log_scale = BRM._adaptive_hsgp_log_scale(position, block, basis)
+        s = exp(log_scale)
         c = source[p]
-        scale[p] = s
+        # A floored scale is (numerically) the same at every observation, so
+        # every candidate frame `s^t * z` is a fixed rescaling of the others:
+        # the losses tie and rounding would choose the control. Off the floor
+        # that control couples the weight to a log-scale up to ~150 larger, a
+        # funnel no chain crosses (snag adaptive-centeri-eca5a77c). A floored
+        # observation therefore scores every candidate in the non-centred frame
+        # (scale 1), so a window spent on the floor ties exactly and keeps the
+        # first candidate, `c = 0`. The transform still reads the floored `s`.
+        scale[p] = log_scale > BRM._ADAPTIVE_HSGP_LOG_SCALE_EXACT ? s : one(s)
         innovation[p] = position[idx] / s^c
         invariant_gradient[p] = s^c * gradient[idx]
     end
