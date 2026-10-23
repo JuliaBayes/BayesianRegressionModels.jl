@@ -937,9 +937,22 @@ checks the wrapper identities. A bound-independent oracle checks that a
 the default floor plus one constant. A bound written as arithmetic over data is
 a `@test_broken` capability gap.
 
+`adaptive_car_centering.jl` checks online adaptive centering of the areal
+`car(area; edges, type=:icar | :bym2)` field: one triangular pair of cells per
+area, its `phi` cell and (BYM2) its `theta` cell centred on the area's spatial
+component. It resolves the cells against the compiled model, checks the
+transform, Jacobian and inverse against an independent map written from the
+emitted law, checks that `c=1` is BridgeStan's transformed `effects` (islands
+and areas without rows included), checks candidate-frame invariance and Enzyme
+and finite-difference gradients, checks car cells beside a correlated
+random-effect block in the joint and learned-order wrappers (each family maps
+as its own wrapper does), the controls report, the cdar refusal and the
+generated-field skip, and runs one short online warmup on a data-rich lattice.
+
 `adaptive_centering_threads.jl` differentiates the ordinary, joint (ordinary +
 R2D2 + HSGP), learned-order (`ranef_order=:learned` over the joint cells),
-S2Z, HSGP-only, cdar and scalar (total / S2Z cell) wrappers on
+S2Z, HSGP-only, cdar, scalar (total / S2Z cell) and car wrappers, and car
+cells inside the joint and learned-order wrappers, on
 three concurrent tasks while a fourth forces collections, in a child Julia
 started with four threads; the child must exit cleanly and every gradient must
 bitwise-equal its single-threaded reference. On Julia 1.10, Enzyme's reverse
