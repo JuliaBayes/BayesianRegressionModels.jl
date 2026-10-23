@@ -21,12 +21,14 @@ function set_adaptive_sources!(state, ir, controls)
     AC_EXT._sync_sources!(state, ir)
 end
 
+# Level `g`'s factor is the block's `diag(tau) * L`, times `sqrt(w[g])` for a
+# Student-t block.
 function manual_adaptive_map(x, block, controls)
     y = copy(x)
-    C = BayesianRegressionModels._adaptive_block_cholesky(x, block)
     ljac = zero(eltype(x))
     p = 1
     for g in 1:block.ranef.n_groups
+        C = BayesianRegressionModels._adaptive_block_cholesky(x, block, g)
         z = similar(C, block.ranef.n_terms)
         for k in 1:block.ranef.n_terms
             c = controls[p]

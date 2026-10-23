@@ -72,8 +72,10 @@ end
 # Ordinary + R2D2 + squared-exponential HSGP cells in one joint wrapper. Every
 # R2D2 term's log-scale carries a linear, a unit-interval and a simplex atom.
 # `scalar=true` appends twelve total/S2Z cells sharing three log-scales;
-# `learned=true` builds the `ranef_order=:learned` wrapper over the same cells.
-function _joint_problem(; scalar=false, learned=false)
+# `learned=true` builds the `ranef_order=:learned` wrapper over the same cells;
+# `student_t=true` makes the R2D2 block a Student-t block, each level's factor
+# scaled by `sqrt(w[g])` read from its weight coordinate `log w[g]`.
+function _joint_problem(; scalar=false, learned=false, student_t=false)
     blocks, o = _ordinary_blocks()
     K, G = 3, 10
     reference, r2, simplex = o + 1, o + 2, collect(o + 3:o + 5)
@@ -83,8 +85,10 @@ function _joint_problem(; scalar=false, learned=false)
                   [BRM._AdaptiveSimplexLog(0.5, simplex, k)]) for k in 1:K]
     ranef = BRM.RanefBlock(:r_r2d2, :correlated, :g, nothing, nothing, collect(1:G),
                            K, G, :z_r2d2, true, false)
-    r2d2 = BRM.R2D2AdaptiveCenteringBlock(ranef, 0.0, effects, cholesky, scales)
     o = last(effects)
+    mixing = student_t ? collect(o .+ (1:G)) : Int[]
+    o += length(mixing)
+    r2d2 = BRM.R2D2AdaptiveCenteringBlock(ranef, 0.0, effects, cholesky, scales; mixing)
     M = 12
     hsgp = BRM._HSGPAdaptiveCenteringBlock(:hsgp, :gp_x, zeros(M), collect(o .+ (1:M)),
         [o + M + 1], [0.0], [Inf], o + M + 2, 0.0, Inf,
@@ -179,6 +183,9 @@ end
 const _CASES = ("ordinary" => _ordinary_problem, "joint" => _joint_problem,
                 "joint_scalar" => () -> _joint_problem(; scalar=true),
                 "learned_order" => () -> _joint_problem(; scalar=true, learned=true),
+                "joint_student_t" => () -> _joint_problem(; scalar=true, student_t=true),
+                "learned_order_student_t" =>
+                    () -> _joint_problem(; scalar=true, learned=true, student_t=true),
                 "s2z" => _s2z_problem, "hsgp" => _hsgp_problem,
                 "cdar" => _cdar_problem, "scalar" => _scalar_problem,
                 "car" => _car_problem, "joint_car" => _joint_car_problem,
