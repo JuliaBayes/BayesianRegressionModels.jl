@@ -1493,16 +1493,20 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
                       if role === :linear_predictor)
     pop_lp = Dict{Symbol,Symbol}(e.block => e.logical for e in population_effects)
 
-    # A mixture response's membership matrix, derived forwards from the
-    # observation's generated family (`_sb_mixture_membership`) under the
-    # name sbimpl emits it as, never parsed off an output name.
+    # A mixture response's membership matrix, recognized by the generated
+    # membership function the emitted model assigns it from (with or without
+    # a `censored` / `truncated` / `interval_censored` wrapper around the
+    # mixture), never parsed off an output name.
     memberships = Dict{Symbol,NamedTuple}()
-    for d in plan.declarations
-        d.role === :observation || continue
-        record = _sb_mixture_membership(d.family)
-        isnothing(record) && continue
-        memberships[_brm_mixture_membership_name(d.target)] = (; declaration=d,
-            labels=[Symbol(:component_, k) for k in 1:record.components])
+    for (output, m) in _sb_mixture_membership_outputs(plan.model)
+        declaration = something(findfirst(d -> d.role === :observation &&
+                                              d.target === m.response,
+                                          plan.declarations), 0)
+        declaration == 0 && error(
+            "brm_descriptor: membership output `$output` names response " *
+            "`$(m.response)`, which no observation declares; re-derive the plan.")
+        memberships[output] = (; declaration=plan.declarations[declaration],
+            labels=[Symbol(:component_, k) for k in 1:m.components])
     end
 
     # --- outputs ------------------------------------------------------------

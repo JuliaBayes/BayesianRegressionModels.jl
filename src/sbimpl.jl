@@ -97,6 +97,12 @@ const _SB_MIXTURE_CACHE = Dict{String,StanBlocks.ValueFamily}()
 # family, keyed by the family object, so the descriptor recognizes a mixture
 # observation by its family instead of parsing a generated name.
 const _SB_MIXTURE_MEMBERSHIP = IdDict{StanBlocks.ValueFamily,NamedTuple}()
+# Every generated membership function and its component count, so the
+# descriptor recognizes a membership output by the function computing it.
+const _SB_MIXTURE_MEMBERSHIP_FUNCTIONS = IdDict{StanBlocks.ValueUDF,Int}()
+# Construction side-channel: the membership outputs emitted so far, as
+# `output => response` pairs, checked against the model's names after emission.
+const _SB_MIXTURE_MEMBERSHIPS_KEY = :__brm_mixture_memberships__
 # Synchronize every cache lookup and publication. Generated families own their
 # syntax and are read-only after construction; they install no Julia bindings
 # or methods. One reentrant lock also permits nested family construction.
@@ -4034,7 +4040,8 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
                   r2d2=(; overrides=r2d2_overrides, names=r2d2_names,
                           joint=r2d2_joint))
     end
-    _sb_check_mixture_membership_names(stmts, keys(brmi.operations))
+    _sb_check_mixture_membership_names(pop!(data, _SB_MIXTURE_MEMBERSHIPS_KEY, ()),
+                                       keys(brmi.operations))
     # Post-pass: fuse pure-population Gaussian likelihoods into Stan's
     # `normal_id_glm_lpdf`. Whole-model, because its decisive guard is
     # "this linear predictor is read by exactly one likelihood". Every
@@ -14564,8 +14571,46 @@ function _sb_composed_stan_call!(stmts, target, base, data)
     (; name=rhs.args[1], args=rhs.args[2:end])
 end
 
+# A mixture response's membership statement, emitted with density terms by
+# `_sb_lik_family!`, re-pointed at the evidence a wrapper gives each row: a
+# censored row's membership reads its components' CDF or CCDF at the bound, an
+# interval row's their mass over the interval. Truncation divides every
+# component of a row by one normalizer, so its membership stays the density's.
+# Wrappers over any other family find no membership record and change nothing.
+_sb_mixture_evidence_membership(record, ::Val{:truncated}, lower, upper) = nothing
+_sb_mixture_evidence_membership(record, ::Val{:censored}, lower, upper) =
+    record.censored[(!isnothing(lower), !isnothing(upper))]
+_sb_mixture_evidence_membership(record, ::Val{:interval_censored}, lower, upper) =
+    record.interval
+
+_sb_mixture_bound_rows(bound, ::Val{:discrete}, rows, data) =
+    Expr(:call, :brm_mixture_rows_int, _sb_scalar_expr(bound, data), rows)
+function _sb_mixture_bound_rows(bound, ::Val{:continuous}, rows, data)
+    expr = _sb_scalar_expr(bound, data)
+    Expr(:call, :brm_joint_mean_rows, expr isa Integer ? Float64(expr) : expr, rows)
+end
+
+function _sb_mixture_membership_evidence!(stmts, target, native, producer,
+                                          lower, upper, kind, data)
+    record = _sb_mixture_membership(native.name)
+    isnothing(record) && return nothing
+    udf = _sb_mixture_evidence_membership(record, Val(producer), lower, upper)
+    isnothing(udf) && return nothing
+    key = _brm_mixture_membership_name(target)
+    site = findfirst(s -> Meta.isexpr(s, :(=)) && s.args[1] === key, stmts)
+    isnothing(site) && error(
+        "sbimpl: internal: mixture response `$target` emitted no `$key` statement")
+    rows = Expr(:call, :num_elements, target)
+    bounds = Any[_sb_mixture_bound_rows(b, Val(kind), rows, data)
+                 for b in (lower, upper) if !isnothing(b)]
+    stmts[site] = Expr(:(=), key, Expr(:call, udf, target, bounds..., native.args...))
+    nothing
+end
+
 function _sb_emit_optional_family!(stmts, target, producer, base, lower, upper, data)
     native = _sb_composed_stan_call!(stmts, target, base, data)
+    _sb_mixture_membership_evidence!(stmts, target, native, producer, lower, upper,
+                                     base.kind, data)
     bound_kwargs = Any[]
     isnothing(lower) || push!(bound_kwargs,
         Expr(:kw, :lower, _sb_scalar_expr(lower, data)))
@@ -14619,6 +14664,8 @@ function _sb_lik_family!(stmts, target, ::typeof(interval_censored),
     _sb_validate_composed_support(:interval_censored, target, data[target],
                                   upper, base.kind, data)
     native = _sb_composed_stan_call!(stmts, target, base, data)
+    _sb_mixture_membership_evidence!(stmts, target, native, :interval_censored,
+                                     nothing, upper, base.kind, data)
     upper_expr = _sb_scalar_expr(upper, data)
     _sb_lik_stan_exprs!(stmts, target, :interval_censored,
                         (native.name, target, upper_expr, native.args...))
@@ -14830,6 +14877,19 @@ function _sb_mixture_stan_name(T::Type, target)
     name
 end
 
+# A component's log CDF and log CCDF, as its single-family `censored` /
+# `truncated` calls them: `normal` selects the `erfc`-based stable pair
+# (stanblocks-use §8.1), every other family Stan's `<family>_lcdf/_lccdf`.
+_sb_mixture_cdf_names(stan_name::Symbol) = _sb_mixture_cdf_names(Val(stan_name))
+_sb_mixture_cdf_names(::Val{S}) where {S} = (Symbol(S, :_lcdf), Symbol(S, :_lccdf))
+_sb_mixture_cdf_names(::Val{:normal}) = (:normal_lcdf_stable, :normal_lccdf_stable)
+
+# A component's term for a row censored at `hi` from above: the log probability
+# of a value at or above `hi`, i.e. the CCDF just below it, which for a
+# discrete family is the CCDF at `hi - 1`.
+_sb_mixture_upper_term(lccdf_term, discrete::Bool) =
+    discrete ? (k, value) -> lccdf_term(k, Expr(:call, :-, value, 1)) : lccdf_term
+
 function _sb_mixture_component_args(T::Type, comp::ExprColumn, target, k, data)
     isempty(getkwargs(comp)) || error(
         "sbimpl: `MixtureModel($target)` component $k (`$T`) takes no constructor keywords")
@@ -14965,45 +15025,36 @@ function _sb_mixture_family(stan_name::Symbol, n_args::Int, int_positions::Tuple
             push!(vector_formals, Expr(:(::), argname(k, j),
                                       Expr(:ref, vector_kind(j), :n)))
         end
-        scalar_body = Any[]
-        if checked
-            total = foldl((a, b) -> Expr(:call, :+, a, b), weightname.(1:K))
-            invalid = foldl((a, b) -> Expr(:||, a, b), Any[
+        guard(label) = checked ? Any[Expr(:if,
+            foldl((a, b) -> Expr(:||, a, b), Any[
                 (Expr(:call, :<, weightname(k), 0) for k in 1:K)...,
-                Expr(:call, :>, Expr(:call, :abs, Expr(:call, :-, total, 1)), 1e-8)])
-            push!(scalar_body, Expr(:if, invalid, Expr(:block, Expr(:call, :reject,
-                "$(density): the mixture weights of a row must be nonnegative " *
-                "and sum to 1"))))
-        end
-        # The row's per-component terms `log(w_k) + component_lpdf`: their
-        # `log_sum_exp` is the density, their `softmax` the membership.
-        terms = Any[:(terms::vector[$K])]
-        for k in 1:K
-            call = Expr(:call, density_fn, :y,
-                        (argname(k, j) for j in 1:n_args)...)
-            push!(terms,
-                  Expr(:(=), Expr(:ref, :terms, k),
-                       Expr(:call, :+, Expr(:call, :log, weightname(k)), call)))
-        end
-        append!(scalar_body, terms)
-        push!(scalar_body, :(log_sum_exp(terms)))
+                Expr(:call, :>, Expr(:call, :abs, Expr(:call, :-,
+                    foldl((a, b) -> Expr(:call, :+, a, b), weightname.(1:K)), 1)),
+                    1e-8)]),
+            Expr(:block, Expr(:call, :reject,
+                "$(label): the mixture weights of a row must be nonnegative " *
+                "and sum to 1")))] : Any[]
+        # One row's per-component terms `log(w_k) + term(k)`. Their
+        # `log_sum_exp` is the row's density (or CDF), their `softmax` its
+        # component membership; `term` is a component's density, CDF or CCDF
+        # at a value, so every companion sums the same terms.
+        component(f) = (k, value) -> Expr(:call, f, value,
+                                          (argname(k, j) for j in 1:n_args)...)
+        lcdf_fn, lccdf_fn = _sb_mixture_cdf_names(stan_name)
+        density_term = component(density_fn)
+        lcdf_term = component(lcdf_fn)
+        lccdf_term = component(lccdf_fn)
+        # `interval_censored` evidence: the row lies in (y, hi].
+        interval_term(k, value) = Expr(:call, :log_diff_exp, lcdf_term(k, :hi),
+                                       lcdf_term(k, value))
+        assign_terms(term, value) = Any[Expr(:(=), Expr(:ref, :terms, k),
+            Expr(:call, :+, Expr(:call, :log, weightname(k)), term(k, value)))
+            for k in 1:K]
+        terms(term, value) = Any[:(terms::vector[$K]), assign_terms(term, value)...]
         row_actuals = Any[Expr(:ref, weightname(k), :i) for k in 1:K]
         append!(row_actuals, (Expr(:ref, argname(k, j), :i)
                               for k in 1:K for j in 1:n_args))
         row_call = Expr(:call, density, Expr(:ref, :y, :i), row_actuals...)
-        membership = Symbol(stem, :_membership)
-        row_membership = Expr(:call, membership, Expr(:ref, :y, :i), row_actuals...)
-        membership_body = quote
-            rv::matrix[n, $K]
-            for i in 1:n
-                probabilities::vector[$K]
-                probabilities = $row_membership
-                for k in 1:$K
-                    rv[i, k] = probabilities[k]
-                end
-            end
-            rv
-        end
         vector_body = quote
             rv = 0.
             for i in 1:n
@@ -15060,7 +15111,9 @@ function _sb_mixture_family(stan_name::Symbol, n_args::Int, int_positions::Tuple
                               Expr(:ref, y_vector, :n))
         density_defs = [
             :($scalar_sig = begin
-                $(scalar_body...)
+                $(guard(density)...)
+                $(terms(density_term, :y)...)
+                log_sum_exp(terms)
             end),
             :($vector_sig = begin
                 $(nobroadcast(vector_body)...)
@@ -15082,21 +15135,79 @@ function _sb_mixture_family(stan_name::Symbol, n_args::Int, int_positions::Tuple
                 $(nobroadcast(vector_rng_body)...)
             end),
         ]
-        membership_defs = [
-            :($(Expr(:(::), Expr(:call, membership, scalar_formals...),
-                     Expr(:ref, :vector, K))) = begin
-                $(terms...)
-                softmax(terms)
-            end),
-            :($(Expr(:(::), Expr(:call, membership, vector_formals...),
-                     Expr(:ref, :matrix, :n, K))) = begin
-                $(nobroadcast(membership_body)...)
-            end),
-        ]
+        # CDF companions for `censored` / `truncated` / `interval_censored`
+        # over the mixture: the mixture's CDF is the weighted sum of its
+        # components' CDFs. Scalar overloads only: StanBlocks broadcasts them
+        # over a vector observation (stanblocks-use §8.5).
+        cdf_def(label, term) = :($(Expr(:(::), Expr(:call, label, scalar_formals...),
+                                        :real)) = begin
+            $(guard(label)...)
+            $(terms(term, :y)...)
+            log_sum_exp(terms)
+        end)
+        lcdf_defs = [cdf_def(Symbol(stem, :_lcdf), lcdf_term)]
+        lccdf_defs = [cdf_def(Symbol(stem, :_lccdf), lccdf_term)]
+        # A membership function per kind of row evidence, with the bounds that
+        # evidence reads as formals between `y` and the weights: per row the
+        # `softmax` of the terms whose `log_sum_exp` is that row's likelihood,
+        # a K-vector for one row and an `n x K` matrix for n rows.
+        function membership_udf(name, bounds, body)
+            label = Symbol(stem, :_membership, name)
+            scalar = Any[scalar_formals[1],
+                         (Expr(:(::), b, y_scalar) for b in bounds)...,
+                         scalar_formals[2:end]...]
+            vector = Any[vector_formals[1],
+                         (Expr(:(::), b, Expr(:ref, y_vector, :n)) for b in bounds)...,
+                         vector_formals[2:end]...]
+            row = Expr(:call, label, Expr(:ref, :y, :i),
+                       (Expr(:ref, b, :i) for b in bounds)..., row_actuals...)
+            rows = quote
+                rv::matrix[n, $K]
+                for i in 1:n
+                    probabilities::vector[$K]
+                    probabilities = $row
+                    for k in 1:$K
+                        rv[i, k] = probabilities[k]
+                    end
+                end
+                rv
+            end
+            udf = StanBlocks.ValueUDF(label, [
+                :($(Expr(:(::), Expr(:call, label, scalar...),
+                         Expr(:ref, :vector, K))) = begin
+                    $(body...)
+                    softmax(terms)
+                end),
+                :($(Expr(:(::), Expr(:call, label, vector...),
+                         Expr(:ref, :matrix, :n, K))) = begin
+                    $(nobroadcast(rows)...)
+                end)], @__MODULE__)
+            _SB_MIXTURE_MEMBERSHIP_FUNCTIONS[udf] = K
+            udf
+        end
+        # A censored row at a bound is evidence that the value lies beyond it,
+        # so its terms use the CDF (at `lo`) or CCDF (at `hi`); an uncensored
+        # row's use the density, as the censored likelihood does.
+        censored_terms(lower, upper) = begin
+            branch = Expr(:block, assign_terms(density_term, :y)...)
+            upper && (branch = Expr(:if, :(y >= hi),
+                Expr(:block, assign_terms(_sb_mixture_upper_term(lccdf_term, discrete),
+                                          :hi)...), branch))
+            lower && (branch = Expr(:if, :(y <= lo),
+                Expr(:block, assign_terms(lcdf_term, :lo)...), branch))
+            Any[:(terms::vector[$K]), branch]
+        end
+        censored_bounds(lower, upper) =
+            Symbol[(lower ? (:lo,) : ())..., (upper ? (:hi,) : ())...]
         family = StanBlocks.ValueFamily(stem, suffix, density_defs, pointwise_defs,
-            rng_defs, @__MODULE__)
+            rng_defs, @__MODULE__; lcdf=lcdf_defs, lccdf=lccdf_defs)
         _SB_MIXTURE_MEMBERSHIP[family] = (;
-            membership=StanBlocks.ValueUDF(membership, membership_defs, @__MODULE__),
+            membership=membership_udf(Symbol(), Symbol[], terms(density_term, :y)),
+            censored=Dict((lower, upper) => membership_udf(
+                    Symbol(:_censored, lower ? :_lower : Symbol(), upper ? :_upper : Symbol()),
+                    censored_bounds(lower, upper), censored_terms(lower, upper))
+                for (lower, upper) in ((true, false), (false, true), (true, true))),
+            interval=membership_udf(:_interval, [:hi], terms(interval_term, :y)),
             components=K)
         family
         end
@@ -15111,17 +15222,35 @@ _sb_mixture_membership(family::StanBlocks.ValueFamily) =
 """The output carrying a mixture response's per-row component-membership probabilities."""
 _brm_mixture_membership_name(target::Symbol) = Symbol(target, :_membership)
 
+"""
+The membership outputs an emitted model body assigns, as
+`output => (; response, components)`, read off the generated membership
+function each assignment calls.
+"""
+_sb_mixture_membership_outputs(_model) = Dict{Symbol,NamedTuple}()
+_sb_mixture_membership_outputs(model::StanBlocks.SlicModel) =
+    _sb_mixture_membership_outputs(model.model)
+function _sb_mixture_membership_outputs(body::Expr)
+    found = Dict{Symbol,NamedTuple}()
+    for stmt in body.args
+        Meta.isexpr(stmt, :(=)) && stmt.args[1] isa Symbol &&
+            Meta.isexpr(stmt.args[2], :call) || continue
+        f = stmt.args[2].args[1]
+        f isa StanBlocks.ValueUDF || continue
+        K = lock(() -> get(_SB_MIXTURE_MEMBERSHIP_FUNCTIONS, f, nothing), _SB_GEN_LOCK)
+        isnothing(K) && continue
+        found[stmt.args[1]] = (; response=stmt.args[2].args[2], components=K)
+    end
+    found
+end
+
 # A model value named like a mixture response's membership output would bind
 # that name twice, which StanBlocks refuses only with an internal assertion.
-function _sb_check_mixture_membership_names(stmts, names)
-    for stmt in stmts
-        Meta.isexpr(stmt, :call) && length(stmt.args) == 3 && stmt.args[1] === :~ &&
-            stmt.args[2] isa Symbol && Meta.isexpr(stmt.args[3], :call) || continue
-        isnothing(_sb_mixture_membership(stmt.args[3].args[1])) && continue
-        key = _brm_mixture_membership_name(stmt.args[2])
+function _sb_check_mixture_membership_names(memberships, names)
+    for (key, target) in memberships
         key in names && error(
             "sbimpl: `$key` is reserved for the component-membership probabilities " *
-            "of the mixture response `$(stmt.args[2])`; rename the model value `$key`")
+            "of the mixture response `$target`; rename the model value `$key`")
     end
 end
 
@@ -15243,6 +15372,8 @@ function _sb_lik_family!(stmts, target, ::Type{<:MixtureModel}, args, data)
         "model/data column; rename that column")
     push!(stmts, Expr(:(=), key,
         Expr(:call, _sb_mixture_membership(family).membership, target, actuals...)))
+    push!(get!(() -> Pair{Symbol,Symbol}[], data, _SB_MIXTURE_MEMBERSHIPS_KEY),
+          key => target)
     nothing
 end
 
