@@ -9,7 +9,10 @@
 # `<lower=a, upper=b>`. The adaptive resolvers used to read only `<lower=a>`
 # and refused the whole `adaptive_centering_problem` wrapper. They now read
 # both declaration shapes and map the unconstrained coordinate with Stan's
-# `lb_constrain` / `lub_constrain`.
+# `lb_constrain` / `lub_constrain`. A `truncated(D; lower=L, ...)` prior whose
+# `L` is `length_scale_floor`, a data scalar or a constant declares
+# `<lower=fmax(0.0, L)>`; the resolvers evaluate that intersection over the
+# bound data (snag adaptive-centeri-9426bb39).
 #
 # The wrapper's density identities hold for ANY deterministic function of the
 # untouched hyperparameter coordinates, so they cannot show that the cells read
@@ -20,7 +23,7 @@
 using Test
 using BayesianRegressionModels
 using BridgeStan
-using Distributions: Exponential, LogNormal, Normal, Uniform, censored
+using Distributions: Exponential, LogNormal, Normal, Uniform, censored, truncated
 import DifferentiationInterface as DI
 import Enzyme
 using LogDensityProblems
@@ -284,7 +287,131 @@ end
     check_wrapper_identities(problem, wrapped, x)
 end
 
+# A positive scale whose `truncated(D; lower=L, ...)` prior names a non-literal
+# `L` — the floor-keeping `length_scale_floor` (brm-use hsgp-priors), a data
+# scalar or a constant — declares `<lower=fmax(0.0, L)>`: sbimpl intersects
+# the explicit bound with the scale's structural `lower=0`
+# (`_sb_bound_intersection`). The resolvers evaluate that intersection over the
+# bound data (snag adaptive-centeri-9426bb39). Toy heteroscedastic data.
+function bounded_floor_df()
+    x = collect(range(-1.0, 1.0; length=24))
+    (; x, y=sin.(3 .* x) .+ 0.1 .* cos.(7 .* x), sd_floor=0.05)
+end
+
+const BOUNDED_FLOOR_BUILDER = @brm begin
+    mu ~ 0 + hsgp(x; k=6, domain=(-1.5, 1.5))
+    log(sigma) ~ 0 + hsgp(x; k=4, domain=(-1.5, 1.5))
+    length_scale(mu, hsgp(x)) ~ truncated(LogNormal(0, 4); lower=length_scale_floor)
+    length_scale(sigma, hsgp(x)) ~
+        truncated(LogNormal(0, 4); lower=length_scale_floor, upper=24.0)
+    sd(mu, hsgp(x)) ~ truncated(LogNormal(0, 1); lower=sd_floor)
+    y ~ Normal(mu, sigma)
+end
+
+@testset "floor-keeping and data-valued truncated scale bounds adapt" begin
+    sb = SBBRMI(BOUNDED_FLOOR_BUILDER(bounded_floor_df()); mod=@__MODULE__)
+    code = BRM.stan_code(sb)
+    # The shape under test: every bound here is an intersection, not a symbol.
+    @test count("<lower=fmax(0.0, ", code) == 3
+    problem = bounded_instantiate(sb, "bounded_floor")
+    unc_names = BridgeStan.param_unc_names(problem.model)
+    by_lp = Dict(b.logical => b for b in BRM._adaptive_hsgp_centering_blocks(sb, unc_names))
+    @test sort!(collect(keys(by_lp))) == [:mu, :sigma]
+    mu_block, sigma_block = by_lp[:mu], by_lp[:sigma]
+    d = brm_descriptor(sb)
+    mu_floor = brm_length_scale_floor(d, :mu; term=:hsgp_x)
+    sigma_floor = brm_length_scale_floor(d, :sigma; term=:hsgp_x)
+    @test mu_floor > 0 && sigma_floor > 0
+    @test mu_block.length_scale_lower == [mu_floor]
+    @test mu_block.length_scale_upper == [Inf]
+    @test (mu_block.sd_lower, mu_block.sd_upper) == (0.05, Inf)
+    @test sigma_block.length_scale_lower == [sigma_floor]
+    @test sigma_block.length_scale_upper == [24.0]
+    @test (sigma_block.sd_lower, sigma_block.sd_upper) == (0.0, Inf)
+
+    x = collect(range(-0.7, 0.6; length=length(unc_names)))
+    # Every hyperparameter a cell reads equals BridgeStan's constrained value.
+    for block in (mu_block, sigma_block)
+        rho_name = unc_names[only(block.length_scales)]
+        sigma_name = unc_names[block.sd]
+        rho = stan_constrained(problem, x, rho_name)
+        sigma = stan_constrained(problem, x, sigma_name)
+        @test BRM._adaptive_constrain(x[only(block.length_scales)],
+            only(block.length_scale_lower), only(block.length_scale_upper)) ≈
+            rho rtol=4eps()
+        @test BRM._adaptive_constrain(x[block.sd], block.sd_lower,
+            block.sd_upper) ≈ sigma rtol=4eps()
+        @test only(block.length_scale_lower) < rho < only(block.length_scale_upper)
+        # Above the floor (`exp(-110)`) a cell's scale is its exact spectral
+        # weight; the floor itself is pinned by adaptive_hsgp_scale_floor.jl.
+        exact = [exp_quad_log_scale(sigma, rho, block.omega2[basis, 1])
+                 for basis in eachindex(block.effects)]
+        @test count(>(-110), exact) >= 2
+        for basis in eachindex(block.effects)
+            @test BRM._adaptive_hsgp_log_scale(x, block, basis) ≈
+                BRM._adaptive_hsgp_floor(exact[basis]) atol=1e-12
+        end
+    end
+
+    wrapped = adaptive_centering_problem(sb, problem, DI.AutoEnzyme())
+    @test length(WarmupHMC.reparametrizer(wrapped).pairs) ==
+        length(mu_block.effects) + length(sigma_block.effects)
+    check_wrapper_identities(problem, wrapped, x)
+end
+
+const BOUNDED_ANISO_FLOOR_BUILDER = @brm begin
+    mu ~ 0 + hsgp(x1, x2; k=(3, 3), iso=false)
+    length_scale(mu, hsgp(x1, x2)) ~ truncated(LogNormal(0, 4); lower=length_scale_floor)
+    y ~ Normal(mu, 0.5)
+end
+
+function bounded_aniso_df()
+    x1 = collect(range(-1.0, 1.0; length=12))
+    x2 = collect(range(0.0, 3.0; length=12)) .^ 2
+    (; x1, x2, y=sin.(x1) .+ 0.1 .* x2)
+end
+
+@testset "anisotropic floor intersections are read per axis" begin
+    sb = SBBRMI(BOUNDED_ANISO_FLOOR_BUILDER(bounded_aniso_df()); mod=@__MODULE__)
+    # Stan's `fmax(real, vector)` is elementwise: one floor per axis.
+    @test occursin("vector<lower=fmax(0.0, ", BRM.stan_code(sb))
+    problem = bounded_instantiate(sb, "bounded_aniso_floor")
+    unc_names = BridgeStan.param_unc_names(problem.model)
+    block = only(BRM._adaptive_hsgp_centering_blocks(sb, unc_names))
+    floors = brm_length_scale_floor(brm_descriptor(sb), :mu; term=:hsgp_x1_x2)
+    @test length(floors) == 2 && floors[1] != floors[2]
+    @test block.length_scale_lower == floors
+    @test block.length_scale_upper == [Inf, Inf]
+
+    x = collect(range(-0.5, 0.4; length=length(unc_names)))
+    for (axis, i) in enumerate(block.length_scales)
+        @test BRM._adaptive_constrain(x[i], block.length_scale_lower[axis],
+            block.length_scale_upper[axis]) ≈
+            stan_constrained(problem, x, unc_names[i]) rtol=4eps()
+    end
+    check_wrapper_identities(problem,
+        adaptive_centering_problem(sb, problem, DI.AutoEnzyme()), x)
+end
+
 @testset "bounded declarations outside the supported shapes still raise" begin
+    # Capability gap, not a refusal: a bound written as arithmetic over data
+    # (`lower = 2 * length_scale_floor`) declares `fmax(0.0, (2 * floor))`,
+    # which the resolvers do not evaluate yet; it raises a named error until
+    # then (todo BayesianRegressionModels/todos/2026-10-23T01-46-40-802-18ug4zr).
+    arithmetic = SBBRMI((@brm begin
+        mu ~ 0 + hsgp(x; k=6, domain=(-1.5, 1.5))
+        length_scale(mu, hsgp(x)) ~
+            truncated(LogNormal(0, 4); lower=2 * length_scale_floor)
+        y ~ Normal(mu, 0.5)
+    end)(bounded_floor_df()); mod=@__MODULE__)
+    arithmetic_names = BridgeStan.param_unc_names(
+        bounded_instantiate(arithmetic, "bounded_arithmetic").model)
+    @test_broken try
+        !isempty(BRM._adaptive_hsgp_centering_blocks(arithmetic, arithmetic_names))
+    catch
+        false
+    end
+
     # A cdar persistence must stay a stationary interval.
     @test_throws "outside the stationary interval" BRM._adaptive_cdar_rho_bounds(
         (; data=Dict{Symbol,Any}()),
