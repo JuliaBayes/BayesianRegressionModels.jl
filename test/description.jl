@@ -125,6 +125,16 @@ end
           brm_description_prior_anchor(r,ps.id;prefix="model-B")
     @test occursin(brm_description_prior_anchor(r,ps.id;prefix="model-A"),
         brm_description_markdown(r;prefix="model-A"))
+    @test occursin(r"^brm-prior-[0-9a-f]{16}$",anchor)
+    # Rendered reports keep these targets, so the ID scheme must not drift.
+    @test BayesianRegressionModels._brmd_prior_anchor("8a1b6edd4527c267",
+        (:population,:mu,:Intercept))=="brm-prior-5a1f36447d850e2a"
+    @test count("<span id=\"brm-prior-",brm_description_markdown(r))==length(r.priors)
+    @test allunique(brm_description_prior_anchor(p) for p in r.priors)
+    repeated=BRMDescription(r.model_id,r.components,r.prose,r.equations,r.notation,
+        (r.priors...,first(r.priors)),r.coverage,r.diagnostics,r.complete)
+    # refused: two prior rows with one target leave their links ambiguous (decision 0qmdh75)
+    @test_throws ArgumentError brm_description_markdown(repeated)
     @test stan_code(sb)==source
     @test isequal(sb.data,data)
     @test brm_descriptor(sb).id==d.id

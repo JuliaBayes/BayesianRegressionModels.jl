@@ -117,6 +117,7 @@ include("start_values.jl")
 include("nlme_fit.jl")
 include("covariate_resampling.jl")
 export modeled_covariates
+using SHA: sha256
 include("description.jl")
 include("adaptive_centering.jl")
 include("posterior_diagnostics.jl")
