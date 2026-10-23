@@ -282,14 +282,19 @@ end
 """
     R2D2AdaptiveCenteringBlock
 
-An R2D2-scaled random-effect block (`ranef_intercept_r2d2`,
-`ranef_correlated_r2d2`, `ranef_correlated_draws_r2d2`) described for adaptive
-partial centering. `ranef`, `target_c`, `effects` and `cholesky_free` mean
-exactly what they mean on [`AdaptiveCenteringBlock`](@ref). There is no
-`log_scales` coordinate vector: the marginal scales are derived, so `scales[k]`
-is the compiled log-scale of term `k` as a function of the unconstrained
-vector — the model's own `R2`, Dirichlet share and reference/total scale
-coordinates. Those coordinates are read, never transformed.
+A random-effect block whose marginal scales are not raw log-scale coordinates,
+described for adaptive partial centering: an R2D2-scaled block
+(`ranef_intercept_r2d2`, `ranef_correlated_r2d2`,
+`ranef_correlated_draws_r2d2`), or a known-value block that holds some scales
+or its correlation at known values (`sd(...) = value`, `cor(:, ID) = R`).
+`ranef`, `target_c`, `effects` and `cholesky_free` mean exactly what they mean
+on [`AdaptiveCenteringBlock`](@ref). There is no `log_scales` coordinate
+vector: `scales[k]` is the compiled log-scale of term `k` as a function of the
+unconstrained vector — the model's own `R2`, Dirichlet share and
+reference/total scale coordinates, a known block's sampled scale coordinate, or
+a known scale's constant. Those coordinates are read, never transformed. A
+known correlation is the constant Cholesky factor `cholesky_known` (empty when
+the block samples `L`), and `cholesky_free` is then empty.
 
 Construct with [`adaptive_centering_blocks`](@ref).
 """
@@ -301,9 +306,38 @@ struct R2D2AdaptiveCenteringBlock <: AbstractAdaptiveCenteringBlock
     scales::Vector{_AdaptiveLogScale}
     # `scales`, flattened for the differentiated accessors.
     table::_AdaptiveLogScaleTable
-    R2D2AdaptiveCenteringBlock(ranef, target_c, effects, cholesky_free, scales) =
+    # A known correlation's Cholesky factor, and the canonical partial
+    # correlations the differentiated stick walk reads in place of
+    # `tanh(x[cholesky_free])` (`_adaptive_cholesky_cpc`); both empty when the
+    # block samples `L`.
+    cholesky_known::Matrix{Float64}
+    cholesky_cpc::Vector{Float64}
+    function R2D2AdaptiveCenteringBlock(ranef, target_c, effects, cholesky_free,
+                                        scales; cholesky_known=zeros(0, 0))
+        isempty(cholesky_known) || isempty(cholesky_free) || error(
+            "BRM adaptive centering: block `$(ranef.binding)` has both a known ",
+            "correlation and Cholesky coordinates")
         new(ranef, target_c, effects, cholesky_free, scales,
-            _AdaptiveLogScaleTable(scales))
+            _AdaptiveLogScaleTable(scales), cholesky_known,
+            _adaptive_cholesky_cpc(cholesky_known))
+    end
+end
+
+# The canonical partial correlations of a correlation Cholesky factor `L`, in
+# Stan's `cholesky_factor_corr` coordinate order: row `i`'s `z[l] = L[i, l] /
+# stick`, with the stick updated as the walk in the WarmupHMC extension does,
+# so that walk rebuilds `L`.
+function _adaptive_cholesky_cpc(L::AbstractMatrix)
+    cpc = Float64[]
+    for i in 2:size(L, 1)
+        stick = 1.0
+        for l in 1:i-1
+            z = L[i, l] / stick
+            push!(cpc, z)
+            stick *= sqrt(1.0 - z * z)
+        end
+    end
+    cpc
 end
 
 Base.show(io::IO, b::R2D2AdaptiveCenteringBlock) = print(
@@ -678,8 +712,10 @@ end
 # rather than being silently left fixed. An R2D2 block needs the emitted
 # model's scale context `r2d2` (`_adaptive_r2d2_context`), which only
 # `adaptive_centering_blocks` builds: R2D2 blocks are never centered, so the
-# replay caller never reaches one.
-function _adaptive_block(ranef::RanefBlock, unc_names, pos; r2d2=nothing)
+# replay caller never reaches one. A known-value block needs its binding
+# record `known` (`_adaptive_known_record`), which carries the known values.
+function _adaptive_block(ranef::RanefBlock, unc_names, pos; r2d2=nothing,
+                         known=nothing)
     ranef.family in _ADAPTIVE_STRATIFIED_FAMILIES && error(
         "BRM adaptive centering: stratified block `$(ranef.binding)` ",
         "(`$(ranef.family)`, group `$(ranef.group)`, by `$(ranef.by)`) is ",
@@ -687,13 +723,13 @@ function _adaptive_block(ranef::RanefBlock, unc_names, pos; r2d2=nothing)
         "Cholesky/scale frame per stratum and must not be treated as an ",
         "ordinary single-frame block.",
     )
-    get(get(_RANEF_FAMILIES, ranef.family, (;)), :known, false) && error(
-        "BRM adaptive centering: block `$(ranef.binding)` (group ",
-        "`$(ranef.group)`) holds a known scale or correlation (`sd(...) = ",
-        "value` / `cor(:, ID) = R`). Adaptive centering of a known-value block ",
-        "is not implemented yet; adapt a model without it, or keep the ",
-        "default non-centered emission.",
-    )
+    if get(get(_RANEF_FAMILIES, ranef.family, (;)), :known, false)
+        isnothing(known) && error(
+            "BRM adaptive centering: known-value block `$(ranef.binding)` ",
+            "needs its binding record; resolve it through ",
+            "`adaptive_centering_blocks(model, unc_names)`.")
+        return _adaptive_known_block(ranef, unc_names, pos, known)
+    end
     if ranef.family in _ADAPTIVE_R2D2_FAMILIES
         isnothing(r2d2) && error(
             "BRM adaptive centering: R2D2 block `$(ranef.binding)` derives its ",
@@ -721,13 +757,55 @@ function _adaptive_block(ranef::RanefBlock, unc_names, pos; r2d2=nothing)
     )
 end
 
+# The binding record of a known-value block in `plan` (its `known_scales` and
+# `known_cor`), or `nothing` for any other block.
+_adaptive_known_record(plan, ranef::RanefBlock) =
+    get(get(_RANEF_FAMILIES, ranef.family, (;)), :known, false) ?
+        plan.bindings[ranef.binding] : nothing
+
+# A known-value block (`sd(...) = value`, `cor(:, ID) = R`;
+# `_sb_emit_known_id_bucket!`) in derived-scale form: term `k`'s log-scale is
+# the constant `log(value)` for a known SD, or the log of its sampled scale,
+# `<binding>_tau_free` when some scale is known and `<binding>_tau` otherwise
+# (each `lower=0`, so its unconstrained value is that log). A known correlation
+# is a constant Cholesky factor in place of the `<binding>_L` coordinates.
+function _adaptive_known_block(ranef::RanefBlock, unc_names, pos, record)
+    K = ranef.n_terms
+    binding = ranef.binding
+    known = collect(record.known_scales)
+    free = findall(isnothing, known)
+    carrier = length(free) < K ? "$(binding)_tau_free" : "$(binding)_tau"
+    free_index = _adaptive_named_indices(pos, ["$carrier.$j" for j in eachindex(free)],
+                                         binding, "scale")
+    scales = map(1:K) do k
+        constant, linear = isnothing(known[k]) ?
+            (0.0, [(1.0, free_index[only(findall(==(k), free))])]) :
+            (log(known[k]), Tuple{Float64,Int}[])
+        _AdaptiveLogScale(constant, linear, Tuple{Float64,Float64,Int}[],
+                          _AdaptiveSimplexLog[])
+    end
+    known_cor = record.known_cor
+    cholesky_names = isnothing(known_cor) ?
+        ["$(binding)_L.$i" for i in 1:(K * (K - 1)) ÷ 2] : String[]
+    R2D2AdaptiveCenteringBlock(
+        ranef,
+        ranef.noncentered ? 0.0 : 1.0,
+        ranef_coordinates(ranef, unc_names),
+        _adaptive_named_indices(pos, cholesky_names, binding, "Cholesky"),
+        scales;
+        cholesky_known=isnothing(known_cor) ? zeros(0, 0) :
+            Matrix{Float64}(cholesky(Symmetric(known_cor)).L),
+    )
+end
+
 """
     adaptive_centering_blocks(model, unc_names) -> Vector{AbstractAdaptiveCenteringBlock}
 
 Describe every random-effect block in `model` for adaptive partial centering:
 an [`AdaptiveCenteringBlock`](@ref) for each block whose marginal scales are
 sampled, and an [`R2D2AdaptiveCenteringBlock`](@ref) for each block whose
-scales an R2D2 prior derives. `model` is an [`SBBRMI`](@ref) or
+scales an R2D2 prior derives or that holds a scale or its correlation at a
+known value. `model` is an [`SBBRMI`](@ref) or
 [`GenerativePlan`](@ref), and `unc_names` is the compiled model's unconstrained
 parameter-name vector (for example BridgeStan's `param_unc_names`).
 
@@ -754,6 +832,15 @@ A reference scale must be a positive constant, data scalar, or `lower=0`
 parameter (or a product, quotient, square root or literal power of them);
 anything else raises naming the block and the expression.
 
+Known-value blocks (`sd(...) = value`, `cor(:, ID) = R`) use the same map
+under either emission and are returned as `R2D2AdaptiveCenteringBlock`s too: a
+known SD is a constant log-scale, a sampled SD of the same block its
+`<binding>_tau` (or `<binding>_tau_free`) coordinate, and a known correlation
+the constant Cholesky factor `cholesky_known`, with no Cholesky coordinates.
+When every scale and the correlation are known, every control of the block is
+a fixed per-coordinate rescaling of the compiled draw, so it cannot change the
+sampling geometry under an adapted diagonal metric.
+
 Stratified `gr(g, by=b)` blocks currently raise rather than being silently
 left fixed: they carry one `L,tau` frame per stratum and need a separate indexed
 metadata contract. Intercept-only `(1 | mm(...))` blocks adapt through the
@@ -775,13 +862,15 @@ WarmupHMC extension exactly like the ungrouped-HSGP companion below.
 """
 function adaptive_centering_blocks(model, unc_names)
     pos = _ranef_name_positions(unc_names)
+    plan = _ranef_plan(model)
     # A generated block has no sampler coordinate; see the docstring.
-    ranefs = filter(r -> !r.generated, ranef_blocks(model))
+    ranefs = filter(r -> !r.generated, ranef_blocks(plan))
     r2d2 = any(r -> r.family in _ADAPTIVE_R2D2_FAMILIES, ranefs) ?
         _adaptive_r2d2_context(model, pos) : nothing
     out = AbstractAdaptiveCenteringBlock[]
     for ranef in ranefs
-        blk = _adaptive_block(ranef, unc_names, pos; r2d2)
+        blk = _adaptive_block(ranef, unc_names, pos; r2d2,
+                              known=_adaptive_known_record(plan, ranef))
         isnothing(blk) || push!(out, blk)
     end
 
@@ -1664,11 +1753,18 @@ _adaptive_block_taus(x::AbstractVector, block::R2D2AdaptiveCenteringBlock) =
     [exp(_adaptive_log_scale(x, block.table, k)) for k in 1:block.ranef.n_terms]
 
 function _adaptive_block_cholesky(x::AbstractVector, block::AbstractAdaptiveCenteringBlock)
-    K = block.ranef.n_terms
-    L = _adaptive_cholesky_corr(x[block.cholesky_free], K)
+    L = _adaptive_block_correlation(x, block)
     tau = _adaptive_block_taus(x, block)
     tau .* L
 end
+
+_adaptive_block_correlation(x::AbstractVector, block::AbstractAdaptiveCenteringBlock) =
+    _adaptive_cholesky_corr(x[block.cholesky_free], block.ranef.n_terms)
+# A known correlation (`cor(:, ID) = R`) is its constant factor.
+_adaptive_block_correlation(x::AbstractVector, block::R2D2AdaptiveCenteringBlock) =
+    isempty(block.cholesky_known) ?
+        _adaptive_cholesky_corr(x[block.cholesky_free], block.ranef.n_terms) :
+        block.cholesky_known
 
 # The per-draw model-scale factor `C` with fresh effect `b = C * z`,
 # reconstructed from one unconstrained draw with no BridgeStan call. Correlated
@@ -1685,6 +1781,9 @@ function _adaptive_block_cov_chol(x::AbstractVector, block::AdaptiveCenteringBlo
     end
     _adaptive_block_cholesky(x, block)
 end
+# A centered known-value block (the only derived-scale block that is centered).
+_adaptive_block_cov_chol(x::AbstractVector, block::R2D2AdaptiveCenteringBlock) =
+    _adaptive_block_cholesky(x, block)
 
 """
     adaptive_centering_problem(model, problem, ad_backend; kwargs...)
