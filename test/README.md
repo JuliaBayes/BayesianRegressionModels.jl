@@ -49,8 +49,9 @@ known values, `sd(lp, ID) = value` and `cor(:, ID) = R`. It covers:
   the known values, up to exactly the twin's prior density of those values;
 - RK/Stan coordinate transport with density and gradient parity;
 - `population_draws`, `reprocess(...; resample_groups=...)`, an
-  omitted-response prior program, descriptors, descriptions, and the NLME and
-  adaptive-centering refusals.
+  omitted-response prior program, descriptors, descriptions, the NLME refusal,
+  and the adaptive-centering description of known-value blocks, Student-t
+  included.
 
 Set `BRM_FIXED_RANEF_RUNTIME=0` to skip the compiled-model sets.
 
@@ -964,8 +965,9 @@ generated-field skip, and runs one short online warmup on a data-rich lattice.
 
 `adaptive_centering_threads.jl` differentiates the ordinary, joint (ordinary +
 R2D2 + HSGP), learned-order (`ranef_order=:learned` over the joint cells),
-S2Z, HSGP-only, cdar, scalar (total / S2Z cell) and car wrappers, and car
-cells inside the joint and learned-order wrappers, on
+S2Z, HSGP-only, cdar, scalar (total / S2Z cell) and car wrappers, car
+cells inside the joint and learned-order wrappers, and a Student-t block (each
+level's factor scaled by its mixing weight) inside both, on
 three concurrent tasks while a fourth forces collections, in a child Julia
 started with four threads; the child must exit cleanly and every gradient must
 bitwise-equal its single-threaded reference. On Julia 1.10, Enzyme's reverse
