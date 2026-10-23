@@ -7035,24 +7035,40 @@ end
 
 # OrderedLogistic keeps SB's raw-integer coding (K = max(y)): no recode,
 # since recoding would change the cutpoint count and the posterior. Gaps
-# fail closed — the thin layer needs exact 1..K coverage.
+# fail closed — the thin layer needs exact 1..K coverage. K is the fit's:
+# on a frozen replay the training response's levels, so a design's outcomes
+# (or an omitted response) bind to the fitted program. The outcomes are bound
+# as the data hold them.
 function _rk_ordered_levels(response::Symbol, raw::AbstractVector)
     prefix = "RK backend"
     (eltype(raw) <: Integer && eltype(raw) !== Bool) || error(
         "$prefix: response `$response` `OrderedLogistic` expects integer " *
         "outcome data, got $(eltype(raw))")
-    any(x -> x < 1, raw) && error(
+    levels = _brm_fitted_levels(response, raw)
+    any(x -> x < 1, levels) && error(
         "$prefix: response `$response` `OrderedLogistic` expects positive " *
         "integer outcome data")
-    K = isempty(raw) ? 0 : maximum(raw)
+    K = isempty(levels) ? 0 : Int(maximum(levels))
     K >= 1 || error(
         "$prefix: response `$response` has no observed levels")
-    sort(unique(raw)) == collect(1:K) || error(
+    levels == 1:K || error(
         "$prefix: response `$response` holds non-contiguous levels " *
-        "($(join(sort(unique(raw)), ", "))); SB accepts gappy " *
+        "($(join(levels, ", "))); SB accepts gappy " *
         "`OrderedLogistic` levels, but RK needs recoded contiguous 1..K — " *
         "recode the response or drop empty levels")
-    (Int.(raw), K)
+    (_rk_check_ordered_outcomes(response, raw, K), K)
+end
+
+# A frozen replay's outcomes lie in the fitted levels 1..K; an omitted
+# response has none.
+_rk_check_ordered_outcomes(response::Symbol, raw::_BRMAbsentResponse, K::Int) = raw
+function _rk_check_ordered_outcomes(response::Symbol, raw::AbstractVector, K::Int)
+    for value in raw
+        1 <= value <= K || error(
+            "RK backend: response `$response` `OrderedLogistic` outcome $value " *
+            "lies outside the fitted levels 1..$K")
+    end
+    raw
 end
 
 # The shared-simplex source of a multinomial/categorical response: a
@@ -8345,8 +8361,10 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
                 "$prefix: response `$(entry.key)` weights are out of " *
                 "slice 2 for family `$family`; slice 2 admits weights " *
                 "on slice-1 families only")
+            # The design's own column, as for every other data input: a
+            # replay binds its weights without planning them.
             source = entry.weight_plan.source
-            columns[source] = entry.weight_plan.values
+            columns[source] = entry.weight_plan.column
             source
         end
         evidence = _rk_plan_evidence(entry.modifier,
