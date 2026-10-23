@@ -359,6 +359,51 @@ end
     check_wrapper_identities(problem, wrapped, x)
 end
 
+# `truncated(LogNormal(0, 1); lower=length_scale_floor)` is the default
+# length-scale prior (LogNormal(0, 1) above the floor, `<lower=rho_lower_...>`)
+# up to its normalizer, so its wrapper is the default wrapper plus a constant:
+# an oracle that does not depend on how the bounds are read.
+const BOUNDED_DEFAULT_FLOOR_BUILDER = @brm begin
+    mu ~ 0 + hsgp(x; k=6, domain=(-1.5, 1.5))
+    log(sigma) ~ 0 + hsgp(x; k=4, domain=(-1.5, 1.5))
+    y ~ Normal(mu, sigma)
+end
+const BOUNDED_TRUNCATED_DEFAULT_BUILDER = @brm begin
+    mu ~ 0 + hsgp(x; k=6, domain=(-1.5, 1.5))
+    log(sigma) ~ 0 + hsgp(x; k=4, domain=(-1.5, 1.5))
+    length_scale(mu, hsgp(x)) ~ truncated(LogNormal(0, 1); lower=length_scale_floor)
+    length_scale(sigma, hsgp(x)) ~ truncated(LogNormal(0, 1); lower=length_scale_floor)
+    y ~ Normal(mu, sigma)
+end
+
+@testset "a floor-truncated default prior adapts exactly like the default" begin
+    wrap(builder, name) = begin
+        sb = SBBRMI(builder(bounded_floor_df()); mod=@__MODULE__)
+        problem = bounded_instantiate(sb, name)
+        (; problem, names=BridgeStan.param_unc_names(problem.model),
+           wrapped=adaptive_centering_problem(sb, problem, DI.AutoEnzyme()))
+    end
+    default = wrap(BOUNDED_DEFAULT_FLOOR_BUILDER, "bounded_default_floor")
+    truncated_default = wrap(BOUNDED_TRUNCATED_DEFAULT_BUILDER, "bounded_truncated_default")
+    @test default.names == truncated_default.names
+    plain_shift, wrapped_shift = Float64[], Float64[]
+    for x in (collect(range(-0.7, 0.6; length=length(default.names))),
+              collect(range(0.5, -0.4; length=length(default.names))),
+              0.3 .* sin.(1:length(default.names)))
+        push!(plain_shift, LogDensityProblems.logdensity(truncated_default.problem, x) -
+                           LogDensityProblems.logdensity(default.problem, x))
+        lp_default, g_default = LogDensityProblems.logdensity_and_gradient(default.wrapped, x)
+        lp_truncated, g_truncated = LogDensityProblems.logdensity_and_gradient(
+            truncated_default.wrapped, x)
+        push!(wrapped_shift, lp_truncated - lp_default)
+        @test g_truncated ≈ g_default rtol=1e-10 atol=1e-10
+    end
+    # One constant: minus the two truncation normalizers.
+    @test all(s -> isapprox(s, first(plain_shift); atol=1e-10), plain_shift)
+    @test all(s -> isapprox(s, first(plain_shift); atol=1e-10), wrapped_shift)
+    @test first(plain_shift) > 0
+end
+
 const BOUNDED_ANISO_FLOOR_BUILDER = @brm begin
     mu ~ 0 + hsgp(x1, x2; k=(3, 3), iso=false)
     length_scale(mu, hsgp(x1, x2)) ~ truncated(LogNormal(0, 4); lower=length_scale_floor)
