@@ -72,6 +72,25 @@ pk_ordered(d) = @brm d begin
         conc[i] = mu
     end
 end
+# A cell whose only per-subject reads are grouped reads: dose rows and flat
+# long-format observation rows joined to their subject, no vector per subject.
+flat_pk(d) = @brm d begin
+    sigma ~ Exponential(1)
+    log_CL ~ 1 + weight + (1 | p | subject)
+    log_V ~ 1 + (1 | p | subject)
+    log_F ~ 0 + log_dose
+    effect(log_CL, Intercept) ~ Normal(0, 1)
+    effect(log_V, Intercept) ~ Normal(0, 1)
+    effect(log_F, :) ~ Normal(0, 0.5)
+    sd(:, p) ~ Exponential(1)
+    doses = groups(dose_subject => subject)
+    obs = groups(obs_subject => subject)
+    @plate for i in eachindex(log_CL)
+        dose = sum(exp.(log_F[doses[i]]))
+        loc[i] = dose / exp(log_V[i]) .* exp.(-exp(log_CL[i]) .* obs_time[obs[i]])
+        y[obs[i]] ~ normal(loc[i], sigma)
+    end
+end
 # A flat model: a string factor, an automatic HSGP interval and a zscale.
 flat(d) = @brm d begin
     sigma ~ Exponential(1)
@@ -179,6 +198,15 @@ function ordered_data(rng, n, reads; labels=["s$(j)" for j in 1:n], responses=tr
         vessel=Float64.(rand(rng, 0:1, 3n)))
     responses || return data
     merge(data, (; y=[0.02 .+ abs.(randn(rng, reads)) for _ in 1:n]))
+end
+# Two dose rows per subject and three observation rows per subject, the
+# observations listed subject after subject in turn.
+function flat_pk_data(rng, n; labels=["s$(j)" for j in 1:n], responses=true)
+    data = (; subject=labels, weight=60 .+ 30 .* rand(rng, n),
+        dose_subject=repeat(labels; inner=2), log_dose=log.(1 .+ rand(rng, 2n)),
+        obs_subject=repeat(labels, 3), obs_time=repeat([0.5, 1.0, 2.0]; inner=n))
+    responses || return data
+    merge(data, (; y=0.1 .+ rand(rng, 3n)))
 end
 flat_data(rng, n) = (; x=collect(range(0.3, 4.1; length=n)) .+ 0.01 .* rand(rng, n),
     g=["a", "b", "c"][mod1.(1:n, 3)], z=cos.(1:n) .+ rand(rng, n),
@@ -330,6 +358,33 @@ end
     @test_throws "must be a column on" reprocess(rk, merge(base, (; dose_rank=base.dose_rank[1:end-1])))
     @test_throws "must be a column on" binder(merge(base, (; dose_rank=base.dose_rank[1:end-1])))
     @test_throws "name no subject" binder(merge(base, (; dose_subject=[base.dose_subject[1:end-1]; "zz"])))
+end
+
+@stestset "a cell reading only grouped rows binds every design into one lowering" begin
+    rng = Xoshiro(19)
+    rk = RKBRMI(BM.flat_pk(flat_pk_data(rng, 6)))
+    # The row partitions are graph values of the bound label columns.
+    bound = rk_bound_data(rk)
+    @test all(column -> haskey(bound, column), (:subject, :dose_subject, :obs_subject))
+    @test !any(name -> occursin("_rows_", string(name)), keys(bound))
+    new = [flat_pk_data(rng, n; labels=["n$(j)" for j in 1:n], responses=false)
+        for n in (2, 3, 1)]
+    binder = check_binder(rk, new; resample_groups=[:subject], want=:loc,
+        runtime=subject_effects)
+    @test length(binder.classes) == 1 && !occursin("replayed in full", sprint(show, binder))
+    # The fitted subjects (frozen grouping).
+    fitted = [flat_pk_data(rng, length(labels); labels, responses=false)
+        for labels in (["s2", "s5"], ["s1", "s3", "s6"])]
+    binder = check_binder(rk, fitted; want=:loc)
+    @test length(binder.classes) == 1 && !occursin("replayed in full", sprint(show, binder))
+    # A design with its responses: the planner still gathers each subject's
+    # observations in Julia (`y`), because RKPPL refuses a derived response
+    # whose raw column a design without responses omits (ReactiveKernels
+    # snag `rkppl-derived-re-79a3a684`).
+    observed = [flat_pk_data(rng, length(labels); labels)
+        for labels in (["s2", "s5"], ["s1", "s4"])]
+    binder = check_binder(rk, observed; want=:loc)
+    @test_broken !occursin("replayed in full", sprint(show, binder))
 end
 
 @stestset "an input planned from the design replays every design" begin
