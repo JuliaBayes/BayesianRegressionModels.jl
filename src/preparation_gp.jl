@@ -23,13 +23,16 @@ function _brm_gp_axes(term, context, label; allow_empty::Bool=false, mask=nothin
             "BRM term preparation: `$label` axis cannot be empty" *
             (label === :hsgp ? "; an HSGP over an axis that can be empty needs " *
              "an explicit `domain=(lower, upper)` (or `cov=:periodic`)" : ""))
-        all(isfinite, values) || error("BRM term preparation: `$label` axes must be finite")
+        _brm_check_finite_axis(values, label)
         push!(sources, source); push!(axes, values)
     end
     all(axis -> length(axis) == length(first(axes)), axes) || error(
         "BRM term preparation: `$label` axes must have equal lengths")
     Tuple(sources), Tuple(axes)
 end
+
+_brm_check_finite_axis(values, label) = all(isfinite, values) ||
+    error("BRM term preparation: `$label` axes must be finite")
 
 function _brm_gp_priors(term, target, context)
     rho_prior = _brm_term_prior_expression(term, target, context,

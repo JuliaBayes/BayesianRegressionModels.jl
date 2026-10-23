@@ -102,11 +102,23 @@ ordered_authored(d) = @brm d begin
     loc = slope + bias
     k ~ OrderedLogistic(loc)
 end
-# An HSGP over masked rows: its mask is planned from the design in Julia.
+# HSGPs over masked rows: the mask and the masked axis are graph values of the
+# bound `keep` and `x` columns.
 masked(d) = @brm d begin
     sigma ~ Exponential(1)
     mu ~ 1 + hsgp(x; k=5, rows=keep)
     y ~ Normal(mu, sigma)
+end
+masked_periodic(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + hsgp(x; k=2, cov=:periodic, period=4.0, rows=keep)
+    y ~ Normal(mu, sigma)
+end
+# An areal field: its graph is fitted from the training areas and edges.
+areal(d) = @brm d begin
+    mu ~ 1 + car(area; edges=(from, to), type=:bym2)
+    effect(mu, Intercept) ~ Normal(0, 1)
+    y ~ Normal(mu, 1.0)
 end
 # A cell whose curve a callable-source provider claims as an RK graph,
 # counting its emissions: one per planned program.
@@ -417,15 +429,59 @@ end
     end
 end
 
-@stestset "an input planned from the design replays every design" begin
+@stestset "a masked HSGP binds its raw mask and axis" begin
     rng = Xoshiro(9)
-    rk = RKBRMI(BM.masked(flat_data(rng, 12)))
-    binder = rk_design_binder(rk)
-    designs = [map(v -> v[rows], without(flat_data(rng, 12), :y)) for rows in (2:6, 3:9)]
-    for design in designs
-        @test same_inputs(binder(design), rk_bound_data(reprocess(rk, design)))
+    # Rows 2, 4, 6 and 8 are outside the mask, so their axis may be missing.
+    holes(x) = Union{Missing,Float64}[i in (2, 4) ? missing : v for (i, v) in enumerate(x)]
+    for (build, fitted) in ((BM.masked, (:hsgp_x_rows_fit, :x_fit)), (BM.masked_periodic, ()))
+        rk = RKBRMI(build(flat_data(rng, 12)))
+        designs = [map(v -> v[rows], without(flat_data(rng, 12), :y)) for rows in (2:6, 3:9, 1:12)]
+        missing_designs = [merge(d, (; x=holes(d.x))) for d in
+            (map(v -> v[1:9], without(flat_data(rng, 12), :y)),
+             map(v -> v[1:5], without(flat_data(rng, 12), :y)))]
+        binder = check_binder(rk, [designs; missing_designs]; want=:mu)
+        @test length(binder.classes) == 2
+        # Every input but the fit-role ones is a design column.
+        @test !occursin("replayed in full", sprint(show, binder))
+        @test keys(binder.fitted) == fitted
+        # Refused where `reprocess` refuses it, after the kind's first design.
+        base = missing_designs[1]
+        numeric = merge(base, (; keep=Float64.(base.keep)))
+        binder(numeric)
+        function refused_alike(design, message)
+            @test_throws message reprocess(rk, design)
+            @test_throws message binder(design)
+        end
+        refused_alike(merge(base, (; x=[missing; base.x[2:end]])),
+            "missing in a row its `rows=` mask marks as carrying")
+        refused_alike(merge(numeric, (; keep=[2.0; numeric.keep[2:end]])),
+            "must hold Bool (or 0/1)")
+        refused_alike(merge(base, (; keep=base.keep[2:end])), "has 8 rows but the axis has 9")
+        refused_alike(merge(base, (; x=[base.x[1:5]; Inf; base.x[7:end]])),
+            "`hsgp` axes must be finite")
+        build === BM.masked && refused_alike(merge(base, (; x=[100.0; base.x[2:end]])),
+            "outside the fitted basis interval")
     end
-    @test occursin("replayed in full for each design", sprint(show, binder))
+end
+
+@stestset "an areal field binds its fitted graph once" begin
+    rng = Xoshiro(19)
+    edges = (; from=["a", "b", "c", "a", "d", "e"], to=["b", "c", "d", "c", "h", "f"])
+    areas(n) = ["a", "b", "c", "d", "e", "f", "g"][mod1.(1:n, 7)]
+    rk = RKBRMI(BM.areal((; area=areas(14), edges..., y=randn(rng, 14))))
+    designs = [(; area=areas(n)[rows]) for (n, rows) in ((14, 2:5), (14, 4:12), (7, [7, 1]))]
+    binder = check_binder(rk, designs; want=:mu)
+    @test !occursin("replayed in full", sprint(show, binder))
+    graph = (:car_mu_area_inv_scale, :car_mu_area_is_struct, :car_mu_area_node1,
+        :car_mu_area_node2, :car_mu_area_struct_pos)
+    @test keys(binder.fitted) == graph
+    # Designs that also list edges keep the fitted graph, as a replay does.
+    check_binder(rk, [(; d..., edges...) for d in designs]; want=:mu)
+    @test_throws "not an area of the fitted graph" reprocess(rk, (; area=["a", "z"]))
+    @test_throws "not an area of the fitted graph" binder((; area=["a", "z"]))
+    # Resampled areas refit the graph from each design.
+    resampled = rk_design_binder(rk; resample_groups=[:area])
+    @test isempty(resampled.fitted)
 end
 
 @stestset "hook data replays every design; a hook statement does not" begin

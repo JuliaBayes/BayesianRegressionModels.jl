@@ -341,6 +341,11 @@ Base.@nospecializeinfer function _brm_masked_axis_rows(@nospecialize(brmi::BRMI)
         for (axis, (column, masks)) in _brm_masked_axis_refs(brmi))
 end
 
+# Each masked-only HSGP axis's column as the data holds it.
+Base.@nospecializeinfer _brm_masked_axis_columns(@nospecialize(brmi::BRMI)) =
+    Dict{Symbol,Any}(axis => parent(parent(column))
+        for (axis, (column, _)) in _brm_masked_axis_refs(brmi))
+
 const _BRM_NO_MASKED_AXES = Dict{Symbol,BitVector}()
 
 _brm_collect_data!(_data, @nospecialize(_x); skip=Set{Symbol}(),

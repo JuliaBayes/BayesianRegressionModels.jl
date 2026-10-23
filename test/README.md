@@ -939,14 +939,14 @@ distributional model's two distinct zero-mean HSGP bindings.
 `Uniform(a, b)`-bounded HSGP length scales and SDs, and cdar SDs and
 persistences, through Stan's own `lb`/`lub` transform. It also reads the
 `<lower=fmax(0.0, L)>` declared by a `truncated(D; lower=L, ...)` scale prior
-whose `L` is `length_scale_floor` or a data scalar, per axis for an
-anisotropic term. Because the wrapper's density identities hold for any
+whose `L` is `length_scale_floor`, a data scalar or arithmetic over them
+(`2 * length_scale_floor`), per axis for an anisotropic term, as StanBlocks
+evaluates it (`ModelOutput.constraint_values`). Because the wrapper's density identities hold for any
 function of those coordinates, each compiled model that adapts first compares
 the physical value every cell reads with BridgeStan's `param_constrain`, then
 checks the wrapper identities. A bound-independent oracle checks that a
 `truncated(LogNormal(0, 1); lower=length_scale_floor)` prior wraps exactly like
-the default floor plus one constant. A bound written as arithmetic over data is
-a `@test_broken` capability gap.
+the default floor plus one constant.
 
 `adaptive_car_centering.jl` checks online adaptive centering of the areal
 `car(area; edges, type=:icar | :bym2)` field: one cell per area, its `phi`
