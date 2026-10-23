@@ -2,7 +2,7 @@
 # The two R2D2 geometries deliberately retain their different scale formulas.
 _brmd_allocation_scale_math(id)= "s_{"*join((_brmd_escape(x) for x in (id[2],id[4:end]...)),",")*"}"
 
-function _brmd_allocation_notation(d,notation,labels)
+function _brmd_allocation_notation(d,notation,labels,texts)
     result=NamedTuple[notation...]
     function add(key,symbol,meaning)
         isnothing(key) && return
@@ -16,16 +16,16 @@ function _brmd_allocation_notation(d,notation,labels)
         scheme=get(b,:prior_scheme,(;kind=:ordinary))
         if scheme.kind===:r2d2
             sub=_brmd_escape(b.logical)
-            add(scheme.names.r2_name,"R^2_{"*sub*"}","Explained fraction of the whole-predictor total variance.")
-            add(scheme.names.phi_name,"\\phi_{"*sub*"}","Simplex shares of the explained whole-predictor variance.")
-            add(scheme.names.tau_name,"T_{"*sub*"}","Whole-predictor total latent scale.")
+            add(scheme.names.r2_name,"R^2_{"*sub*"}",_brmd_text(texts,:r2_meaning))
+            add(scheme.names.phi_name,"\\phi_{"*sub*"}",_brmd_text(texts,:simplex_shares_meaning))
+            add(scheme.names.tau_name,"T_{"*sub*"}",_brmd_text(texts,:total_scale_meaning))
         end
         allocation=get(b,:allocation_scheme,nothing)
         isnothing(allocation) && continue
         block=only(n for n in result if n.name==allocation.block)
         sub=block.symbol*","*string(allocation.budget)
-        add(allocation.r2_name,"R^2_{"*sub*"}","R² for this shared-block allocation budget, measured against its margin reference scales.")
-        add(allocation.phi_name,"\\phi_{"*sub*"}","One simplex over the margins and any included population/contrast components of this budget.")
+        add(allocation.r2_name,"R^2_{"*sub*"}",_brmd_text(texts,:budget_r2_meaning))
+        add(allocation.phi_name,"\\phi_{"*sub*"}",_brmd_text(texts,:budget_simplex_meaning))
     end
     Tuple(result)
 end
@@ -46,12 +46,12 @@ function _brmd_prepared_rhs(d,x,seen=())
     _brmd_prepared_rhs(d,last(only(matches).args),(seen...,x))
 end
 
-function _brmd_allocation_components(d,priors,constants,notation,groups)
+function _brmd_allocation_components(d,priors,constants,notation,texts,groups)
     roots=BRMDescriptionComponent[]
     for (_,binding) in sort!(collect(d.plan.bindings);by=p->string(first(p)))
         scheme=get(binding,:prior_scheme,(;kind=:ordinary))
         if scheme.kind!==:ordinary
-            env=_brmd_environment(d,binding.logical,:prior_allocation,priors,constants,notation)
+            env=_brmd_environment(d,binding.logical,:prior_allocation,priors,constants,notation,texts)
             kwargs=if scheme.kind===:r2d2
                 (;r2=_brmd_allocation_reference(d,scheme.names.r2_name),
                     phi=_brmd_allocation_reference(d,scheme.names.phi_name),
@@ -69,14 +69,14 @@ function _brmd_allocation_components(d,priors,constants,notation,groups)
         end
         a=get(binding,:allocation_scheme,nothing)
         isnothing(a) && continue
-        env=_brmd_environment(d,a.block,:prior_allocation,priors,constants,notation)
+        env=_brmd_environment(d,a.block,:prior_allocation,priors,constants,notation,texts)
         kwargs=(;r2=_brmd_allocation_reference(d,a.r2_name),phi=_brmd_allocation_reference(d,a.phi_name))
         push!(roots,_brmd_component(env,(:allocation,a.block...,a.budget),:prior_allocation,
             nothing,(_brmd_snapshot(a),),kwargs))
     end
     for group in groups
         group.block.family in (:ranef_intercept_r2d2,:ranef_correlated_r2d2,:ranef_correlated_draws_r2d2) || continue
-        env=_brmd_environment(d,group.key,:prior_allocation,priors,constants,notation)
+        env=_brmd_environment(d,group.key,:prior_allocation,priors,constants,notation,texts)
         raw=get(group.declaration.keywords,:tau,get(group.declaration.keywords,:scale,nothing))
         isnothing(raw) && continue
         expression=_brmd_value(_brmd_prepared_rhs(d,raw),env,(:allocation,group.key...,:scale_expression))
@@ -89,7 +89,7 @@ end
 function _brmd_builtin_kind(::Val{:prior_allocation},c)
     scheme=first(c.arguments)
     scheme.kind===:derived_group_scales && return BRMDescriptionFragment(
-        prose=("The marginal SDs of this covariance block are derived from the declared R2D2 allocation in margin order $(Tuple((m.predictor,m.coefficient) for m in scheme.margins)); they do not receive an independent sampled-scale prior. Correlations retain their separately declared prior.",),
+        prose=(_brmd_text(c,:derived_block_scales;margins=Tuple((m.predictor,m.coefficient) for m in scheme.margins)),),
         equations=("\\mathrm{SD}_{"*_brmd_block_math(c,scheme.block)*"}="*brm_description_math(c,c.arguments[2]),),covers=(c.id,))
     scheme.kind in (:r2d2,:r2d2m2) || return nothing
     equations=String[]; prose=String[]
@@ -103,13 +103,13 @@ function _brmd_builtin_kind(::Val{:prior_allocation},c)
         spec=scheme.spec
         total=brm_description_math(c,c.keywords.total_scale)
         if scheme.kind===:r2d2
-            push!(prose,"Whole-predictor R2D2 splits total latent variance T² into explained R²T² and unexplained (1−R²)T². The simplex allocates the explained variance over the addressed non-intercept population columns. Intercepts and columns with their own prior stay outside this allocation.")
+            push!(prose,_brmd_text(c,:whole_predictor_r2d2))
             isnothing(c.keywords.anchor) || push!(equations,total*"="*string(c.keywords.anchor))
             if isnothing(r2)
-                push!(prose,"No population column enters the allocation, so no R² or simplex is introduced and the random-effect SD keeps the total scale.")
+                push!(prose,_brmd_text(c,:no_allocated_columns))
             end
         else
-            push!(prose,"The joint shared-block allocation uses the same R² and simplex for its margins and included population/contrast components. Each predictor uses its own margin reference; its total-scale expression is reference/√(1−R²), so coefficient variances contain R²/(1−R²).")
+            push!(prose,_brmd_text(c,:joint_block_allocation))
         end
         for (label,index) in zip(spec.labels,spec.share_idx)
             index>0 || continue
@@ -135,11 +135,11 @@ function _brmd_builtin_kind(::Val{:prior_allocation},c)
                 push!(equations,variance*"=\\frac{m(n-m)}{n(n-1)}")
             end
         end
-        push!(prose,"V is the sample variance of the selected prepared design column. For a treatment contrast it is the sample variance of its indicator, with m rows at that level among n rows. Modeled completed covariates remain inside that variance expression.")
-        spec.n_shares==1 && push!(prose,"The one-element simplex is deterministically [1]; it introduces no free simplex coordinate.")
+        push!(prose,_brmd_text(c,:allocation_variance))
+        spec.n_shares==1 && push!(prose,_brmd_text(c,:degenerate_simplex))
     else
-        push!(prose,"This R2D2M2/ICC budget allocates one simplex over $(scheme.n_phi) components. A margin SD is its reference scale times √(φR²/(1−R²)); this differs from the whole-predictor residual scale T√(1−R²). Unaddressed margins retain their separately inventoried free-scale priors.")
-        scheme.n_phi==1 && push!(prose,"The one-element simplex is deterministically [1]; it introduces no free simplex coordinate.")
+        push!(prose,_brmd_text(c,:r2d2m2_budget;n_phi=scheme.n_phi))
+        scheme.n_phi==1 && push!(prose,_brmd_text(c,:degenerate_simplex))
     end
     BRMDescriptionFragment(prose=Tuple(prose),equations=Tuple(equations),covers=(c.id,))
 end
