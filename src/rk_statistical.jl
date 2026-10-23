@@ -4,13 +4,7 @@
 # A basis is fitted to the fit-role columns (`x_fit`: the column itself when
 # the model is built, the training column on a frozen `reprocess`) and
 # evaluated at the bound rows.
-function brm_tps_basis(x, x_fit, k)
-    X, Z = _brm_apply_spline(_brm_fit_spline(x_fit; k), x)
-    # RK's smooth convention keeps the centered linear null-space column;
-    # the formula intercept owns the constant. Shared SB preparation retains
-    # both columns, including its documented intercept-prior bridge.
-    X[:, 2:2], Z
-end
+brm_tps_basis(x, x_fit, k) = _brm_apply_spline(_brm_fit_spline(x_fit; k), x)
 brm_tps_basis(x, k) = brm_tps_basis(x, x, k)
 
 brm_t2_basis(x, z, x_fit, z_fit, k) = _brm_apply_t2(_brm_fit_t2(x_fit, z_fit; k), x, z)

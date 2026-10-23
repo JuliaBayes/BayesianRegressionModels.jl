@@ -2161,12 +2161,14 @@ _sb_cdar = StanBlocks.@slic begin
     return correlated_damped_walk(sigma, rho, eta, L, n_steps, group_idx, step_idx)
 end
 
-# Penalized 1-D thin-plate regression spline. `Xnull` contains the unpenalized
-# polynomial null space {1, x}; `Zpen` is the range-space basis after the
-# wiggliness penalty has been diagonalized and absorbed into the columns. The
-# standardized range coefficients therefore have one iid Gaussian scale,
-# matching the mixed-model parameterization used by mgcv/brms. The caller adds
-# the resulting length-N contribution directly to the linear predictor.
+# Penalized 1-D thin-plate regression spline. `Xnull` is the unpenalized
+# centered linear column: the formula intercept owns the null space's
+# constant, so `1 + s(x) + s(z)` stays identified. `Zpen` is the range-space
+# basis after the wiggliness penalty has been diagonalized and absorbed into
+# the columns. The standardized range coefficients therefore have one iid
+# Gaussian scale, matching the mixed-model parameterization used by mgcv/brms.
+# The caller adds the resulting length-N contribution directly to the linear
+# predictor.
 #
 # That scale is `sd_pen[1]` rather than a bare `sds` so `sd(<lp|:>, s(x)) ~
 # Exponential(scale)` configures THIS submodel instead of selecting a second
@@ -2177,7 +2179,7 @@ end
 # (decision `145tp0o`).
 _sb_s_generic = StanBlocks.@slic begin
     n_pen = dims(Zpen)[2]
-    b_fixed::vector[2]
+    b_fixed::vector[1]
     sd_pen ~ std_normal(; n=1, lower=0.0)
     b_pen_raw ~ std_normal(; n=n_pen)
     b_pen = sd_pen[1] * b_pen_raw
@@ -12598,11 +12600,12 @@ _sb_predictor_term!(stmts, data, ::typeof(interval_censored), t;
     col_name
 end
 # Penalized thin-plate predictor `s(x)`. Fits a frozen rank-10 TPS eigenbasis
-# from the raw training column, then stashes its two-column null-space matrix
-# and eight-column penalty-whitened range matrix as Stan data. `_sb_s` owns the
-# flat null-space coefficients, penalized coefficients, and smoothing SD; the
-# returned contribution is a direct summand (no extra `popefs` beta). Only
-# the default basis is supported -- `bs` and `k=`/`knots=` are follow-ons.
+# from the raw training column, then stashes its one-column (centered linear)
+# null-space matrix and eight-column penalty-whitened range matrix as Stan
+# data. `_sb_s` owns the flat linear coefficient, penalized coefficients, and
+# smoothing SD; the returned contribution is a direct summand (no extra
+# `popefs` beta). Only the default basis is supported -- `bs` and
+# `k=`/`knots=` are follow-ons.
 # Carriers disambiguate like `gp`/`hsgp`: the first `s(x)` keeps the
 # historical `s_<x>` names, while a repeat of the same column -- in another
 # predictor or twice in one -- takes `s_<target>_<x>` (+ serial).
