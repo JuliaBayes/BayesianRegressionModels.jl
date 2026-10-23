@@ -949,12 +949,14 @@ the default floor plus one constant. A bound written as arithmetic over data is
 a `@test_broken` capability gap.
 
 `adaptive_car_centering.jl` checks online adaptive centering of the areal
-`car(area; edges, type=:icar | :bym2)` field: one triangular pair of cells per
-area, its `phi` cell and (BYM2) its `theta` cell centred on the area's spatial
-component. It resolves the cells against the compiled model, checks the
-transform, Jacobian and inverse against an independent map written from the
-emitted law, checks that `c=1` is BridgeStan's transformed `effects` (islands
-and areas without rows included), checks candidate-frame invariance and Enzyme
+`car(area; edges, type=:icar | :bym2)` field: one cell per area, its `phi`
+under `:icar` and its `theta` under `:bym2`, centred on the area's total (the
+predictor's intercept plus the area's spatial component; `phi` stays
+standardized). It resolves the cells and the intercept against the compiled
+model, checks the transform, Jacobian and inverse against an independent map
+written from the emitted law, checks that `c=1` is BridgeStan's transformed
+`effects` (`:icar`) or the intercept plus them (`:bym2`; islands and areas
+without rows included), checks candidate-frame invariance and Enzyme
 and finite-difference gradients, checks car cells beside a correlated
 random-effect block in the joint and learned-order wrappers (each family maps
 as its own wrapper does), the controls report, the cdar refusal and the
@@ -968,8 +970,9 @@ three concurrent tasks while a fourth forces collections, in a child Julia
 started with four threads; the child must exit cleanly and every gradient must
 bitwise-equal its single-threaded reference. On Julia 1.10, Enzyme's reverse
 pass corrupted Julia's GC whenever an accessor allocated a work vector, read a
-struct holding vectors in its row loop, or reached two `_block_location`
-instantiations: the process segfaulted in `getindex` or aborted with "GC error
+struct holding vectors in its row loop, reached two `_block_location`
+instantiations, or passed a car cell to an outlined call (even in the car-free
+`joint` case): the process segfaulted in `getindex` or aborted with "GC error
 (probable corruption)". Synthetic blocks only; no Stan toolchain. The stress
 loop and child launch live in `threaded_gradient_stress.jl`, shared with the
 gate below.

@@ -1,17 +1,17 @@
 # test/adaptive_car_centering.jl — online adaptive-centering contract for the
 # areal term `car(area; edges=(from, to), type=:icar | :bym2)`.
 #
-# Every area is a triangular pair of cells: its structured `phi` cell (location
-# 0, scale `a = sigma * sqrt(rho / s_c)`, `sigma` under `:icar`) and, under
-# `:bym2`, its unstructured `theta` cell (scale `sigma * sqrt(1 - rho)`, `sigma`
-# for an island, location `intercept + a * phi`). `c=0` is the emitted
-# standardized frame; `c=1` is the spatial component and the area's total
-# `intercept + effects[k]`. Covers metadata
-# resolution against the compiled model, the exact transform against an
-# independent map, the c=1 meaning against BridgeStan's transformed `effects`,
-# candidate-frame invariance, Enzyme gradients, the joint and learned-order
-# wrappers beside a random-effect block, the controls report, the generated
-# skip, and one short online warmup.
+# Every area is one cell: under `:icar` its structured `phi` (location 0, scale
+# `sigma`), under `:bym2` its unstructured `theta` (scale `sigma * sqrt(1 -
+# rho)`, `sigma` for an island, location `intercept + a * phi` with `a = sigma
+# * sqrt(rho / s_c)`; `phi` stays standardized). `c=0` is the emitted
+# standardized frame; `c=1` is the area's effect `effects[k]` (`:icar`) or its
+# total `intercept + effects[k]` (`:bym2`). Covers metadata resolution against
+# the compiled model, the exact transform against an independent map, the c=1
+# meaning against BridgeStan's transformed `effects`, candidate-frame
+# invariance, Enzyme gradients, the joint and learned-order wrappers beside a
+# random-effect block, the controls report, the generated skip, and one short
+# online warmup.
 #
 #     julia --project=test test/adaptive_car_centering.jl
 using Test
@@ -68,12 +68,12 @@ indices_of(names, prefix) = findall(startswith(prefix * "."), names)
 
 inv_logit(x) = 1 / (1 + exp(-x))
 
-# The independent map, written from the emitted law alone (`_sb_car_bym2`):
-# per area, `phi` from its coordinate `a^c * phi`, then `theta` from
-# `c * (intercept + a * phi) + s^c * theta`. Indices come from the compiled
-# names, the graph from the Stan data. `controls` follow the wrapper's
-# documented pair order: the `phi` cells in emitted order, then one `theta` cell
-# per area.
+# The independent map, written from the emitted law alone (`_sb_car_icar`,
+# `_sb_car_bym2`): `:icar` `phi` from its coordinate `sigma^c * phi`, `:bym2`
+# `theta` from `c * (intercept + a * phi) + s^c * theta` with `phi` read as it
+# is. Indices come from the compiled names, the graph from the Stan data.
+# `controls` follow the wrapper's documented pair order: the `phi` cells in
+# emitted order, or one `theta` cell per area.
 function manual_car_map(x, names, data, type, controls)
     phi_idx = indices_of(names, "car_mu_area_phi")
     sigma = exp(x[index_of(names, "car_mu_area_sigma")])
@@ -91,19 +91,11 @@ function manual_car_map(x, names, data, type, controls)
     intercept = x[index_of(names, "pop_mu_beta_pop.1")]
     inv_scale = data[:car_mu_area_inv_scale]
     theta_idx = indices_of(names, "car_mu_area_theta")
-    n = length(phi_idx)
-    area_of = [findfirst(==(j), struct_idx) for j in 1:n]
-    a = [sigma * sqrt(rho * inv_scale[area_of[j]]) for j in 1:n]
-    phi = [x[phi_idx[j]] / a[j]^controls[j] for j in 1:n]
-    for j in 1:n
-        y[phi_idx[j]] = phi[j]
-        ljac -= controls[j] * log(a[j])
-    end
     for (k, i) in enumerate(theta_idx)
         j = struct_idx[k]
-        c = controls[n + k]
+        c = controls[k]
         s = j > 0 ? sigma * sqrt(1 - rho) : sigma
-        m = intercept + (j > 0 ? a[j] * phi[j] : 0.0)
+        m = intercept + (j > 0 ? sigma * sqrt(rho * inv_scale[k]) * x[phi_idx[j]] : 0.0)
         y[i] = (x[i] - c * m) / s^c
         ljac -= c * log(s)
     end
@@ -145,19 +137,26 @@ end for i in eachindex(x)]
     @test (block.rho_lower, block.rho_upper) == (0.0, 1.0)
     @test block.intercept == index_of(names, "pop_mu_beta_pop.1")
 
-    # Cell scales against the emitted law at sigma = 0.7, rho = 0.3.
-    x = zeros(length(names))
+    # Cell scales and locations against the emitted law at sigma = 0.7,
+    # rho = 0.3: one `theta` cell per area, centred on the intercept plus the
+    # area's spatial component (the island `g` on the intercept alone).
+    x = collect(range(-0.5, 0.6; length=length(names)))
     x[block.sigma] = log(0.7)
     x[block.rho] = log(0.3 / 0.7)
     inv_scale = sb.data[:car_mu_area_inv_scale]
-    expected = vcat([0.7 * sqrt(0.3 * inv_scale[k]) for k in block.phi_area],
-                    [k == 7 ? 0.7 : 0.7 * sqrt(0.7) for k in 1:8])
-    @test [exp(BRM._adaptive_car_log_scale(x, block, cell)) for cell in 1:15] ≈
-          expected atol=1e-14
+    @test BRM._adaptive_car_n_cells(block) == 8
+    @test [BRM._adaptive_car_index(block, cell) for cell in 1:8] == block.unstructured
+    @test [exp(BRM._adaptive_car_log_scale(x, block, cell)) for cell in 1:8] ≈
+          [k == 7 ? 0.7 : 0.7 * sqrt(0.7) for k in 1:8] atol=1e-14
+    @test [BRM._adaptive_car_location(x, block, cell) for cell in 1:8] ≈
+          [x[block.intercept] + (j == 0 ? 0.0 :
+               0.7 * sqrt(0.3 * inv_scale[k]) * x[block.structured[j]])
+           for (k, j) in enumerate(block.struct_idx)] atol=1e-14
     # The shares stay finite as rho reaches either end of [0, 1].
     for r in (-800.0, 800.0)
         x[block.rho] = r
-        @test all(isfinite, BRM._adaptive_car_log_scale(x, block, cell) for cell in 1:15)
+        @test all(isfinite, BRM._adaptive_car_log_scale(x, block, cell) for cell in 1:8)
+        @test all(isfinite, BRM._adaptive_car_location(x, block, cell) for cell in 1:8)
     end
 
     icar = only(BRM._adaptive_car_centering_blocks(CAR_AC_SB[:icar], car_ac_names(:icar)))
@@ -166,6 +165,9 @@ end for i in eachindex(x)]
     @test icar.rho == 0
     @test icar.intercept == 0
     @test length(icar.structured) == 7
+    @test BRM._adaptive_car_n_cells(icar) == 7
+    @test [BRM._adaptive_car_index(icar, cell) for cell in 1:7] == icar.structured
+    @test all(iszero(BRM._adaptive_car_location(x, icar, cell)) for cell in 1:7)
 
     # A configured scale and a narrowed share are read through their bounds.
     configured = SBBRMI(@brm(CAR_AC_DF, begin
@@ -179,9 +181,9 @@ end for i in eachindex(x)]
     x[narrowed.sigma] = log(0.7)
     x[narrowed.rho] = 0.4
     rho = 0.2 + 0.7 * inv_logit(0.4)
-    @test exp(BRM._adaptive_car_log_scale(x, narrowed, 8)) ≈ 0.7 * sqrt(1 - rho) atol=1e-14
-    @test exp(BRM._adaptive_car_log_scale(x, narrowed, 1)) ≈
-          0.7 * sqrt(rho * inv_scale[1]) atol=1e-14
+    @test exp(BRM._adaptive_car_log_scale(x, narrowed, 1)) ≈ 0.7 * sqrt(1 - rho) atol=1e-14
+    @test BRM._adaptive_car_location(x, narrowed, 1) ≈ x[narrowed.intercept] +
+          0.7 * sqrt(rho * inv_scale[1]) * x[narrowed.structured[1]] atol=1e-14
 
     missing_theta = filter(!=("car_mu_area_theta.8"), names)
     @test_throws "unstructured" BRM._adaptive_car_centering_blocks(sb, missing_theta)
@@ -193,8 +195,8 @@ end
     blocks = BRM._adaptive_car_centering_blocks(sb, names)
     state, ir = CAR_AC_EXT._adaptive_car_centering_reparametrizer(blocks)
     block = only(blocks)
-    n_cells = type === :bym2 ? 15 : 7
-    @test first.(ir.pairs) == vcat(block.structured, block.unstructured)
+    n_cells = type === :bym2 ? 8 : 7
+    @test first.(ir.pairs) == (type === :bym2 ? block.unstructured : block.structured)
     @test length(ir.pairs) == n_cells
 
     x = collect(range(-0.6, 0.7; length=length(names)))
@@ -229,34 +231,22 @@ end
     rng = Xoshiro(0x0a5e)
     innovations = randn(rng, n_cells)
     h = randn(rng, n_cells)
+    # Locations and scales read only coordinates no cell rewrites.
     scales = exp.(BRM._adaptive_car_log_scale.(Ref(x), Ref(block), 1:n_cells))
-    n = length(block.structured)
+    locations = BRM._adaptive_car_location.(Ref(x), Ref(block), 1:n_cells)
     frames = map((zeros_c, controls, ones_c)) do c
         set_car_sources!(state, ir, c)
         position, gradient = copy(x), zeros(length(x))
         for cell in 1:n_cells
-            j = BRM._adaptive_car_phi_cell(block, cell)
-            intercept = BRM._adaptive_car_cell(block, cell).intercept
-            m = (intercept == 0 ? 0.0 : x[intercept]) +
-                (j == 0 ? 0.0 : scales[j] * innovations[j])
-            position[BRM._adaptive_car_index(block, cell)] =
-                c[cell] * m + scales[cell]^c[cell] * innovations[cell]
-        end
-        # g = A(c)^(-T) h for the triangular A: theta rows first.
-        for cell in n_cells:-1:1
-            g = h[cell]
-            if cell <= n
-                for k in n + 1:n_cells
-                    BRM._adaptive_car_phi_cell(block, k) == cell || continue
-                    g -= c[k] * scales[cell] * gradient[BRM._adaptive_car_index(block, k)]
-                end
-            end
-            gradient[BRM._adaptive_car_index(block, cell)] = g / scales[cell]^c[cell]
+            i = BRM._adaptive_car_index(block, cell)
+            position[i] = c[cell] * locations[cell] + scales[cell]^c[cell] * innovations[cell]
+            gradient[i] = h[cell] / scales[cell]^c[cell]
         end
         frame = CAR_AC_EXT._prepare_frame(state, ir, position, gradient)
         @test frame.innovation ≈ innovations atol=1e-12
         @test frame.invariant_gradient ≈ h atol=1e-12
         @test frame.scale ≈ scales atol=1e-14
+        @test frame.location ≈ locations atol=1e-14
         frame
     end
     for p in 1:n_cells, t in 0.0:0.1:1.0
@@ -268,7 +258,7 @@ end
     end
 end
 
-@testset "car c=1 is the spatial component and the area's total ($type)" for type in (:bym2, :icar)
+@testset "car c=1 is the area's effect or total ($type)" for type in (:bym2, :icar)
     problem = CAR_AC_PROBLEM[type]
     sm = problem.model
     names = car_ac_names(type)
@@ -297,12 +287,12 @@ end
     if type === :bym2
         rho = constrained[index_of(cnames, "car_mu_area_rho")]
         @test rho ≈ inv_logit(x[block.rho])
-        inv_scale = sb.data[:car_mu_area_inv_scale]
-        # theta sources are every area's total, islands and row-less areas included
+        # theta sources are every area's total, islands and row-less areas
+        # included; phi is the emitted coordinate
         intercept = constrained[index_of(cnames, "pop_mu_beta_pop.1")]
         @test x[block.unstructured] ≈ intercept .+ effects atol=1e-12
-        @test x[block.structured] ≈
-              [sigma * sqrt(rho * inv_scale[k]) for k in block.phi_area] .* phi atol=1e-12
+        @test model_position[block.structured] == x[block.structured]
+        @test phi ≈ x[block.structured] atol=1e-14
     else
         @test x[block.structured] ≈ effects[block.phi_area] atol=1e-12
         @test effects[7] == 0.0
@@ -324,8 +314,13 @@ end
     @test all(r -> r.margin == (; predictor=:mu, coefficient=:car_mu_area), rows)
     @test [r.c for r in rows] == controls
     @test [r.index for r in rows] == first.(ir.pairs)
-    @test [r.level for r in rows if r.term == 1] == ["a", "b", "c", "d", "h", "e", "f"]
-    type === :bym2 && @test [r.level for r in rows if r.term == 2] == block.areas
+    if type === :bym2
+        @test all(r -> r.term == 2, rows)
+        @test [r.level for r in rows] == block.areas
+    else
+        @test all(r -> r.term == 1, rows)
+        @test [r.level for r in rows] == ["a", "b", "c", "d", "h", "e", "f"]
+    end
 end
 
 # A car field beside a correlated random-effect block: the joint wrapper (pair
@@ -342,14 +337,13 @@ end); total_groups=(), mod=@__MODULE__)
     car = BRM._adaptive_car_centering_blocks(CAR_AC_JOINT_SB, names)
     @test length(ordinary) == 1 && length(car) == 1
     n_ranef = 2 * 2
-    n_car = 15
+    n_car = 8
 
     wrapped = adaptive_centering_problem(CAR_AC_JOINT_SB, problem, DI.AutoEnzyme())
     ir = WarmupHMC.reparametrizer(wrapped)
     state = ir.pairs[1][2].args[1].state
     @test state isa CAR_AC_EXT.BRMJointAdaptiveCenteringState
-    @test first.(ir.pairs) == vcat(vec(only(ordinary).effects), car[1].structured,
-                                   car[1].unstructured)
+    @test first.(ir.pairs) == vcat(vec(only(ordinary).effects), car[1].unstructured)
 
     # Each family maps exactly as its own wrapper does at the same controls.
     controls = collect(range(0.15, 0.85; length=n_ranef + n_car))
@@ -363,7 +357,7 @@ end); total_groups=(), mod=@__MODULE__)
     set_car_sources!(ranef_state, ranef_ir, controls[1:n_ranef])
     ranef_ljac, ranef_mapped = ranef_ir(x)
     @test ljac ≈ car_ljac + ranef_ljac atol=1e-12
-    car_coords = vcat(car[1].structured, car[1].unstructured)
+    car_coords = car[1].unstructured
     @test mapped[car_coords] ≈ car_mapped[car_coords] atol=1e-13
     ranef_coords = vec(only(ordinary).effects)
     @test mapped[ranef_coords] ≈ ranef_mapped[ranef_coords] atol=1e-13
@@ -461,12 +455,12 @@ end
         monitor_ess=false,
     )
     adapted = [value.c for (_, value) in WarmupHMC.reparam_sources(online)]
-    @test length(adapted) == 36 + 36
+    @test length(adapted) == 36
     @test all(c -> c in 0.0:0.1:1.0, adapted)
     @test size(result.posterior_position, 2) >= 100
     @test all(isfinite, result.posterior_position)
-    # 40 rows per area pin each area's total effect: its theta cell centres.
-    @test sum(adapted[37:end]) / 36 > 0.5
+    # 40 rows per area pin each area's total: its theta cell centres.
+    @test sum(adapted) / 36 > 0.5
 end
 
 println("adaptive_car_centering.jl: all testsets passed")

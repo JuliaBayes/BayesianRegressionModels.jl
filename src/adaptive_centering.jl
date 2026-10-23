@@ -1722,13 +1722,18 @@ end
 # `a_k = sigma * sqrt(rho / s_c)` and `s_k = sigma * sqrt(1 - rho)` (an island,
 # `struct_idx[k] == 0`, has `b[k] = sigma * theta[k]`), see `_sb_car_bym2`.
 # Both `phi` and `theta` are emitted standardized, so the compiled frame is
-# `c=0` throughout. Every area is one triangular `K <= 2` cell pair, the BYM2
-# analogue of a correlated block's group: its `phi` cell has location 0 and
-# scale `a_k` (`sigma` for `:icar`); its `theta` cell has scale `s_k` and the
-# conditional location `a_k * phi`, so `c=1` on both is the spatial component
-# `a_k * phi` and the area's total effect `b[k]`. The ICAR density couples the
-# `phi` cells of neighbouring areas, which leaves the transform exact: it only
-# rescales `phi` coordinate by coordinate.
+# `c=0` throughout. Under `:icar` every area with neighbours is one cell, its
+# `phi` (location 0, scale `sigma`), so `c=1` is its effect `sigma * phi`; the
+# ICAR density couples neighbouring cells, which leaves the transform exact: it
+# only rescales each `phi` coordinate. Under `:bym2` every area is one cell, its
+# `theta` (scale `s_k`, location `intercept + a_k * phi`, see
+# `_adaptive_car_intercept`), so `c=1` is the area's total `intercept + b[k]`
+# (Gelfand, Sahu and Carlin 1995), and `phi` stays the emitted coordinate. A
+# BYM2 `phi` cell would be centred on `a_k`, which vanishes with `rho`: on a
+# mostly unstructured field the per-cell score partly centred such cells, and
+# the funnel they opened at `rho -> 0` stopped a chain (910 of 1000 draws
+# divergent), while keeping `phi` standardized mixed `rho` better in both
+# regimes measured.
 
 struct _CARAdaptiveCenteringBlock
     logical::Symbol
@@ -1764,70 +1769,64 @@ end
 Base.show(io::IO, b::_CARAdaptiveCenteringBlock) = print(
     io,
     "CARAdaptiveCenteringBlock(", b.logical, ", ", b.term, ", ",
-    b.bym2 ? ":bym2, " : ":icar, ", length(b.structured), " structured",
-    b.bym2 ? " + $(length(b.unstructured)) unstructured cells)" : " cells)",
+    b.bym2 ? ":bym2, $(length(b.unstructured)) theta cells)" :
+        ":icar, $(length(b.structured)) phi cells)",
 )
 
-# Cells of one block: `1:n_struct` are the `phi` cells in emitted order, then
-# (`:bym2`) one `theta` cell per area.
+# Cells of one block: under `:icar` the `phi` cells in emitted order, under
+# `:bym2` one `theta` cell per area in sorted order.
 _adaptive_car_n_cells(block::_CARAdaptiveCenteringBlock) =
-    length(block.structured) + length(block.unstructured)
-_adaptive_car_structured(block::_CARAdaptiveCenteringBlock, cell::Int) =
-    cell <= length(block.structured)
+    block.bym2 ? length(block.unstructured) : length(block.structured)
 # The area of a cell, an index into `areas`.
 _adaptive_car_area(block::_CARAdaptiveCenteringBlock, cell::Int) =
-    _adaptive_car_structured(block, cell) ? block.phi_area[cell] :
-        cell - length(block.structured)
+    block.bym2 ? cell : block.phi_area[cell]
 
 # One cell as plain numbers. The differentiated accessors read only a vector of
 # these, never the block: on Julia 1.10 an Enzyme reverse pass that reads a
 # struct holding vectors corrupts GC once another thread collects (see
 # `_block_location` in BayesianRegressionModelsWarmupHMCExt), and the joint
 # wrapper's accessor crashed `test/adaptive_centering_threads.jl` while its car
-# branch read the block.
+# branch read the block. The accessors below are `@inline`: passing a cell to an
+# outlined call aborted that gate's car-free `joint` case the same way, with or
+# without the intercept read.
 struct _CARAdaptiveCell
     index::Int
-    # 0: scale `sigma` (an `:icar` `phi` cell, an island's `theta` cell);
-    # 1: a BYM2 `phi` cell, `sigma * sqrt(rho / s_c)`;
-    # 2: the `theta` cell of an area with neighbours, `sigma * sqrt(1 - rho)`.
-    share::Int
+    # false: scale `sigma` (an `:icar` `phi` cell, an island's `theta` cell);
+    # true: the `theta` cell of an area with neighbours, `sigma * sqrt(1 - rho)`.
+    share::Bool
     sigma::Int
     sigma_lower::Float64
     sigma_upper::Float64
     rho::Int
     rho_lower::Float64
     rho_upper::Float64
-    log_inv_scale::Float64
-    # The `phi` cell a `theta` cell is centred on, numbered from `phi_offset + 1`
-    # (`_adaptive_car_cell`); 0 for a `phi` cell or an island.
+    # A `theta` cell's location `intercept + sigma * sqrt(rho / s_c) * phi`: the
+    # area's `phi` coordinate (0 for an island or a `phi` cell), `log(1 / s_c)`
+    # of its component, and the intercept coordinate (0 when there is none).
     phi::Int
-    # The intercept coordinate a `theta` cell's location adds; 0 for a `phi` cell.
+    log_inv_scale::Float64
     intercept::Int
 end
 
-function _adaptive_car_cell(block::_CARAdaptiveCenteringBlock, cell::Int,
-                            phi_offset::Int=0)
-    n = length(block.structured)
+function _adaptive_car_cell(block::_CARAdaptiveCenteringBlock, cell::Int)
     hyper = (block.sigma, block.sigma_lower, block.sigma_upper,
              block.rho, block.rho_lower, block.rho_upper)
-    if cell <= n
-        return _CARAdaptiveCell(block.structured[cell], block.bym2 ? 1 : 0, hyper...,
-                                block.log_inv_scale[cell], 0, 0)
-    end
-    j = block.struct_idx[cell - n]
-    _CARAdaptiveCell(block.unstructured[cell - n], j > 0 ? 2 : 0, hyper..., 0.0,
-                     j > 0 ? phi_offset + j : 0, block.intercept)
+    block.bym2 || return _CARAdaptiveCell(block.structured[cell], false, hyper...,
+                                          0, 0.0, 0)
+    j = block.struct_idx[cell]
+    j == 0 && return _CARAdaptiveCell(block.unstructured[cell], false, hyper...,
+                                      0, 0.0, block.intercept)
+    _CARAdaptiveCell(block.unstructured[cell], true, hyper..., block.structured[j],
+                     block.log_inv_scale[j], block.intercept)
 end
 _adaptive_car_index(block::_CARAdaptiveCenteringBlock, cell::Int) =
     _adaptive_car_cell(block, cell).index
-_adaptive_car_phi_cell(block::_CARAdaptiveCenteringBlock, cell::Int) =
-    _adaptive_car_cell(block, cell).phi
 
 # `(log(rho), log(1 - rho))` of a share declared on `[lower, upper]` inside
 # `[0, 1]`, through Stan's `lub_constrain`. An end at 0 or 1 is taken in closed
 # form, `log(inv_logit(x)) == -softplus(-x)`, so neither log reaches `-Inf` as
 # the share approaches that end.
-function _adaptive_car_log_shares(x, lower, upper)
+@inline function _adaptive_car_log_shares(x, lower, upper)
     rho = _adaptive_constrain(x, lower, upper)
     log_rho = iszero(lower) ? log(upper) - _adaptive_softplus(-x) : log(rho)
     log1m_rho = isone(upper) ? log(upper - lower) - _adaptive_softplus(x) :
@@ -1835,17 +1834,30 @@ function _adaptive_car_log_shares(x, lower, upper)
     log_rho, log1m_rho
 end
 
-function _adaptive_car_log_scale(x::AbstractVector, cell::_CARAdaptiveCell)
-    log_sigma = log(_adaptive_constrain(x[cell.sigma], cell.sigma_lower,
-                                        cell.sigma_upper))
-    cell.share == 0 && return log_sigma
-    log_rho, log1m_rho = _adaptive_car_log_shares(x[cell.rho], cell.rho_lower,
-                                                  cell.rho_upper)
-    cell.share == 1 ? log_sigma + (log_rho + cell.log_inv_scale) / 2 :
-        log_sigma + log1m_rho / 2
+@inline _adaptive_car_log_sigma(x::AbstractVector, cell::_CARAdaptiveCell) =
+    log(_adaptive_constrain(x[cell.sigma], cell.sigma_lower, cell.sigma_upper))
+
+@inline function _adaptive_car_log_scale(x::AbstractVector, cell::_CARAdaptiveCell)
+    log_sigma = _adaptive_car_log_sigma(x, cell)
+    cell.share || return log_sigma
+    _, log1m_rho = _adaptive_car_log_shares(x[cell.rho], cell.rho_lower, cell.rho_upper)
+    log_sigma + log1m_rho / 2
 end
 _adaptive_car_log_scale(x::AbstractVector, block::_CARAdaptiveCenteringBlock,
                         cell::Int) = _adaptive_car_log_scale(x, _adaptive_car_cell(block, cell))
+
+# A cell's location: 0 for a `phi` cell, the intercept plus the area's spatial
+# component for a `theta` cell. It reads only coordinates no cell rewrites, so it
+# is the same in every frame.
+@inline function _adaptive_car_location(x::AbstractVector, cell::_CARAdaptiveCell)
+    m = cell.intercept == 0 ? zero(eltype(x)) : x[cell.intercept]
+    cell.phi == 0 && return m
+    log_rho, _ = _adaptive_car_log_shares(x[cell.rho], cell.rho_lower, cell.rho_upper)
+    m + exp(_adaptive_car_log_sigma(x, cell) + (log_rho + cell.log_inv_scale) / 2) *
+        x[cell.phi]
+end
+_adaptive_car_location(x::AbstractVector, block::_CARAdaptiveCenteringBlock,
+                       cell::Int) = _adaptive_car_location(x, _adaptive_car_cell(block, cell))
 
 """
     _adaptive_car_centering_blocks(model, unc_names)
@@ -1855,11 +1867,12 @@ Resolve the compiled coordinates and frozen graph numbering of every
 
 This is the backend-internal companion to [`adaptive_centering_blocks`](@ref),
 following the same descriptor-to-declaration route as
-[`_adaptive_cdar_centering_blocks`](@ref). Each area with neighbours has one
-`phi` cell (location 0, scale `sigma * sqrt(rho / s_c)`, or `sigma` under
-`:icar`); under `:bym2` each area also has one `theta` cell with scale
-`sigma * sqrt(1 - rho)` (`sigma` for an island) and location `sigma *
-sqrt(rho / s_c) * phi`, its spatial component. The marginal SD may be
+[`_adaptive_cdar_centering_blocks`](@ref). Under `:icar` each area with
+neighbours has one `phi` cell (location 0, scale `sigma`); under `:bym2` each
+area has one `theta` cell with scale `sigma * sqrt(1 - rho)` (`sigma` for an
+island) and location `intercept + sigma * sqrt(rho / s_c) * phi`, the
+predictor's intercept plus the area's spatial component, so its `c=1`
+coordinate is the area's total. The marginal SD may be
 `<lower=a>` or `<lower=a, upper=b>` and the mixing share any declared interval
 inside `[0, 1]`. The metadata is fail-closed: a missing or misnumbered
 `struct_idx`, a non-positive scaling factor, a share interval leaving `[0, 1]`
@@ -1998,8 +2011,8 @@ end
 # intercept along the direction `(intercept + d, b .- d)`, which a likelihood
 # that pins each area's total does not resolve. An intercept absorbed into exact
 # totals, or one declared with bounds (its coordinate is then not the value), is
-# not read. `phi` cells are not centred on it: the ICAR's sum-to-zero already
-# separates the field from the intercept.
+# not read. `:icar` `phi` cells are not centred on it: the ICAR's sum-to-zero
+# already separates the field from the intercept.
 function _adaptive_car_intercept(descriptor, logical, unc_names)
     :Intercept in popcoefnames(descriptor.plan.parent, logical) || return 0
     resolved = brm_population_effect_coordinates(descriptor, logical, unc_names;
@@ -2105,8 +2118,9 @@ position in the group's current triangular order: `term` itself under
 `ranef_order=:declared`, the learned position under `ranef_order=:learned`.
 HSGP and cdar rows carry `binding`, `margin = (; predictor, coefficient=term)`
 and `term` (the basis or walk cell). Car rows carry `binding`, `margin`, `level`
-(the area's label) and `term`: 1 for the area's structured `phi` cell, 2 for its
-unstructured BYM2 `theta` cell. Fields that do not apply are `nothing`.
+(the area's label) and `term`: 1 for an `:icar` area's structured `phi` cell, 2
+for a `:bym2` area's unstructured `theta` cell. Fields that do not apply are
+`nothing`.
 
 Read it after warm-up from the same object the sampler adapted, for example a
 single-chain `adaptive_warmup_mcmc` run; samplers that copy their density per

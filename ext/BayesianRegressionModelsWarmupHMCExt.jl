@@ -513,24 +513,24 @@ function _scalar_centering_reparametrizer(indices,scales,locations,targets)
     state,WarmupHMC.IndexedReparametrization(pairs)
 end
 
-# Areal car cells (`BRM._adaptive_car_centering_blocks`): per block its `phi`
-# cells, then (`:bym2`) one `theta` cell per area. A `theta` cell is centred on
-# its area's spatial component `a * phi`, which its location accessor reads off
-# the `phi` cell's SOURCE coordinate, so every `phi` pair precedes the `theta`
-# pairs that read it (WarmupHMC inverts in pair order). Like HSGP and cdar
-# cells they keep their own state and argument types, away from the ordinary
-# K<=2 Enzyme dispatch. Their accessors read only `cells`, a flat table of
-# isbits `BRM._CARAdaptiveCell`s. A first version that read the blocks from the
-# joint wrapper's accessor aborted `test/adaptive_centering_threads.jl` with
-# "GC error (probable corruption)" in its `joint` case, which has no car cell at
-# all (Julia 1.10.12, Enzyme 0.13.216; base passed the same gate); with this
-# table every case passes. `blocks`, `pair_blocks` and `pair_cells` serve only
-# the controls report.
+# Areal car cells (`BRM._adaptive_car_centering_blocks`): per block its `:icar`
+# `phi` cells or its `:bym2` `theta` cells, one per area. A `theta` cell is
+# centred on its area's total `intercept + a * phi`, read from coordinates no
+# cell rewrites (`phi` stays the emitted standardized coordinate), so the cells
+# are independent and map in any order. Like HSGP and cdar cells they keep their
+# own state and argument types, away from the ordinary K<=2 Enzyme dispatch.
+# Their accessors read only `cells`, a flat table of isbits
+# `BRM._CARAdaptiveCell`s, and never `sources`. A first version that read the
+# blocks from the joint wrapper's accessor aborted
+# `test/adaptive_centering_threads.jl` with "GC error (probable corruption)" in
+# its `joint` case, which has no car cell at all (Julia 1.10.12, Enzyme
+# 0.13.216; base passed the same gate), and so did accessors that pass a cell to
+# an outlined call: every one here is `@inline` (`BRM._CARAdaptiveCell`).
+# `blocks`, `pair_blocks` and `pair_cells` serve only the controls report.
 mutable struct BRMCARAdaptiveCenteringState
     blocks::Vector{BRM._CARAdaptiveCenteringBlock}
     pair_blocks::Vector{Int}
     pair_cells::Vector{Int}
-    # Per pair; a `theta` cell's `phi` is the pair number it is centred on.
     cells::Vector{BRM._CARAdaptiveCell}
     sources::Vector{Float64}
     effect_indices::BitSet
@@ -539,13 +539,10 @@ end
 function BRMCARAdaptiveCenteringState(blocks)
     pair_blocks, pair_cells = Int[], Int[]
     cells = BRM._CARAdaptiveCell[]
-    for (bi, block) in enumerate(blocks)
-        offset = length(cells)
-        for cell in 1:BRM._adaptive_car_n_cells(block)
-            push!(pair_blocks, bi)
-            push!(pair_cells, cell)
-            push!(cells, BRM._adaptive_car_cell(block, cell, offset))
-        end
+    for (bi, block) in enumerate(blocks), cell in 1:BRM._adaptive_car_n_cells(block)
+        push!(pair_blocks, bi)
+        push!(pair_cells, cell)
+        push!(cells, BRM._adaptive_car_cell(block, cell))
     end
     effect_indices = BitSet(c.index for c in cells)
     BRMCARAdaptiveCenteringState(collect(blocks), pair_blocks, pair_cells, cells,
@@ -554,31 +551,8 @@ end
 
 _car_pair_location(state, p) = (state.pair_blocks[p], state.pair_cells[p])
 _car_pair_index(state, p) = state.cells[p].index
-_car_log_scale(x, state, p) = BRM._adaptive_car_log_scale(x, state.cells[p])
-
-# The spatial component `a * phi` of `phi` pair `q`, with `phi` recovered from
-# its coordinate `x[idx] = a^c * phi` in the frame `c`.
-function _car_spatial(x, state, q, c)
-    cell = state.cells[q]
-    log_a = BRM._adaptive_car_log_scale(x, cell)
-    exp(log_a) * (x[cell.index] * exp(-c * log_a))
-end
-
-# Pair `p`'s location in the source frame (its accessors read source
-# coordinates): for a `theta` cell, the intercept plus its area's spatial
-# component; 0 for a `phi` cell.
-function _car_location(x, state, p)
-    _car_theta_location(x, state, p, state.cells[p].phi == 0 ? 0.0 :
-                        state.sources[state.cells[p].phi])
-end
-
-# The same with the `phi` cell's frame `c` given (the learned-order map reads
-# either frame).
-function _car_theta_location(x, state, p, c)
-    cell = state.cells[p]
-    m = cell.intercept == 0 ? zero(eltype(x)) : x[cell.intercept]
-    cell.phi == 0 ? m : m + _car_spatial(x, state, cell.phi, c)
-end
+@inline _car_log_scale(x, state, p) = BRM._adaptive_car_log_scale(x, state.cells[p])
+@inline _car_location(x, state, p) = BRM._adaptive_car_location(x, state.cells[p])
 
 struct BRMCARAdaptiveCenteringArgument{KIND} <: Function
     state::BRMCARAdaptiveCenteringState
@@ -618,14 +592,13 @@ function _prepare_frame(state::BRMCARAdaptiveCenteringState, ir, position, gradi
     _centering_frame(state, position, gradient)
 end
 
-# The triangular frame of each area: `x_phi = a^c_phi * phi` and
-# `x_theta = c_theta * a * phi + s^c_theta * theta`, so the innovation gradient
-# `h = A(c)' * g` adds `c_theta * a * g_theta` to the `phi` innovation.
+# Each cell's frame `x = c * m + s^c * z`: its location `m` and scale `s` read
+# coordinates no cell rewrites, so the innovation gradient is `s^c * g`.
 function _centering_frame(state::BRMCARAdaptiveCenteringState, position, gradient)
     T = promote_type(eltype(position), eltype(gradient), Float64)
     n = length(state.sources)
     source = T.(state.sources)
-    location = zeros(T, n)
+    location = Vector{T}(undef, n)
     scale = Vector{T}(undef, n)
     innovation = Vector{T}(undef, n)
     invariant_gradient = Vector{T}(undef, n)
@@ -633,17 +606,11 @@ function _centering_frame(state::BRMCARAdaptiveCenteringState, position, gradien
         idx = _car_pair_index(state, p)
         c = source[p]
         s = exp(_car_log_scale(position, state, p))
-        q = state.cells[p].phi
-        m = convert(T, _car_theta_location(position, state, p, q == 0 ? 0.0 : source[q]))
+        m = convert(T, _car_location(position, state, p))
         scale[p] = s
         location[p] = m
         innovation[p] = (position[idx] - c * m) / s^c
         invariant_gradient[p] = s^c * gradient[idx]
-    end
-    for p in 1:n
-        q = state.cells[p].phi
-        q == 0 && continue
-        invariant_gradient[q] += source[p] * scale[q] * gradient[_car_pair_index(state, p)]
     end
     BRMAdaptiveCenteringFrame(
         source, location, scale, innovation, invariant_gradient,
@@ -811,11 +778,12 @@ function _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells,
         "ambiguous transform.",
     )
     for block in car_blocks
-        reads = filter(!=(0), [block.sigma, block.rho, block.intercept])
+        reads = filter(!=(0), vcat(block.sigma, block.rho, block.intercept,
+                                   block.bym2 ? block.structured : Int[]))
         isdisjoint(reads, union(effects...)) || error(
-            "BRM joint adaptive centering: car `$(block.term)` reads its scale " *
-            "or intercept from a coordinate another cell rewrites; refusing an " *
-            "inexact transform.")
+            "BRM joint adaptive centering: car `$(block.term)` reads its scale, " *
+            "intercept or `phi` from a coordinate another cell rewrites; refusing " *
+            "an inexact transform.")
     end
     for block in r2d2_blocks, s in block.scales
         isdisjoint(BRM._adaptive_scale_coordinates(s), car_state.effect_indices) ||
@@ -843,8 +811,8 @@ function _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells,
     # checkpoint/resume (positional restore): ordinary cells first, then R2D2
     # cells, each in the family's own block/group/term order, then HSGP
     # basis-weight cells, then scalar total and S2Z cells
-    # (`_scalar_centering_cells` order), then car cells (per block, `phi`
-    # before `theta`).
+    # (`_scalar_centering_cells` order), then car cells (per block, in
+    # `_adaptive_car_cell` order).
     ranef_state = BRMR2D2AdaptiveCenteringState(vcat(
         BRM.R2D2AdaptiveCenteringBlock[_derived_scale_block(b) for b in blocks],
         r2d2_blocks,
@@ -1313,20 +1281,13 @@ function WarmupHMC.with_logabsdet_jacobian!(y::AbstractVector,
 end
 
 # Car cells inside the learned-order wrapper; `targets[offset + p]` is car pair
-# `p`'s compiled frame. A `theta` cell's location is its area's spatial
-# component, recovered from the `phi` coordinate in the frame `x` is in (the
-# source controls forward, the compiled ones inverse). The `theta` cells that
-# read a `phi` coordinate map in the first pass and every other cell in the
-# second, so each `phi` value is read before it is written even when `y === x`.
+# `p`'s compiled frame. Every location and scale reads coordinates no cell
+# rewrites, so the cells map in any order, even when `y === x`.
 function _ordered_car_map!(y, x, state::BRMCARAdaptiveCenteringState, targets,
                            offset, direction)
     ljac = zero(eltype(x))
-    for reads_phi in (true, false), p in eachindex(state.sources)
-        q = state.cells[p].phi
-        (q > 0) == reads_phi || continue
-        location = _car_theta_location(x, state, p, q == 0 ? 0.0 :
-            direction > 0 ? state.sources[q] : targets[offset + q])
-        ljac += _cell_map!(y, x, _car_pair_index(state, p), location,
+    for p in eachindex(state.sources)
+        ljac += _cell_map!(y, x, _car_pair_index(state, p), _car_location(x, state, p),
             _car_log_scale(x, state, p), targets[offset + p], state.sources[p],
             direction)
     end
@@ -1862,14 +1823,14 @@ re-derived from the `R2`, Dirichlet share and reference/total-scale coordinates
 on every evaluation (see [`adaptive_centering_blocks`](@ref)). Those
 coordinates are read, never transformed, so the wrapped density stays exact.
 
-For a `car(area; edges, type)` field, every area is a triangular pair of cells,
-like one group of a two-margin block. Its `phi` cell (areas with neighbours)
-has location 0 and scale `a = sigma * sqrt(rho / s_c)` (`sigma` for `:icar`);
-under `:bym2` its `theta` cell has scale `sigma * sqrt(1 - rho)` (`sigma` for
-an island) and location `a * phi`. `c=0` is the emitted standardized `phi` /
-`theta`; `c=1` is the spatial component `a * phi` and the area's total effect,
-`effects[k]`. Car cells follow every other joint cell in the pair order, each
-block's `phi` cells before its `theta` cells.
+For a `car(area; edges, type)` field, every area is one cell. Under `:icar` it
+is the area's `phi` (areas with neighbours): location 0, scale `sigma`, so
+`c=1` is its effect `effects[k]`. Under `:bym2` it is the area's `theta`:
+scale `sigma * sqrt(1 - rho)` (`sigma` for an island) and location
+`intercept + sigma * sqrt(rho / s_c) * phi`, so `c=1` is the area's total
+`intercept + effects[k]`; `phi` stays the emitted standardized coordinate.
+`c=0` is the emitted frame. Car cells follow every other joint cell in the pair
+order: `:icar` cells in emitted `phi` order, `:bym2` cells in sorted area order.
 
 For a `cdar` walk, each of the `P * W` innovations is one scalar cell with
 zero location and its marginal prior spread
@@ -2080,19 +2041,18 @@ function _control_rows!(rows, state::BRMCDARAdaptiveCenteringState, _, offset, v
     offset + length(state.sources)
 end
 
-# `term` is 1 for an area's structured `phi` cell and 2 for its unstructured
-# `theta` cell, its position in the area's triangular pair.
+# `term` is 1 for an `:icar` area's structured `phi` cell and 2 for a `:bym2`
+# area's unstructured `theta` cell, the field's position in the emitted law.
 function _control_rows!(rows, state::BRMCARAdaptiveCenteringState, _, offset, values,
                         names, _)
     controls, targets = values
     for p in eachindex(state.sources)
         bi, cell = _car_pair_location(state, p)
         block = state.blocks[bi]
-        structured = BRM._adaptive_car_structured(block, cell)
         push!(rows, _control_row(offset + p, BRM._adaptive_car_index(block, cell),
             names, :car; binding=block.logical, margin=(; predictor=block.logical,
             coefficient=block.term), level=block.areas[BRM._adaptive_car_area(block, cell)],
-            term=structured ? 1 : 2, c=controls[offset + p], target=targets[offset + p]))
+            term=block.bym2 ? 2 : 1, c=controls[offset + p], target=targets[offset + p]))
     end
     offset + length(state.sources)
 end

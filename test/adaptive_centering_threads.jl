@@ -2,9 +2,10 @@
 # reparametrizers, the learned-order wrapper included. On Julia 1.10, Enzyme's
 # reverse pass corrupts Julia's GC once another thread collects while a
 # differentiated accessor allocates a heap work vector, reads a struct holding
-# vectors inside its row loop, or reaches two
+# vectors inside its row loop, reaches two
 # `_block_location` instantiations (see `_block_location` in
-# BayesianRegressionModelsWarmupHMCExt). Completion and multi-chain workers do
+# BayesianRegressionModelsWarmupHMCExt), or passes a car cell to an outlined
+# call (see `BRM._CARAdaptiveCell`). Completion and multi-chain workers do
 # exactly that; `threaded_gradient_stress.jl` runs the stress in a child Julia.
 #
 #     julia --project=test test/adaptive_centering_threads.jl
@@ -129,8 +130,8 @@ function _cdar_problem()
     _with_controls(AC_EXT._adaptive_cdar_centering_reparametrizer([block])..., P * W + 2)
 end
 
-# Areal car cells: a BYM2 field over 7 areas (two components and an island,
-# whose `theta` cells read their intercept and `phi` cell's coordinates) and an
+# Areal car cells: a BYM2 field over 7 areas (two components and an island;
+# its `theta` cells read the intercept and their area's `phi` coordinate) and an
 # ICAR field.
 # `offset` shifts every coordinate past another family's.
 function _car_blocks(offset=0)
