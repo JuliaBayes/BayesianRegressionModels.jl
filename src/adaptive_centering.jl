@@ -1,6 +1,7 @@
 # Adaptive partial centering for ordinary and R2D2-scaled random-effect blocks,
-# ungrouped and grouped squared-exponential HSGP basis weights, and ungrouped
-# periodic HSGP cosine/sine weights.
+# ungrouped and grouped squared-exponential HSGP basis weights, ungrouped
+# periodic HSGP cosine/sine weights, cdar walk innovations and areal `car`
+# fields.
 #
 # This file owns only BRM/Stan emission semantics: which unconstrained
 # coordinates are one block's effects, optional LKJ-Cholesky free values, and
@@ -445,7 +446,7 @@ function _adaptive_r2d2_context(model, pos)
     for lhs in ambiguous
         delete!(assignments, lhs)
     end
-    (; plan, data=plan.data, parameters, assignments, ambiguous, pos)
+    (; descriptor, plan, data=plan.data, parameters, assignments, ambiguous, pos)
 end
 
 # Accumulates `w * log(expr)` while compiling; `_adaptive_log_scale_program`
@@ -483,9 +484,15 @@ function _adaptive_scalar_constraint(ctx, owner, o::BRMOutput)
         "BRM adaptive centering: R2D2 block `$owner` reads `$(o.name)`, whose ",
         "Stan type carries $(Tuple(extra)); only lower/upper bounds are ",
         "supported.")
-    bound(key) = haskey(o.constraints, key) ?
-        Float64(_adaptive_constraint_value(ctx.plan, o.constraints[key],
-                                           owner, "R2D2 scale input")) : nothing
+    function bound(key)
+        haskey(o.constraints, key) || return nothing
+        value = _brm_constraint_value(ctx.descriptor, o, key)
+        value isa Real || error(
+            "BRM adaptive centering: R2D2 block `$owner` reads `$(o.name)`, ",
+            "whose `$key` bound `$(o.constraints[key])` is not one number ",
+            "fixed by the data.")
+        Float64(value)
+    end
     (bound(:lower), bound(:upper))
 end
 
@@ -708,8 +715,10 @@ end
 # `adaptive_centering_blocks` builds: R2D2 blocks are never centered, so the
 # replay caller never reaches one. A known-value block needs its binding
 # record `known` (`_adaptive_known_record`), which carries the known values.
+# `effects` lets the replay caller pass a Student-t block's own effect
+# coordinates with its Gaussian family's frame.
 function _adaptive_block(ranef::RanefBlock, unc_names, pos; r2d2=nothing,
-                         known=nothing)
+                         known=nothing, effects=nothing)
     ranef.family in _ADAPTIVE_STRATIFIED_FAMILIES && error(
         "BRM adaptive centering: stratified block `$(ranef.binding)` ",
         "(`$(ranef.family)`, group `$(ranef.group)`, by `$(ranef.by)`) is ",
@@ -717,6 +726,10 @@ function _adaptive_block(ranef::RanefBlock, unc_names, pos; r2d2=nothing,
         "Cholesky/scale frame per stratum and must not be treated as an ",
         "ordinary single-frame block.",
     )
+    # A Student-t block scales each level's factor by `sqrt(w[g])`, which
+    # neither block type models: it keeps its compiled parameterization, with
+    # or without known values (todo `16jywsl`).
+    haskey(get(_RANEF_FAMILIES, ranef.family, (;)), :mixing) && return nothing
     if get(get(_RANEF_FAMILIES, ranef.family, (;)), :known, false)
         isnothing(known) && error(
             "BRM adaptive centering: known-value block `$(ranef.binding)` ",
@@ -745,7 +758,7 @@ function _adaptive_block(ranef::RanefBlock, unc_names, pos; r2d2=nothing,
     AdaptiveCenteringBlock(
         ranef,
         target_c,
-        ranef_coordinates(ranef, unc_names),
+        isnothing(effects) ? ranef_coordinates(ranef, unc_names) : effects,
         _adaptive_named_indices(pos, cholesky_names, binding, "Cholesky"),
         _adaptive_named_indices(pos, scale_names, binding, "scale"),
     )
@@ -837,7 +850,11 @@ sampling geometry under an adapted diagonal metric.
 
 Stratified `gr(g, by=b)` blocks currently raise rather than being silently
 left fixed: they carry one `L,tau` frame per stratum and need a separate indexed
-metadata contract. Intercept-only `(1 | mm(...))` blocks adapt through the
+metadata contract. Student-t blocks (`ranef(:, ID) ~ TDist(nu)`), with or
+without known values, are not described yet: each level's factor is
+`sqrt(w[g]) * C`, which neither block type models, so such a block keeps its
+compiled parameterization (non-centered, or centered under `centered_groups`)
+while the model's other blocks adapt (todo `16jywsl`). Intercept-only `(1 | mm(...))` blocks adapt through the
 ordinary scalar path (their downstream gather is linear); an `mm` block with
 any slope term, including a slope-only `(0 + x | mm(...))`, shares the ordinary
 correlated emission and adapts with it.
@@ -938,35 +955,39 @@ _adaptive_stan_expr_value(x::StanBlocks.StanExpr) =
     _adaptive_stan_expr_value(x.expr)
 _adaptive_stan_expr_value(x) = x
 
-# A declared constraint's value: a literal, the compiler-owned data value a
-# bare symbol names, or the `fmax`/`fmin` sbimpl writes where an explicit bound
-# meets a structural one (`_sb_bound_intersection`): a positive scale with
-# `truncated(D; lower=length_scale_floor)`, a data scalar or a constant as its
-# lower end declares `<lower=fmax(0.0, ...)>`. That intersection is evaluated
-# over the same values, elementwise for a vector bound as in Stan. Anything
-# else is returned unevaluated for the caller to refuse. Shared by adaptive
-# centering and `parameter_draws`.
-_adaptive_constraint_value(plan, raw, owner, role) =
-    _adaptive_constraint_eval(plan, _adaptive_stan_expr_value(raw), owner, role)
+# A declared constraint's value. StanBlocks evaluates every output's
+# `constraints` against the model's current data as `constraint_values`
+# (StanBlocks b233afbc, stanblocks-use §30), with Stan's semantics: a literal,
+# a data value, the `fmax`/`fmin` sbimpl writes where an explicit bound meets a
+# structural one (`_sb_bound_intersection`), arithmetic over data, and one
+# entry per coordinate for a per-coordinate bound (an anisotropic term's
+# `fmax(0.0, rho_lower_…)`, elementwise since StanBlocks c7293b88). A bound
+# that reads a parameter has no value without a draw and comes back `nothing`
+# for the caller to refuse. A descriptor without a Stan view (Turing) declares
+# its bounds as numbers already. A caller holding only the `GenerativePlan`
+# gets the view from its model, at the cost of one more `stan_descriptor`.
+# Shared by adaptive centering and `parameter_draws`.
+_brm_stan_view(d) = d.stan
+_brm_stan_view(plan::GenerativePlan) =
+    Base.invokelatest(StanBlocks.stan_descriptor, plan.model)
 
-_adaptive_constraint_eval(plan, value, owner, role) = value
-function _adaptive_constraint_eval(plan, value::Symbol, owner, role)
-    haskey(plan.data, value) || error(
-        "BRM: `$owner` $role constraint refers to " *
-        "compiler-owned data `$value`, but the generative plan does not " *
-        "carry that value.",
+function _brm_constraint_value(d, output::BRMOutput, key::Symbol)
+    raw = output.constraints[key]
+    view = _brm_stan_view(d)
+    isnothing(view) && return raw
+    i = findfirst(o -> o.name === output.name, view.outputs)
+    isnothing(i) && error(
+        "BRM: output `$(output.name)` is not in the descriptor's StanBlocks " *
+        "view, so its `$key` bound cannot be read.",
     )
-    plan.data[value]
+    stan = view.outputs[i]
+    hasproperty(stan, :constraint_values) || error(
+        "BRM: reading the `$key` bound of `$(output.name)` needs StanBlocks' " *
+        "`ModelOutput.constraint_values` (StanBlocks b233afbc or later); the " *
+        "loaded StanBlocks predates it.",
+    )
+    getproperty(stan, :constraint_values)[key]
 end
-for (f, op) in ((StanBlocks.stan.builtin.fmax, max), (StanBlocks.stan.builtin.fmin, min))
-    @eval function _adaptive_constraint_eval(
-            plan, x::StanBlocks.CanonicalExpr{typeof($f)}, owner, role)
-        a, b = map(arg -> _adaptive_constraint_value(plan, arg, owner, role), x.args)
-        _adaptive_numeric_bound(a) && _adaptive_numeric_bound(b) ?
-            broadcast($op, a, b) : x
-    end
-end
-_adaptive_numeric_bound(x) = x isa Real || x isa AbstractArray{<:Real}
 
 # The scalar hyperparameters an adaptive cell's spread reads (HSGP length
 # scales and marginal SDs, cdar marginal SDs and persistences) are declared by
@@ -975,11 +996,11 @@ _adaptive_numeric_bound(x) = x isa Real || x isa AbstractArray{<:Real}
 # two-sided `truncated` prior, see `_sb_gp_scale_prior` / `_sb_dar_ar_prior`,
 # and every cdar persistence). Both are Stan's ordinary scalar transforms, so
 # the physical value is a closed-form function of the unconstrained
-# coordinate, reproduced by `_adaptive_constrain`. Each end is a constant
-# (`_adaptive_constraint_value`). An absent upper bound reads as `Inf`. A
-# declaration without a finite lower bound, or with an offset/multiplier, still
-# raises.
-function _adaptive_bounds(plan, output::BRMOutput, n::Int, owner, role)
+# coordinate, reproduced by `_adaptive_constrain`. Each end is fixed by the
+# data (`_brm_constraint_value`). An absent upper bound reads as `Inf`. A
+# declaration without a finite lower bound, with an offset/multiplier, or with a
+# bound that reads a parameter still raises.
+function _adaptive_bounds(descriptor, output::BRMOutput, n::Int, owner, role)
     constraints = output.constraints
     unsupported = setdiff(collect(keys(constraints)), [:lower, :upper])
     isempty(unsupported) || error(
@@ -992,9 +1013,9 @@ function _adaptive_bounds(plan, output::BRMOutput, n::Int, owner, role)
         "BRM adaptive centering: `$owner` $role is not lower-bounded; " *
         "the compiled unconstrained-to-physical transform is unsupported.",
     )
-    lower = _adaptive_bound_values(plan, constraints.lower, n, owner, role, "lower")
+    lower = _adaptive_bound_values(descriptor, output, :lower, n, owner, role)
     upper = haskey(constraints, :upper) ?
-        _adaptive_bound_values(plan, constraints.upper, n, owner, role, "upper") :
+        _adaptive_bound_values(descriptor, output, :upper, n, owner, role) :
         fill(Inf, n)
     all(lower .< upper) || error(
         "BRM adaptive centering: `$owner` $role has lower bounds $lower not " *
@@ -1003,13 +1024,13 @@ function _adaptive_bounds(plan, output::BRMOutput, n::Int, owner, role)
     lower, upper
 end
 
-function _adaptive_bound_values(plan, raw, n::Int, owner, role, side)
-    value = _adaptive_constraint_value(plan, raw, owner, role)
-    _adaptive_numeric_bound(value) || error(
-        "BRM adaptive centering: `$owner` $role has the $side bound `$raw`, " *
-        "which is computed from other values; this contract reads a literal, " *
-        "compiler-owned data (a data scalar, a constant or `length_scale_floor`) " *
-        "or the `fmax`/`fmin` that intersects them with a structural bound.",
+function _adaptive_bound_values(descriptor, output::BRMOutput, side::Symbol,
+                                n::Int, owner, role)
+    value = _brm_constraint_value(descriptor, output, side)
+    value isa Real || value isa AbstractArray{<:Real} || error(
+        "BRM adaptive centering: `$owner` $role has the $side bound " *
+        "`$(output.constraints[side])`, which reads a parameter; this contract " *
+        "needs a bound fixed by the data.",
     )
     values = value isa Real ? fill(Float64(value), n) : collect(Float64, value)
     length(values) == n || error(
@@ -1059,6 +1080,9 @@ end
 _adaptive_term_generated(::Any, descriptor, logical, entry) = false
 _adaptive_term_generated(::typeof(cdar), descriptor, logical, entry) =
     _brm_term_parameter_output(descriptor, logical, entry, :innovations).kind ===
+        :generated_quantity
+_adaptive_term_generated(::typeof(car), descriptor, logical, entry) =
+    _brm_term_parameter_output(descriptor, logical, entry, :structured).kind ===
         :generated_quantity
 function _adaptive_term_generated(::typeof(hsgp), descriptor, logical, entry)
     kw = getkwargs(entry.value)
@@ -1190,11 +1214,11 @@ function _adaptive_hsgp_centering_blocks(model, unc_names)
                 length(weights.coordinates), length(rho.coordinates))
 
             rho_lower, rho_upper = _adaptive_bounds(
-                plan, rho.output, length(rho.coordinates), entry.term,
+                descriptor, rho.output, length(rho.coordinates), entry.term,
                 "length scale",
             )
             sigma_lower, sigma_upper = only.(_adaptive_bounds(
-                plan, sigma.output, 1, entry.term, "marginal SD",
+                descriptor, sigma.output, 1, entry.term, "marginal SD",
             ))
             push!(out, _HSGPAdaptiveCenteringBlock(
                 logical, entry.term,
@@ -1314,11 +1338,11 @@ function _adaptive_periodic_hsgp_block!(
     )
 
     rho_lower, rho_upper = _adaptive_bounds(
-        plan, rho.output, length(rho.coordinates), entry.term,
+        descriptor, rho.output, length(rho.coordinates), entry.term,
         "length scale",
     )
     sigma_lower, sigma_upper = only.(_adaptive_bounds(
-        plan, sigma.output, 1, entry.term, "marginal SD",
+        descriptor, sigma.output, 1, entry.term, "marginal SD",
     ))
     target_c = _brm_hsgp_centeredness(kw, n_weights)
     all(iszero, target_c) || error(
@@ -1415,11 +1439,11 @@ function _adaptive_grouped_hsgp_blocks!(
         "BRM adaptive centering: grouped HSGP `$(entry.term)`",
         B, length(rho.coordinates))
     rho_lower, rho_upper = _adaptive_bounds(
-        plan, rho.output, length(rho.coordinates), entry.term,
+        descriptor, rho.output, length(rho.coordinates), entry.term,
         "length scale",
     )
     sigma_lower, sigma_upper = only.(_adaptive_bounds(
-        plan, sigma.output, 1, entry.term, "marginal SD",
+        descriptor, sigma.output, 1, entry.term, "marginal SD",
     ))
     target_c = _brm_hsgp_centeredness(kw, B)
     rho_idx = collect(rho.coordinates)
@@ -1468,7 +1492,10 @@ end
 # whose spread underflows to zero, and its candidate frames underflow and
 # overflow to NaN losses. Floored, every frame of such a weight is a fixed
 # rescaling of `z` (the non-centred geometry), and `exp(±2c * log_scale)` stays
-# a normal Float64 for every control `c`. The transform is exact for any
+# a normal Float64 for every control `c`. Because those frames cannot be told
+# apart, the HSGP scoring frame scores a floored observation in the non-centred
+# frame for every candidate, so a weight scored only on the floor keeps
+# `c = 0` (snag adaptive-centeri-eca5a77c). The transform is exact for any
 # function of coordinates it does not rewrite, so the floor moves coordinates,
 # never the posterior. Between the two bounds the softplus differs from the
 # exact value by less than `exp(-40)`; above `exp(-110)` they are identical.
@@ -1572,8 +1599,8 @@ function _adaptive_cdar_log_scale(x::AbstractVector,
     log(sigma) + 0.5 * log(block.cdiag[p]) + 0.5 * log(spread)
 end
 
-function _adaptive_cdar_rho_bounds(plan, output::BRMOutput, owner)
-    lower, upper = only.(_adaptive_bounds(plan, output, 1, owner, "persistence"))
+function _adaptive_cdar_rho_bounds(descriptor, output::BRMOutput, owner)
+    lower, upper = only.(_adaptive_bounds(descriptor, output, 1, owner, "persistence"))
     0 <= lower && upper <= 1 || error(
         "BRM adaptive centering: cdar `$owner` persistence is declared on " *
         "[$lower, $upper], outside the stationary interval [0, 1].",
@@ -1684,10 +1711,10 @@ function _adaptive_cdar_centering_blocks(model, unc_names)
             )
 
             sigma_lower, sigma_upper = only.(_adaptive_bounds(
-                plan, sigma.output, 1, entry.term, "marginal SD",
+                descriptor, sigma.output, 1, entry.term, "marginal SD",
             ))
             rho_lower, rho_upper =
-                _adaptive_cdar_rho_bounds(plan, rho.output, entry.term)
+                _adaptive_cdar_rho_bounds(descriptor, rho.output, entry.term)
             push!(out, _CDARAdaptiveCenteringBlock(
                 logical, entry.term, P, W,
                 collect(innovations.coordinates),
@@ -1709,6 +1736,314 @@ function _adaptive_cdar_centering_blocks(model, unc_names)
         "unconstrained coordinates; refusing an ambiguous transform.",
     )
     out
+end
+
+# ---- Areal car fields ---------------------------------------------------------
+#
+# `car(area; edges, type=:icar)` adds `sigma * phi[struct_idx[k]]` for area `k`,
+# `type=:bym2` adds `b[k] = a_k * phi[struct_idx[k]] + s_k * theta[k]` with
+# `a_k = sigma * sqrt(rho / s_c)` and `s_k = sigma * sqrt(1 - rho)` (an island,
+# `struct_idx[k] == 0`, has `b[k] = sigma * theta[k]`), see `_sb_car_bym2`.
+# Both `phi` and `theta` are emitted standardized, so the compiled frame is
+# `c=0` throughout. Under `:icar` every area with neighbours is one cell, its
+# `phi` (location 0, scale `sigma`), so `c=1` is its effect `sigma * phi`; the
+# ICAR density couples neighbouring cells, which leaves the transform exact: it
+# only rescales each `phi` coordinate. Under `:bym2` every area is one cell, its
+# `theta` (scale `s_k`, location `intercept + a_k * phi`, see
+# `_adaptive_car_intercept`), so `c=1` is the area's total `intercept + b[k]`
+# (Gelfand, Sahu and Carlin 1995), and `phi` stays the emitted coordinate. A
+# BYM2 `phi` cell would be centred on `a_k`, which vanishes with `rho`: on a
+# mostly unstructured field the per-cell score partly centred such cells, and
+# the funnel they opened at `rho -> 0` stopped a chain (910 of 1000 draws
+# divergent), while keeping `phi` standardized mixed `rho` better in both
+# regimes measured.
+
+struct _CARAdaptiveCenteringBlock
+    logical::Symbol
+    term::Symbol
+    bym2::Bool
+    # `phi` unconstrained indices in emitted order (areas with neighbours,
+    # component by component).
+    structured::Vector{Int}
+    # `theta` unconstrained indices, one per area in sorted label order;
+    # empty for `:icar`.
+    unstructured::Vector{Int}
+    # Per area, its position in `phi`, 0 for an island (the emitted `struct_idx`),
+    # and per `phi` position, its area.
+    struct_idx::Vector{Int}
+    phi_area::Vector{Int}
+    # Per `phi` position, `log(1 / s_c)` of its component (`:bym2`; zeros for
+    # `:icar`, whose `phi` scale is `sigma`).
+    log_inv_scale::Vector{Float64}
+    # Compiler-declared bounds (`_adaptive_bounds`); `rho` is 0 for `:icar`.
+    sigma::Int
+    sigma_lower::Float64
+    sigma_upper::Float64
+    rho::Int
+    rho_lower::Float64
+    rho_upper::Float64
+    # The predictor's sampled population intercept, which every `theta` cell's
+    # location adds (`_adaptive_car_intercept`); 0 when it has none.
+    intercept::Int
+    # The fitted graph's area labels in sorted order (`effects` order).
+    areas::Vector{Any}
+end
+
+Base.show(io::IO, b::_CARAdaptiveCenteringBlock) = print(
+    io,
+    "CARAdaptiveCenteringBlock(", b.logical, ", ", b.term, ", ",
+    b.bym2 ? ":bym2, $(length(b.unstructured)) theta cells)" :
+        ":icar, $(length(b.structured)) phi cells)",
+)
+
+# Cells of one block: under `:icar` the `phi` cells in emitted order, under
+# `:bym2` one `theta` cell per area in sorted order.
+_adaptive_car_n_cells(block::_CARAdaptiveCenteringBlock) =
+    block.bym2 ? length(block.unstructured) : length(block.structured)
+# The area of a cell, an index into `areas`.
+_adaptive_car_area(block::_CARAdaptiveCenteringBlock, cell::Int) =
+    block.bym2 ? cell : block.phi_area[cell]
+
+# One cell as plain numbers. The differentiated accessors read only a vector of
+# these, never the block: on Julia 1.10 an Enzyme reverse pass that reads a
+# struct holding vectors corrupts GC once another thread collects (see
+# `_block_location` in BayesianRegressionModelsWarmupHMCExt), and the joint
+# wrapper's accessor crashed `test/adaptive_centering_threads.jl` while its car
+# branch read the block. The accessors below are `@inline`: passing a cell to an
+# outlined call aborted that gate's car-free `joint` case the same way, with or
+# without the intercept read.
+struct _CARAdaptiveCell
+    index::Int
+    # false: scale `sigma` (an `:icar` `phi` cell, an island's `theta` cell);
+    # true: the `theta` cell of an area with neighbours, `sigma * sqrt(1 - rho)`.
+    share::Bool
+    sigma::Int
+    sigma_lower::Float64
+    sigma_upper::Float64
+    rho::Int
+    rho_lower::Float64
+    rho_upper::Float64
+    # A `theta` cell's location `intercept + sigma * sqrt(rho / s_c) * phi`: the
+    # area's `phi` coordinate (0 for an island or a `phi` cell), `log(1 / s_c)`
+    # of its component, and the intercept coordinate (0 when there is none).
+    phi::Int
+    log_inv_scale::Float64
+    intercept::Int
+end
+
+function _adaptive_car_cell(block::_CARAdaptiveCenteringBlock, cell::Int)
+    hyper = (block.sigma, block.sigma_lower, block.sigma_upper,
+             block.rho, block.rho_lower, block.rho_upper)
+    block.bym2 || return _CARAdaptiveCell(block.structured[cell], false, hyper...,
+                                          0, 0.0, 0)
+    j = block.struct_idx[cell]
+    j == 0 && return _CARAdaptiveCell(block.unstructured[cell], false, hyper...,
+                                      0, 0.0, block.intercept)
+    _CARAdaptiveCell(block.unstructured[cell], true, hyper..., block.structured[j],
+                     block.log_inv_scale[j], block.intercept)
+end
+_adaptive_car_index(block::_CARAdaptiveCenteringBlock, cell::Int) =
+    _adaptive_car_cell(block, cell).index
+
+# `(log(rho), log(1 - rho))` of a share declared on `[lower, upper]` inside
+# `[0, 1]`, through Stan's `lub_constrain`. An end at 0 or 1 is taken in closed
+# form, `log(inv_logit(x)) == -softplus(-x)`, so neither log reaches `-Inf` as
+# the share approaches that end.
+@inline function _adaptive_car_log_shares(x, lower, upper)
+    rho = _adaptive_constrain(x, lower, upper)
+    log_rho = iszero(lower) ? log(upper) - _adaptive_softplus(-x) : log(rho)
+    log1m_rho = isone(upper) ? log(upper - lower) - _adaptive_softplus(x) :
+        log1p(-rho)
+    log_rho, log1m_rho
+end
+
+@inline _adaptive_car_log_sigma(x::AbstractVector, cell::_CARAdaptiveCell) =
+    log(_adaptive_constrain(x[cell.sigma], cell.sigma_lower, cell.sigma_upper))
+
+@inline function _adaptive_car_log_scale(x::AbstractVector, cell::_CARAdaptiveCell)
+    log_sigma = _adaptive_car_log_sigma(x, cell)
+    cell.share || return log_sigma
+    _, log1m_rho = _adaptive_car_log_shares(x[cell.rho], cell.rho_lower, cell.rho_upper)
+    log_sigma + log1m_rho / 2
+end
+_adaptive_car_log_scale(x::AbstractVector, block::_CARAdaptiveCenteringBlock,
+                        cell::Int) = _adaptive_car_log_scale(x, _adaptive_car_cell(block, cell))
+
+# A cell's location: 0 for a `phi` cell, the intercept plus the area's spatial
+# component for a `theta` cell. It reads only coordinates no cell rewrites, so it
+# is the same in every frame.
+@inline function _adaptive_car_location(x::AbstractVector, cell::_CARAdaptiveCell)
+    m = cell.intercept == 0 ? zero(eltype(x)) : x[cell.intercept]
+    cell.phi == 0 && return m
+    log_rho, _ = _adaptive_car_log_shares(x[cell.rho], cell.rho_lower, cell.rho_upper)
+    m + exp(_adaptive_car_log_sigma(x, cell) + (log_rho + cell.log_inv_scale) / 2) *
+        x[cell.phi]
+end
+_adaptive_car_location(x::AbstractVector, block::_CARAdaptiveCenteringBlock,
+                       cell::Int) = _adaptive_car_location(x, _adaptive_car_cell(block, cell))
+
+"""
+    _adaptive_car_centering_blocks(model, unc_names)
+
+Resolve the compiled coordinates and frozen graph numbering of every
+`car(area; edges, type=:icar | :bym2)` term in an `SBBRMI` or `GenerativePlan`.
+
+This is the backend-internal companion to [`adaptive_centering_blocks`](@ref),
+following the same descriptor-to-declaration route as
+[`_adaptive_cdar_centering_blocks`](@ref). Under `:icar` each area with
+neighbours has one `phi` cell (location 0, scale `sigma`); under `:bym2` each
+area has one `theta` cell with scale `sigma * sqrt(1 - rho)` (`sigma` for an
+island) and location `intercept + sigma * sqrt(rho / s_c) * phi`, the
+predictor's intercept plus the area's spatial component, so its `c=1`
+coordinate is the area's total. The marginal SD may be
+`<lower=a>` or `<lower=a, upper=b>` and the mixing share any declared interval
+inside `[0, 1]`. The metadata is fail-closed: a missing or misnumbered
+`struct_idx`, a non-positive scaling factor, a share interval leaving `[0, 1]`
+and declaration/artifact coordinate drift all raise before a reparametrizer is
+built. A field emitted in generated quantities (no observed likelihood reaches
+it) has no sampler coordinate and is skipped.
+"""
+function _adaptive_car_centering_blocks(model, unc_names)
+    descriptor = brm_descriptor(model)
+    plan = descriptor.plan
+    out = _CARAdaptiveCenteringBlock[]
+
+    for predictor in linear_predictors(plan.parent)
+        logical = predictor.name
+        for entry in _brm_term_coordinate_entries(plan.parent, logical)
+            getf(entry.value) === car || continue
+            _adaptive_term_generated(car, descriptor, logical, entry) && continue
+            bym2 = getkwargs(entry.value).type === :bym2
+            term = entry.term
+            coordinates(parameter) = brm_term_coordinates(
+                descriptor, logical, unc_names; term, parameter)
+
+            structured = coordinates(:structured)
+            owner = structured.output.declaration
+            isnothing(owner) && error(
+                "BRM adaptive centering: car `$term` structured field has no " *
+                "compiler declaration owner.",
+            )
+            if owner.family isa Symbol
+                owner.family === (bym2 ? :_sb_car_bym2 : :_sb_car_icar) || error(
+                    "BRM adaptive centering: car `$term` resolved to " *
+                    "unsupported emitted family `$(owner.family)`.",
+                )
+            end
+            unstructured = bym2 ? _adaptive_same_hsgp_owner(
+                coordinates(:unstructured), owner, "unstructured field") : nothing
+            for field in (structured, unstructured)
+                isnothing(field) || isempty(field.output.constraints) || error(
+                    "BRM adaptive centering: car `$term` field " *
+                    "`$(field.output.name)` is constrained, so it is not the " *
+                    "emitted standardized coordinate this transform requires.",
+                )
+            end
+            sigma = _adaptive_same_hsgp_owner(coordinates(:sd), owner, "marginal SD")
+            rho = bym2 ? _adaptive_same_hsgp_owner(
+                coordinates(:mixing), owner, "mixing share") : nothing
+            length(sigma.coordinates) == 1 || error(
+                "BRM adaptive centering: car `$term` must have one marginal-SD coordinate.",
+            )
+            isnothing(rho) || length(rho.coordinates) == 1 || error(
+                "BRM adaptive centering: car `$term` must have one mixing-share coordinate.",
+            )
+
+            data(key) = (k = get(owner.keywords, key, nothing);
+                         k isa Symbol ? get(plan.data, k, nothing) : nothing)
+            struct_idx = data(:struct_idx)
+            struct_idx isa AbstractVector{<:Integer} || error(
+                "BRM adaptive centering: car `$term` declaration does not expose " *
+                "its integer `struct_idx` data binding.",
+            )
+            struct_idx = collect(Int, struct_idx)
+            n_struct = length(structured.coordinates)
+            sort!(filter(>(0), struct_idx)) == 1:n_struct && all(>=(0), struct_idx) ||
+                error("BRM adaptive centering: car `$term` `struct_idx` does not " *
+                      "number its $n_struct structured areas once each.")
+            area_of = zeros(Int, n_struct)
+            for (k, j) in enumerate(struct_idx)
+                j > 0 && (area_of[j] = k)
+            end
+            graph_entry = get(plan.preproc, get(owner.keywords, :row_idx, nothing), nothing)
+            areas = isnothing(graph_entry) || graph_entry.kind !== :car ? nothing :
+                graph_entry.const_.graph.nodes
+            !isnothing(areas) && length(areas) == length(struct_idx) || error(
+                "BRM adaptive centering: car `$term` has no fitted graph record " *
+                "naming its $(length(struct_idx)) areas.",
+            )
+            log_inv_scale = zeros(n_struct)
+            if bym2
+                length(unstructured.coordinates) == length(struct_idx) || error(
+                    "BRM adaptive centering: car `$term` owns " *
+                    "$(length(unstructured.coordinates)) unstructured coordinates " *
+                    "for $(length(struct_idx)) areas.",
+                )
+                inv_scale = data(:inv_scale)
+                inv_scale isa AbstractVector{<:Real} &&
+                    length(inv_scale) == length(struct_idx) || error(
+                    "BRM adaptive centering: car `$term` declaration does not " *
+                    "expose one `inv_scale` per area.",
+                )
+                values = Float64[inv_scale[k] for k in area_of]
+                all(v -> isfinite(v) && v > 0, values) || error(
+                    "BRM adaptive centering: car `$term` has a non-finite or " *
+                    "non-positive BYM2 scaling factor.",
+                )
+                log_inv_scale .= log.(values)
+            end
+
+            sigma_lower, sigma_upper = only.(_adaptive_bounds(
+                descriptor, sigma.output, 1, term, "marginal SD"))
+            rho_lower, rho_upper = isnothing(rho) ? (0.0, 1.0) :
+                only.(_adaptive_bounds(descriptor, rho.output, 1, term, "mixing share"))
+            0 <= rho_lower && rho_upper <= 1 || error(
+                "BRM adaptive centering: car `$term` mixing share is declared on " *
+                "[$rho_lower, $rho_upper], outside [0, 1].",
+            )
+            push!(out, _CARAdaptiveCenteringBlock(
+                logical, term, bym2,
+                collect(structured.coordinates),
+                isnothing(unstructured) ? Int[] : collect(unstructured.coordinates),
+                struct_idx, area_of, log_inv_scale,
+                only(sigma.coordinates), sigma_lower, sigma_upper,
+                isnothing(rho) ? 0 : only(rho.coordinates), rho_lower, rho_upper,
+                bym2 ? _adaptive_car_intercept(descriptor, logical, unc_names) : 0,
+                collect(Any, areas),
+            ))
+        end
+    end
+
+    claimed = Int[]
+    for block in out
+        append!(claimed, block.structured, block.unstructured)
+        push!(claimed, block.sigma)
+        block.bym2 && push!(claimed, block.rho)
+    end
+    length(unique(claimed)) == length(claimed) || error(
+        "BRM adaptive centering: emitted car blocks claim overlapping " *
+        "unconstrained coordinates; refusing an ambiguous transform.",
+    )
+    out
+end
+
+# The sampled population intercept of predictor `logical`, or 0. A BYM2 `theta`
+# cell is centred on `intercept + a * phi`, so its `c=1` coordinate is the
+# area's total (Gelfand, Sahu and Carlin 1995) rather than its deviation `b[k]`:
+# beside a free intercept, centring `b[k]` ties every centred area to the
+# intercept along the direction `(intercept + d, b .- d)`, which a likelihood
+# that pins each area's total does not resolve. An intercept absorbed into exact
+# totals, or one declared with bounds (its coordinate is then not the value), is
+# not read. `:icar` `phi` cells are not centred on it: the ICAR's sum-to-zero
+# already separates the field from the intercept.
+function _adaptive_car_intercept(descriptor, logical, unc_names)
+    :Intercept in popcoefnames(descriptor.plan.parent, logical) || return 0
+    resolved = brm_population_effect_coordinates(descriptor, logical, unc_names;
+                                                 coefficient=:Intercept)
+    (resolved.recovered || length(resolved.coordinates) != 1 ||
+     resolved.output.kind !== :parameter ||
+     !isempty(resolved.output.constraints)) && return 0
+    only(resolved.coordinates)
 end
 
 # Stan's native `cholesky_factor_corr[K]` constrain transform.  Its
@@ -1795,7 +2130,8 @@ pair order (the order `centeredness` and checkpoints use). Every row has
 
 - `cell`, the pair number; `index` and `name`, its unconstrained coordinate;
 - `family`: `:ranef` (ordinary or R2D2 random-effect cell), `:hsgp` (basis
-  weight), `:scalar` (exact total or S2Z contrast) or `:cdar` (walk cell);
+  weight), `:scalar` (exact total or S2Z contrast), `:car` (areal field cell)
+  or `:cdar` (walk cell);
 - `c`, the current source control, and `target`, the compiled frame's.
 
 Random-effect rows also carry `binding`, `group`, `margin` (its
@@ -1804,7 +2140,10 @@ Random-effect rows also carry `binding`, `group`, `margin` (its
 position in the group's current triangular order: `term` itself under
 `ranef_order=:declared`, the learned position under `ranef_order=:learned`.
 HSGP and cdar rows carry `binding`, `margin = (; predictor, coefficient=term)`
-and `term` (the basis or walk cell); fields that do not apply are `nothing`.
+and `term` (the basis or walk cell). Car rows carry `binding`, `margin`, `level`
+(the area's label) and `term`: 1 for an `:icar` area's structured `phi` cell, 2
+for a `:bym2` area's unstructured `theta` cell. Fields that do not apply are
+`nothing`.
 
 Read it after warm-up from the same object the sampler adapted, for example a
 single-chain `adaptive_warmup_mcmc` run; samplers that copy their density per

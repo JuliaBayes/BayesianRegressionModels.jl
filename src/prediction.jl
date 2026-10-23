@@ -224,12 +224,25 @@ const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
 )
 
 # Student-t blocks (`_sb_student_t_ranef`, src/sbimpl.jl) keep their Gaussian
-# family's standardized coordinates and add one inverse-gamma mixing weight per
-# level, `<binding>_w` (`vector<lower=0>[n_groups]`). The entries are derived
-# from the Gaussian ones so the two cannot drift apart.
-for family in keys(_SB_STUDENT_T_RANEF_SHAPES)
-    _RANEF_FAMILIES[_sb_student_t_ranef_family(family)] =
-        merge(_RANEF_FAMILIES[family], (; mixing = :w))
+# family's coordinates -- standardized draws, or the effects themselves under
+# `centered_groups` -- and add one inverse-gamma mixing weight per level,
+# `<binding>_w` (`vector<lower=0>[n_groups]`). The entries are derived from the
+# Gaussian ones so the two cannot drift apart; `_RANEF_STUDENT_T_BASES` maps
+# each back to its Gaussian family.
+#
+# One shape changes the carrier's layout. The Gaussian configured-scale centered
+# plate has a cell-invariant law, which StanBlocks vectorises into one
+# `array[n_groups] vector[n_terms]` (`:group_term`); its Student-t form reads
+# `w[g]` in the cell, so the plate stays a loop over the collected
+# `matrix[n_terms, n_groups]` carrier, named `<carrier>.<t>.<g>` (`:term_group`).
+_ranef_student_t_overrides(::Val{:centered_plate}) = (; layout = :term_group)
+_ranef_student_t_overrides(::Val) = (;)
+const _RANEF_STUDENT_T_BASES = Dict{Symbol,Symbol}()
+for (family, shape) in _SB_STUDENT_T_RANEF_SHAPES
+    student_t = _sb_student_t_ranef_family(family)
+    _RANEF_FAMILIES[student_t] = merge(_RANEF_FAMILIES[family], (; mixing = :w),
+                                       _ranef_student_t_overrides(Val(shape)))
+    _RANEF_STUDENT_T_BASES[student_t] = family
 end
 
 # The per-level mixing-weight carrier of a block's family, or `nothing` for a
@@ -861,6 +874,38 @@ function _ranef_mixing_coordinates(block::RanefBlock, unc_names)
     [pos[nm] for nm in names]
 end
 
+# The degrees of freedom a Student-t block's fresh centered levels draw their
+# weights with: the literal its declaration passes as `nu=`, or the declared
+# scalar parameter it names, read per draw through that parameter's own Stan
+# constraint transform (`_ranef_mixing_nu_value`).
+function _ranef_mixing_nu(model, block::RanefBlock, unc_names)
+    plan = _ranef_plan(model)
+    decls = [d for d in plan.declarations
+             if d.role === :prior && d.target === block.binding]
+    length(decls) == 1 || error(
+        "BRM prediction: Student-t block `$(block.binding)` has $(length(decls)) ",
+        "declarations; its degrees of freedom cannot be read.")
+    nu = get(only(decls).keywords, :nu, nothing)
+    nu isa Real && return (; value=Float64(nu))
+    refused(why) = error(
+        "BRM prediction: fresh levels of the centered Student-t block ",
+        "`$(block.binding)` draw their weights at the block's degrees of freedom ",
+        "`nu = $(repr(nu))`, which $why.")
+    nu isa Symbol || refused("is neither a literal nor a declared parameter")
+    d = brm_descriptor(model)
+    output = brm_output(d, nu)
+    output.role === :parameter && output.kind === :parameter && output.type === :real ||
+        refused("is not a sampled scalar parameter (`$(output.role)` " *
+                "`$(output.kind)` of type `$(output.type)`)")
+    coordinates = _brm_element_coordinates(output, unc_names)
+    length(coordinates) == 1 || refused(
+        "has $(length(coordinates)) of the supplied unconstrained coordinates")
+    (; index=only(coordinates), descriptor=d, output, parameter=nu)
+end
+
+_ranef_mixing_nu_value(nu, x::AbstractVector) = haskey(nu, :value) ? nu.value :
+    _brm_constrain_value(nu.descriptor, nu.output, Float64(x[nu.index]), nu.parameter)
+
 _ranef_name_positions(unc_names) =
     Dict{String,Int}(String(n) => i for (i, n) in enumerate(unc_names))
 
@@ -937,10 +982,17 @@ _ranef_check_draws(draws, unc_names) =
 # against the SOURCE unconstrained names through the single adaptive-centering
 # spelling (`_adaptive_block`). A centered family the frame contract does not
 # cover — a future emission added to `_RANEF_FAMILIES` but not there — is a
-# loud error, never a guessed scale.
+# loud error, never a guessed scale. A Student-t block's frame is its Gaussian
+# family's (same `tau` / `L` coordinates): the frame rebuilds
+# `C = diag(tau) * L`, and each level's `sqrt(w)` is applied where its weight is
+# known (`transport_draws`' centered phase).
 function _ranef_centered_frame(bf::RanefBlock, unc_from, plan)
-    frame = _adaptive_block(bf, unc_from, _ranef_name_positions(unc_from);
-                            known=_adaptive_known_record(plan, bf))
+    base = get(_RANEF_STUDENT_T_BASES, bf.family, nothing)
+    gaussian = isnothing(base) ? bf : RanefBlock(
+        (f === :family ? base : getfield(bf, f) for f in fieldnames(RanefBlock))...)
+    frame = _adaptive_block(gaussian, unc_from, _ranef_name_positions(unc_from);
+                            known=_adaptive_known_record(plan, gaussian),
+                            effects=ranef_coordinates(bf, unc_from))
     isnothing(frame) && error(
         "BRM prediction: block `$(bf.binding)` (`$(bf.family)`) is a centered ",
         "emission whose fitted covariance frame is not implemented here; ",
@@ -1197,9 +1249,10 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
     claimed = falses(length(unc_to))
     # Centered fresh cells defer to the `b = C * z` phase below rather than the
     # bare-`N(0, 1)` fill: one entry per centered block with fresh levels, each
-    # a (source frame, per-fresh-group target columns in term order) pair plus
-    # scratch vectors for the draw.
-    centered_plans = Tuple{AbstractAdaptiveCenteringBlock,Vector{Vector{Int}},Vector{Float64},Vector{Float64}}[]
+    # the source frame, the per-fresh-group target columns in term order, and
+    # scratch vectors for the draw. A Student-t block adds the fresh groups'
+    # target mixing-weight columns and its degrees of freedom (`nu`).
+    centered_plans = NamedTuple[]
     centered_deferred = falses(length(unc_to))
     total_plans = NamedTuple[]
     matched_totals = 0
@@ -1301,27 +1354,37 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
             end
         end
         # A Student-t level carries its mixing weight with it. Fresh levels of
-        # these non-centered blocks were refused above (they re-draw Stan-side
-        # through `resample_groups`), so every remaining level is retained.
+        # the non-centered blocks were refused above (they re-draw Stan-side
+        # through `resample_groups`); a fresh level of a centered block draws
+        # its weight together with its effect in the centered phase below.
         mix_to = _ranef_mixing_coordinates(bt, unc_to)
+        fresh_mixing = Int[]
         if !isnothing(mix_to)
             mix_from = _ranef_mixing_coordinates(bf, unc_from)
             for g in 1:bt.n_groups
                 gf = fresh ? 0 : get(level_pos, bt.levels[g], 0)
-                gf == 0 && error(
-                    "BRM prediction: Student-t block `$(bt.binding)` needs a ",
-                    "fresh mixing weight for level $(repr(bt.levels[g])); fresh ",
-                    "Student-t levels re-draw Stan-side through ",
-                    "`reprocess(fit, new_df; resample_groups=[$(repr(bt.group))])`.")
                 claimed[mix_to[g]] = true
-                plan_idx[mix_to[g]] = mix_from[gf]
+                if gf != 0
+                    plan_idx[mix_to[g]] = mix_from[gf]
+                elseif centered
+                    centered_deferred[mix_to[g]] = true
+                    push!(fresh_mixing, mix_to[g])
+                else
+                    error("BRM prediction: Student-t block `$(bt.binding)` needs a ",
+                          "fresh mixing weight for level $(repr(bt.levels[g])); fresh ",
+                          "Student-t levels re-draw Stan-side through ",
+                          "`reprocess(fit, new_df; resample_groups=[$(repr(bt.group))])`.")
+                end
             end
         end
         if centered && !isempty(fresh_groups)
             K = frame.ranef.n_terms
-            push!(centered_plans, (frame, fresh_groups,
-                                   Vector{Float64}(undef, K),
-                                   Vector{Float64}(undef, K)))
+            push!(centered_plans, (; frame, fresh_groups,
+                                   z=Vector{Float64}(undef, K),
+                                   b=Vector{Float64}(undef, K),
+                                   mixing=fresh_mixing,
+                                   nu=isempty(fresh_mixing) ? nothing :
+                                       _ranef_mixing_nu(from, bf, unc_from)))
         end
     end
 
@@ -1348,15 +1411,24 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
     end
     # Centered fresh draws, through the model's own transformation: per draw,
     # rebuild `C` from that draw's fitted `tau` / `L` and emit `b = C * z`
-    # with `z ~ N(0, 1)` per fresh group. RNG order is draws outer, blocks in
-    # target declaration order, fresh groups ascending, terms ascending — the
-    # same draws-outer shape as the total-recovery phase below.
+    # with `z ~ N(0, 1)` per fresh group. A Student-t level then draws its
+    # weight `w ~ InverseGamma(nu/2, nu/2)` at that draw's `nu`, scales its
+    # effect by `sqrt(w)` and stores `log(w)`, the weight's unconstrained
+    # coordinate. RNG order is draws outer, blocks in target declaration order,
+    # fresh groups ascending, terms ascending (then the weight) — the same
+    # draws-outer shape as the total-recovery phase below.
     for i in 1:n_draws
-        for (frame, fresh_groups, z, b) in centered_plans
+        for (; frame, fresh_groups, z, b, mixing, nu) in centered_plans
             C = _adaptive_block_cov_chol(view(draws, i, :), frame)
-            for js in fresh_groups
+            nu_i = isnothing(nu) ? nothing : _ranef_mixing_nu_value(nu, view(draws, i, :))
+            for (q, js) in enumerate(fresh_groups)
                 Random.randn!(rng, z)
                 mul!(b, C, z)
+                if !isempty(mixing)
+                    w = rand(rng, InverseGamma(nu_i / 2, nu_i / 2))
+                    b .*= sqrt(w)
+                    out[i, mixing[q]] = log(w)
+                end
                 for (t, j) in enumerate(js)
                     out[i, j] = b[t]
                 end
@@ -1613,10 +1685,10 @@ takes `to` itself. A `to` on or beyond a bound is refused (its unconstrained
 image is infinite). So is anything that is not a sampled, real-valued, top-level
 declared parameter: a population coefficient, random effect, linear predictor,
 plate-local value, transformed or generated quantity, a natively constrained
-type (simplex, correlation, Cholesky factor), and a bound that is not a numeric
-constant (one computed by arithmetic over data, or from another parameter; a
-literal, scalar data, and their `fmax`/`fmin` with a structural bound are
-constants).
+type (simplex, correlation, Cholesky factor), and a bound that is not one number
+fixed by the data (one that reads another parameter, or differs per coordinate;
+a literal, scalar data and arithmetic over them, `fmax`/`fmin` with a structural
+bound included, are fixed).
 
 Returns a fresh draws × `length(unc_names)` matrix; `draws` is left untouched.
 
@@ -1644,8 +1716,7 @@ function parameter_draws(d::BRMDescriptor, draws::AbstractMatrix, unc_names;
         "BRM prediction: declared parameter `$parameter` has Stan type ",
         "`$(output.type)`; only real-valued parameters (real, vector, ",
         "row_vector, matrix) map one coordinate per element.")
-    value = _brm_unconstrain_value(d.plan, output.constraints, Float64(to),
-                                   parameter)
+    value = _brm_unconstrain_value(d, output, Float64(to), parameter)
     coordinates = _brm_element_coordinates(output, unc_names)
     isempty(coordinates) && error(
         "BRM prediction: declared parameter `$parameter` (`$(output.name)`) is ",
@@ -1662,29 +1733,42 @@ function parameter_draws(d::BRMDescriptor, draws::AbstractMatrix, unc_names;
     out
 end
 
-# One declared constraint as a number: a literal, a scalar data value, or
-# their `fmax`/`fmin` (`_adaptive_constraint_value`). A bound computed from
-# other values is refused.
-function _brm_numeric_constraint(plan, constraints, key, parameter)
-    haskey(constraints, key) || return nothing
-    value = _adaptive_constraint_value(plan, constraints[key], parameter,
-                                       "declared-parameter")
+# One declared constraint as a number, as StanBlocks evaluates it against the
+# data (`_brm_constraint_value`). A bound that reads another parameter, or one
+# that differs per coordinate, is refused.
+function _brm_numeric_constraint(d, output::BRMOutput, key, parameter)
+    haskey(output.constraints, key) || return nothing
+    value = _brm_constraint_value(d, output, key)
     value isa Real || error(
         "BRM prediction: declared parameter `$parameter` has `$key = ",
-        "$(constraints[key])`, which is not a numeric constant; its ",
-        "unconstrained image depends on other values and is refused rather ",
-        "than guessed.")
+        "$(output.constraints[key])`, which is not one number fixed by the ",
+        "data; its unconstrained image depends on other values and is refused ",
+        "rather than guessed.")
     Float64(value)
 end
 
-# The unconstrained image of the constrained value `to` under Stan's transform
-# for a declaration with these constraints.
-function _brm_unconstrain_value(plan, constraints::NamedTuple, to::Float64,
-                                parameter::Symbol)
-    num(key) = _brm_numeric_constraint(plan, constraints, key, parameter)
+# The numeric pieces of a declaration's Stan transform: its finite bounds or,
+# for an unbounded declaration, its affine offset and multiplier.
+function _brm_declared_transform(d, output::BRMOutput, parameter::Symbol)
+    num(key) = _brm_numeric_constraint(d, output, key, parameter)
     lower, upper = num(:lower), num(:upper)
     lower = _brm_no_bound(lower, :lower) ? nothing : lower
     upper = _brm_no_bound(upper, :upper) ? nothing : upper
+    isnothing(lower) && isnothing(upper) || return (; lower, upper)
+    offset = something(num(:offset), 0.0)
+    multiplier = something(num(:multiplier), 1.0)
+    multiplier > 0 || error(
+        "BRM prediction: declared parameter `$parameter` has non-positive ",
+        "`multiplier = $multiplier`.")
+    (; lower, upper, offset, multiplier)
+end
+
+# The unconstrained image of the constrained value `to` under Stan's transform
+# for the output's declaration.
+function _brm_unconstrain_value(d, output::BRMOutput, to::Float64,
+                                parameter::Symbol)
+    t = _brm_declared_transform(d, output, parameter)
+    (; lower, upper) = t
     outside(bound) = error(
         "BRM prediction: `to = $to` is not strictly inside the support of ",
         "declared parameter `$parameter` ($bound); its unconstrained image ",
@@ -1700,12 +1784,19 @@ function _brm_unconstrain_value(plan, constraints::NamedTuple, to::Float64,
         to < upper || outside("upper = $upper")
         return log(upper - to)
     end
-    offset = something(num(:offset), 0.0)
-    multiplier = something(num(:multiplier), 1.0)
-    multiplier > 0 || error(
-        "BRM prediction: declared parameter `$parameter` has non-positive ",
-        "`multiplier = $multiplier`.")
-    (to - offset) / multiplier
+    (to - t.offset) / t.multiplier
+end
+
+# The constrained value of the unconstrained `u` under the same transform: the
+# inverse of `_brm_unconstrain_value`.
+function _brm_constrain_value(d, output::BRMOutput, u::Float64,
+                              parameter::Symbol)
+    t = _brm_declared_transform(d, output, parameter)
+    (; lower, upper) = t
+    !isnothing(lower) && !isnothing(upper) && return lower + (upper - lower) * logistic(u)
+    !isnothing(lower) && return lower + exp(u)
+    !isnothing(upper) && return upper - exp(u)
+    t.offset + t.multiplier * u
 end
 
 function _hsgp_population_curve_term(d::BRMDescriptor, predictor::Symbol,

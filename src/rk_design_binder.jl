@@ -10,7 +10,9 @@
 # the ordinary `reprocess`, which validates it — and records where each graph
 # input comes from: a column of the design, or a value no design changes.
 # Every later design of that kind is checked as `reprocess` checks its values,
-# and its raw columns are bound into the program lowered once for that kind.
+# and its raw columns are bound into the program lowered once for that kind,
+# with the values fitted from fixed inputs alone frozen as that replay bound
+# them.
 #
 # An input the planner derives from the design in Julia (a value BRM has not
 # moved into the graph, or data a custom hook writes) cannot be recomputed
@@ -29,13 +31,21 @@ missing values) is replayed in full, and every later one is checked and bound
 into that replay's lowered program.
 
 - `binder.fitted` holds the inputs no design changes (the training columns
-  behind fitted anchors, `constant(...)` values). Bind them once with
+  behind fitted anchors, a `car(...)` term's fitted graph, `constant(...)`
+  values). Bind them once with
   `ReactiveKernels.prepare(spec; have, want, bound=binder.fitted)` and pass the
   rest per design; values that read only them are then computed once.
+- What the program fits from those inputs alone and binding evaluates (spline
+  and HSGP fits, fitted means and SDs, level sets) is taken from the first
+  design of each kind and bound frozen into every later one (RKPPL's
+  `bind_data(…; frozen)`): a later design computes only what its own columns
+  determine, such as a basis at its rows.
 - A design is refused exactly where `reprocess` refuses its values: unseen
   factor, `mo` or group levels, HSGP axis values past the fitted basis
-  interval or fixed domain, ragged labels that name no cell, and per-cell
-  inputs whose cell counts disagree.
+  interval or fixed domain, non-finite HSGP axis values, a `rows=` column
+  that is not 0/1 or not as long as the axis, a `missing` axis value in a row
+  the mask carries, a `car` area outside the fitted graph, ragged labels that
+  name no cell, and per-cell inputs whose cell counts disagree.
 - A model whose inputs include a value BRM derives from the design in Julia
   replays every design in full; `show(binder)` names those inputs.
 """
@@ -60,14 +70,18 @@ struct _RKDesignInput
     column::Symbol
 end
 
-# One kind of design: how its inputs are read, the program lowered for it, and
-# the value checks. `derived` names the inputs that force a planned replay.
+# One kind of design: how its inputs are read, the program lowered for it, the
+# value checks, and the definitions it binds frozen (RKPPL's `FrozenValues`, or
+# `nothing`). `derived` names the inputs that force a planned replay.
 struct _RKDesignClass
     sources::Vector{Pair{Symbol,Any}}
     lowering::Any
     checks::Vector{Any}
     derived::Vector{Symbol}
+    frozen::Any
 end
+_RKDesignClass(derived::Vector{Symbol}) =
+    _RKDesignClass(Pair{Symbol,Any}[], nothing, Any[], derived, nothing)
 _rk_design_planned(class::_RKDesignClass) = !isempty(class.derived)
 
 function rk_design_binder(rk::RKBRMI; resample_groups=(),
@@ -108,7 +122,7 @@ function _rk_design_plan(binder::RKDesignBinder, design)
     end
     columns = Dict{Symbol,Any}(name => _rk_design_input(source, design)
         for (name, source) in class.sources)
-    _rk_bind_design_plan(class.lowering, columns)
+    _rk_bind_design_plan(class.lowering, columns, class.frozen)
 end
 
 _rk_design_replay(binder::RKDesignBinder, design) = reprocess(binder.rk, design;
@@ -160,16 +174,30 @@ _rk_plan_kernels(plan::_RKValuePlan) =
 _rk_plan_kernels(plan::_RKHeldOutPlan) = _rk_plan_kernels(plan.parent)
 _rk_plan_kernels(_plan) = ()
 
-# The inputs no design changes: fit-role inputs of the columns that are not
-# resampled, and fitted `constant(...)` values. A data-free backend binds no
-# fit-role input: its frozen fitted values take their place.
+# An areal field's graph inputs, by its area column: the graph is a fit of the
+# training areas and edges, refitted only when the areas are resampled
+# (`_brm_car_fitted_graph`).
+function _rk_plan_graph_inputs(plan)
+    inputs = Dict{Symbol,Symbol}()
+    for predictor in _rk_replay_predictors(plan), term in predictor.terms
+        term.kind === :car || continue
+        foreach(name -> inputs[name] = term.options.source, term.options.inputs)
+    end
+    inputs
+end
+
+# The inputs no design changes: fit-role inputs and fitted graphs of the
+# columns that are not resampled, and fitted `constant(...)` values. A
+# data-free backend binds no fit-role input: its frozen fitted values take
+# their place.
 function _rk_design_fitted(rk::RKBRMI, groups)
     columns = _rk_source_data_columns(rk.plan, _rk_retained_program(rk))
-    twins = _rk_plan_fit_inputs(rk.plan)
+    # Each fitted input, by the column whose resampling refits it.
+    fits = merge(_rk_plan_fit_inputs(rk.plan), _rk_plan_graph_inputs(rk.plan))
     constants = _rk_fit_constant_names(rk)
     frozen = rk.fitted !== nothing
     names = sort!([name for name in keys(columns) if name in constants ||
-        (!frozen && haskey(twins, name) && !(twins[name] in groups))])
+        (!frozen && haskey(fits, name) && !(fits[name] in groups))])
     fitted = NamedTuple{Tuple(names)}(Tuple(columns[name] for name in names))
     frozen || return fitted
     state = _rk_fitted_state(rk)
@@ -180,10 +208,8 @@ function _rk_design_class(binder::RKDesignBinder, replay::RKBRMI, design)
     rk = binder.rk
     # A provider that emits new callables per design binds its own program;
     # a plan whose value checks the binder cannot read replays in full.
-    replay.program === rk.program ||
-        return _RKDesignClass(Pair{Symbol,Any}[], nothing, Any[], [:callables])
-    _rk_design_checked(replay.plan) ||
-        return _RKDesignClass(Pair{Symbol,Any}[], nothing, Any[], [:plan])
+    replay.program === rk.program || return _RKDesignClass([:callables])
+    _rk_design_checked(replay.plan) || return _RKDesignClass([:plan])
     columns = _rk_source_data_columns(replay.plan, _rk_retained_program(rk))
     # A data-free replay binds its fitted values frozen, not the fit-role inputs
     # they are fitted from.
@@ -204,8 +230,12 @@ function _rk_design_class(binder::RKDesignBinder, replay::RKBRMI, design)
             push!(sources, name => _RKDesignInput(column))
     end
     checks = _rk_design_checks(binder, replay.plan, design, derived)
-    isempty(derived) || return _RKDesignClass(Pair{Symbol,Any}[], nothing, Any[], sort!(derived))
-    _RKDesignClass(sources, _rk_design_lowering(replay), checks, Symbol[])
+    isempty(derived) || return _RKDesignClass(sort!(derived))
+    # What the program fits from the fixed inputs alone is the same for every
+    # design: bound frozen, it is computed once, here, not on every binding.
+    fixed = Set{Symbol}(name for (name, source) in sources if source isa _RKFixedInput)
+    _RKDesignClass(sources, _rk_design_lowering(replay), checks, Symbol[],
+        _rk_design_frozen(replay, fixed))
 end
 
 _rk_design_checked(::Union{_RKStructuralPlan,_RKValuePlan}) = true
@@ -230,17 +260,12 @@ function _rk_design_checks(binder::RKDesignBinder, plan, design, derived)
     has(column) = _brm_df_has_column(design, column)
     for predictor in _rk_replay_predictors(plan), term in predictor.terms
         options = term.options
-        if term.kind === :hsgp && get(options, :cov, :exp_quad) === :exp_quad &&
-                !get(options, :latent, false) && get(options, :extrapolate, :error) === :error
-            if get(options, :mask, nothing) !== nothing || !all(has, term.columns)
+        if term.kind === :hsgp && !get(options, :latent, false)
+            if !all(has, _rk_design_hsgp_columns(term))
                 push!(derived, Symbol(predictor.name, "#hsgp"))
                 continue
             end
-            axes, fits = Tuple(term.columns), options.fits
-            fixed_domain = options.fixed_fits !== nothing
-            push!(checks, design -> _brm_hsgp_replay_axes(
-                Tuple(_brm_df_column(design, axis) for axis in axes), fits, nothing,
-                :error; prefix="RK reprocess", names=axes, fixed_domain))
+            push!(checks, _rk_design_hsgp_check(term))
         elseif term.kind === :factor && haskey(options, :index_levels)
             source = only(term.columns)
             has(source) || continue
@@ -253,12 +278,50 @@ function _rk_design_checks(binder::RKDesignBinder, plan, design, derived)
             levels = options.levels
             push!(checks, design -> _brm_apply_fitted_levels(levels,
                 _brm_df_column(design, source); prefix="RK reprocess"))
+        elseif term.kind === :car
+            # Each row's area must be a node of the fitted graph.
+            source = options.source
+            has(source) || continue
+            nodes = options.nodes
+            push!(checks, design -> _brm_car_row_idx(nodes,
+                _brm_car_labels(_brm_df_column(design, source), "area")))
         end
     end
     for kernel in _rk_plan_kernels(plan)
         push!(checks, _rk_design_cell_check(kernel, design))
     end
     checks
+end
+
+# The design columns a raw-axis HSGP term reads: its axes and `rows=` column.
+function _rk_design_hsgp_columns(term)
+    source = get(term.options, :mask_source, nothing)
+    source === nothing ? Tuple(term.columns) : (term.columns..., source)
+end
+
+# What `reprocess` checks of a raw-axis HSGP term's values: 0/1 `rows=` values
+# as long as the axes (`_brm_hsgp_row_mask`), `missing` only in rows the mask
+# does not carry (`_brm_axis_values`), finite axes and, unless the basis
+# clamps, the carried values inside the fitted interval. A design's kind fixes
+# which columns are empty or hold `missing`, so those refusals come from its
+# first, planned replay.
+function _rk_design_hsgp_check(term)
+    options = term.options
+    axes, source = Tuple(term.columns), get(options, :mask_source, nothing)
+    periodic = get(options, :cov, :exp_quad) === :periodic
+    interval = !periodic && get(options, :extrapolate, :error) === :error
+    fixed_domain = get(options, :fixed_fits, nothing) !== nothing
+    function check(design)
+        raw = Tuple(_brm_df_column(design, axis) for axis in axes)
+        mask = source === nothing ? nothing : _brm_hsgp_row_mask(
+            _brm_df_column(design, source), length(first(raw)), source)
+        values = mask === nothing ? raw : Tuple(_brm_axis_values(column, mask,
+            "BRM backend lowering: data column `$axis`") for (axis, column) in zip(axes, raw))
+        foreach(axis -> _brm_check_finite_axis(axis, :hsgp), values)
+        interval && _brm_hsgp_replay_axes(values, options.fits, nothing, :error, mask;
+            prefix="RK reprocess", names=axes, fixed_domain)
+        nothing
+    end
 end
 
 # A kernel's per-cell inputs and its cell label column must agree on the cell
@@ -295,8 +358,9 @@ function _rk_design_cell_check(kernel, design)
     isempty(cells) && isempty(per_cell) && isempty(joins) ? (_design -> nothing) : check
 end
 
-# Lowering and binding live in the ReactiveKernels extension.
+# Lowering, freezing and binding live in the ReactiveKernels extension.
 function _rk_design_lowering end
+function _rk_design_frozen end
 function _rk_bind_design_plan end
 function _rk_plan_columns end
 

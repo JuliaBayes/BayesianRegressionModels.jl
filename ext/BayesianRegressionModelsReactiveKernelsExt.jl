@@ -298,7 +298,23 @@ end
 # numbers and arrays per index, rkppl-use §1).
 BRM._rk_design_lowering(replay::BRM.RKBRMI) =
     first(_rk_lower_program(_rk_program(replay), replay.plan; frozen=_rk_frozen(replay)))
-BRM._rk_bind_design_plan(lowering, columns) = bind_data(lowering, columns)
+# The definitions a kind of design binds frozen: those binding evaluates from
+# the `fixed` inputs (and values already frozen) alone, as the replay `replay`
+# bound them, beside the replay's own frozen values; `nothing` when there are
+# none. Binding reads each value off the replay's binding, without evaluating
+# it again. A value preparation folds instead is left to preparation: frozen,
+# a binding would list it among its inputs, which `reprocess` does not.
+function BRM._rk_design_frozen(replay::BRM.RKBRMI, fixed)
+    bound = BRM.rk_bound_plan(replay)
+    held = hasproperty(bound, :frozen) ? keys(bound.frozen.values) : ()
+    fitted = BRM._rk_fitted_definitions(BRM._rk_retained_program(replay), replay.plan,
+        union(fixed, held))
+    names = [name for name in keys(fitted) if haskey(bound.columns, name) && !(name in held)]
+    isempty(names) && return nothing
+    frozen_values(bound, union(held, names))
+end
+BRM._rk_bind_design_plan(lowering, columns, frozen) = frozen === nothing ?
+    bind_data(lowering, columns) : bind_data(lowering, columns; frozen)
 BRM._rk_plan_columns(plan) = _rk_bound_inputs(plan)
 
 function BRM.rk_restore_draws(backend::BRM.RKBRMI, U::AbstractMatrix)

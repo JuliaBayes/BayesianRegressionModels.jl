@@ -536,5 +536,11 @@ end
                     [sqrt(0.1), exp(x[free])] atol=1e-14
             end
         end
+        # A known-value Student-t block is not adapted yet (todo `16jywsl`):
+        # each level's factor is `sqrt(w[g]) * C`, so it is left out rather
+        # than described without its weights.
+        model = build(studentt_builder)
+        @test isempty(adaptive_centering_blocks(model,
+            BridgeStan.param_unc_names(instantiate(model).model)))
     end
 end
