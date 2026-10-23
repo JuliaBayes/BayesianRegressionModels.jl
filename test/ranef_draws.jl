@@ -133,6 +133,21 @@ stratified_id_builder = @brm begin
     z ~ Normal(nu, tau_z)
 end
 
+# Sum-to-zero blocks on `site` that claim one-margin `|ID|` buckets: `mu`'s
+# intercept and slope (`a`, `b`, one block of two columns) beside a plain
+# `subject` block, and `nu`'s intercept (`q`). Snag `no-public-reader-e893b8e0`:
+# the readers must keep the address the buckets have without `s2z_groups`.
+s2z_builder = @brm begin
+    sigma ~ Exponential(1)
+    tau_z ~ Exponential(1)
+    mu ~ 1 + x + (1 | a | site) + (0 + x | b | site) + (1 | subject)
+    nu ~ 1 + (1 | q | site)
+    sd(:, b) ~ Exponential(2)
+    y ~ Normal(mu, sigma)
+    z ~ Normal(nu, tau_z)
+end
+const S2Z_SITE = (; total_groups = (), s2z_groups = [:site], s2z_rho = 0.5)
+
 build(builder, d = data; kw...) = SBBRMI(builder(d); mod = @__MODULE__, kw...)
 no_z = Base.structdiff(data, NamedTuple{(:z,)})
 
@@ -326,6 +341,65 @@ end
     tp_names = BS.param_names(sm; include_tp = true, include_gq = false)
     tp_draws = c.draws[:, [c.col[n] for n in tp_names]]
     @test_throws "include_gq=true" brm_ranef_draws(c.d, tp_draws, tp_names; id = :q)
+end
+
+@testset "sum-to-zero blocks keep the address of the |ID| buckets they claim" begin
+    sb = build(s2z_builder; S2Z_SITE...)
+    @test [b.predictor for b in s2z_effect_blocks(sb)] == [:mu, :nu]
+    @test !any(b -> b.group === :site, ranef_blocks(sb))
+    c = constrained_draws(sb)
+    site = brm_ranef_draws(c.d, c.draws, c.names; group = :site)
+    @test [(b.family, b.id, only(b.margins)) for b in site] ==
+        [(:brm_s2z, :a, (predictor = :mu, coefficient = :Intercept)),
+         (:brm_s2z, :b, (predictor = :mu, coefficient = :x)),
+         (:brm_s2z, :q, (predictor = :nu, coefficient = :Intercept))]
+    @test only(brm_ranef_draws(c.d, c.draws, c.names; id = :b)).margins ==
+        [(predictor = :mu, coefficient = :x)]
+    blocks = Dict(b.predictor => b for b in s2z_effect_blocks(sb))
+    for (b, k) in zip(site, (1, 2, 1))
+        blk = blocks[only(b.margins).predictor]
+        @test b.levels == ["a", "b", "c"]
+        @test b.sd[:, 1] == c.draws[:, c.col["$(blk.scales).$k"]]
+        @test all(==(1.0), b.cor)
+        # Its address resolves to the same scale element.
+        r = brm_ranef_sd_coordinates(c.d, only(b.margins).predictor, c.names;
+                                     id = b.id, coefficient = only(b.margins).coefficient)
+        @test r.coordinates == [c.col["$(blk.scales).$k"]]
+        @test r.link === identity
+    end
+    # The effects are the conventional per-level effects: with the recovered
+    # population coefficients `beta` (not the sampled `theta`), each row of
+    # `mu` is `X beta + Z b[site]` plus its `subject` effect.
+    subject = only(brm_ranef_draws(c.d, c.draws, c.names; group = :subject))
+    a, b = site[1], site[2]
+    lv(labels) = level_of(a.levels, labels)
+    sj = level_of(subject.levels, data.subject)
+    blk = blocks[:mu]
+    for i in axes(c.draws, 1), r in 1:N
+        beta = [value(c, i, "s2z_population_mu.$j") for j in 1:2]
+        g = lv(data.site)[r]
+        expected = beta[1] + beta[2] * data.x[r] + a.effects[i, g, 1] +
+                   b.effects[i, g, 1] * data.x[r] + subject.effects[i, sj[r], 1]
+        @test value(c, i, "mu.$r") ≈ expected atol = 1e-10
+    end
+    # The block means are recovered in generated quantities: names without
+    # them are refused with the remedy.
+    tp_names = BS.param_names(c.sm; include_tp = true, include_gq = false)
+    tp_draws = c.draws[:, [c.col[n] for n in tp_names]]
+    @test_throws "include_gq=true" brm_ranef_draws(c.d, tp_draws, tp_names; id = :q)
+    # A start value keyed by the claimed `|ID|` sets the block's scale.
+    u = brm_start(sb, c.sm, (; b = (; sd = 0.7), q = (; sd = 0.4)))
+    th = BS.param_constrain(c.sm, u)
+    pn = BS.param_names(c.sm)
+    @test th[findfirst(==("$(blocks[:mu].scales).2"), pn)] ≈ 0.7
+    @test th[findfirst(==("$(blocks[:nu].scales).1"), pn)] ≈ 0.4
+    # An unknown `|ID|` still names every address the model has.
+    @test_throws r"shared blocks are: a, b, q" brm_ranef_sd_coordinates(
+        c.d, :mu, c.names; id = :nope)
+    # The same addresses read the conventional blocks without `s2z_groups`.
+    o = constrained_draws(build(s2z_builder; total_groups = ()))
+    @test [(b.id, only(b.margins)) for b in brm_ranef_draws(o.d, o.draws, o.names; group = :site)] ==
+        [(b.id, only(b.margins)) for b in site]
 end
 
 @testset "known scales and correlations are reported as their values" begin

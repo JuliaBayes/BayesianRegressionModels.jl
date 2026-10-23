@@ -56,7 +56,12 @@ Each block is one named tuple:
 
 An exact total-coefficient block reports one entry per absorbed column, each
 with one margin, as the conventional `(… || g)` emission reports one block
-per independent margin.
+per independent margin. So does a sum-to-zero block (`s2z_groups`, family
+`:brm_s2z`): each column's `sd` is the block's scale `tau`, its `effects` are
+the recovered per-level effects `r + μ` (generated quantities, so pass
+`include_gq=true` draws), and its `id` is the one-margin `|ID|` bucket the
+block claimed, so `id = :p` selects it under the same address as without
+`s2z_groups`.
 
 A stratified `gr(g, by=b)` block has one `tau` and `L` per stratum (per level
 of `b`), and every group belongs to one stratum. It reports one entry per
@@ -80,7 +85,7 @@ function brm_ranef_draws(d::BRMDescriptor, draws::AbstractMatrix, constrained_na
                          id::Union{Nothing,Symbol}=nothing,
                          group::Union{Nothing,Symbol}=nothing)
     _brm_check_draw_names(draws, constrained_names)
-    blocks = _brmd_ranef_metadata(d)
+    blocks = (_brmd_ranef_metadata(d)..., _brm_s2z_ranef_metadata(d)...)
     selected = [m for m in blocks if _brm_ranef_draws_selects(m.block, id, group)]
     if isempty(selected)
         available = join(("(id=$(repr(m.block.id)), group=$(repr(m.block.group)))"
@@ -112,8 +117,15 @@ _brm_ranef_draws_selects(block, id, group) =
 # The entries of one block: one, or one per stratum of a stratified
 # `gr(g, by=b)` block, holding that stratum's `tau`, `L`, levels and effects.
 function _brm_ranef_entries(d, m, draws, names)
-    haskey(m, :total) && return [(; stratum=nothing, levels=collect(m.block.levels),
-        _brm_ranef_total_draws(d, m, draws, names)...)]
+    if haskey(m, :total)
+        total = m.total.binding.total
+        return [(; stratum=nothing, levels=collect(m.block.levels),
+            _brm_ranef_column_draws(d, total, m.total.column, total.deviations,
+                                    draws, names)...)]
+    end
+    haskey(m, :s2z) && return [(; stratum=nothing, levels=collect(m.block.levels),
+        _brm_ranef_column_draws(d, m.s2z.block, m.s2z.column, m.s2z.block.effects,
+                                draws, names)...)]
     isnothing(m.block.by) && return [(; stratum=nothing,
         levels=collect(m.block.levels), _brm_ranef_block_draws(d, m.block, draws, names)...)]
     x = _brm_ranef_stratified_draws(d, m.block, draws, names)
@@ -253,20 +265,38 @@ _brm_ranef_kind_hint(output) =
         "them (`include_tp=true`)" :
         ". Re-reflect the model that produced the posterior draws"
 
-# One absorbed column of an exact total-coefficient block: its total scale and
-# Stan's recovered deviations `total - A β`.
-function _brm_ranef_total_draws(d, m, draws, names)
-    total = m.total.binding.total
-    k = m.total.column
-    n, J, K = size(draws, 1), m.block.n_groups, length(total.columns)
-    scales = [o for o in d.outputs if o.name === total.scales]
+# One column `k` of an exact total-coefficient or S2Z block: its scale and the
+# per-level effects of that column in the block's `effects` carrier (a J × K
+# matrix) — Stan's recovered deviations `total - A β` of a total block, the
+# recovered effects `r + μ` of an S2Z block.
+function _brm_ranef_column_draws(d, block, k, effects, draws, names)
+    n, J, K = size(draws, 1), d.plan.data[block.group_count], length(block.columns)
+    scales = [o for o in d.outputs if o.name === block.scales]
     length(scales) == 1 || error(
-        "brm_ranef_draws: exact-total scale `$(total.scales)` owns ",
+        "brm_ranef_draws: scale `$(block.scales)` of block `$(block.binding)` owns ",
         "$(length(scales)) descriptor outputs; expected exactly one.")
-    sd = draws[:, [_brm_total_scale_coordinate(
-        (; block=total, column=k, output=only(scales)), names, "brm_ranef_draws")]]
-    deviations = _brm_ranef_carrier_draws(d, m.block, total.deviations, J * K,
-                                          draws, names)
-    effects = reshape(deviations, n, J, K)[:, :, k:k]
-    (; sd, cor=ones(n, 1, 1), effects)
+    sd = draws[:, [_brm_claimed_scale_coordinate(
+        (; block, column=k, output=only(scales)), names, "brm_ranef_draws")]]
+    values = _brm_ranef_carrier_draws(d, block, effects, J * K, draws, names)
+    (; sd, cor=ones(n, 1, 1), effects=reshape(values, n, J, K)[:, :, k:k])
+end
+
+# Each column of every sum-to-zero block (`s2z_groups`) as one independent
+# block, as `_brmd_ranef_metadata` lists exact totals: its `|ID|` (the bucket
+# the block claimed, or `nothing`), margin and levels.
+function _brm_s2z_ranef_metadata(d)
+    result = NamedTuple[]
+    for (; block, ids) in _brm_claimed_id_blocks(d)
+        block isa S2ZEffectBlock || continue
+        levels = d.plan.preproc[block.group_index].const_.levels
+        for (k, label) in enumerate(block.columns)
+            entry = (; binding=block.binding, family=:brm_s2z, group=block.group,
+                id=ids[k], by=nothing, levels, n_terms=1,
+                n_groups=d.plan.data[block.group_count], noncentered=false)
+            push!(result, (; block=entry,
+                margins=((; predictor=block.predictor, coefficient=label),),
+                s2z=(; block, column=k)))
+        end
+    end
+    result
 end

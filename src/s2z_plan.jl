@@ -169,9 +169,12 @@ function _sb_s2z_plan(brmi, prepared, predictor, overrides, rho, requested;
         prior_info = infos[absorbed]
         scale_priors = Any[]
         # `|ID|` buckets this block claims; emission drops them from the
-        # shared-bucket prepass, as for exact totals.
+        # shared-bucket prepass, as for exact totals. Each column keeps its
+        # bucket's `|ID|` (or `nothing`), so readers still address it by `id`.
         claimed = Any[]
+        column_ids = Any[]
         for plan in plans
+            append!(column_ids, fill(plan.id, length(plan.columns)))
             if isnothing(plan.id)
                 for c in plan.columns
                     push!(scale_priors, isnothing(c.source) ? ExprColumn(LogNormal, 0., 1.) : nothing)
@@ -203,7 +206,7 @@ function _sb_s2z_plan(brmi, prepared, predictor, overrides, rho, requested;
         end
         weights = _s2z_resolve_rho(rho, J, K, group; coordinates)
         return (; target, group, columns, design, B, prior_info, scale_priors,
-                absorbed, remaining, weights, Z, coordinates, claimed,
+                absorbed, remaining, weights, Z, coordinates, claimed, column_ids,
                 remaining_priors=all_priors[remaining],
                 indices=first(plans).indices, levels=first(plans).levels)
     catch err
@@ -499,7 +502,7 @@ function _sb_emit_s2z!(stmts, data, target, plan; mod::Module=@__MODULE__)
         plan.B, copy(data[loc]), copy(data[prec]), copy(plan.weights), copy(plan.Z),
         plan.coordinates)
     data[_SB_BINDINGS_KEY][z] = (; role=:s2z_effect, logical=plan.target,
-        family=:brm_s2z, s2z=block)
+        family=:brm_s2z, s2z=block, column_ids=Tuple(plan.column_ids))
     data[_SB_BINDINGS_KEY][theta] = (; role=:population_effect, logical=plan.target,
         family=nothing, population_columns=block.population_columns)
     _sb_record_binding!(data, beta, :population_effect, plan.target)

@@ -3425,7 +3425,7 @@ function brm_ranef_sd_coordinates(d::BRMDescriptor, logical::Symbol,
     all_blocks = ranef_blocks(d)
     blocks = [b for b in all_blocks if b.id === id]
     if isempty(blocks)
-        scales = _brm_total_id_scales(d, id)
+        scales = _brm_claimed_id_scales(d, id)
         if !isempty(scales)
             matches = [s for s in scales if s.margin == (logical, coefficient)]
             length(matches) == 1 || error(
@@ -3434,11 +3434,10 @@ function brm_ranef_sd_coordinates(d::BRMDescriptor, logical::Symbol,
                 "are $(Tuple(s.margin for s in scales)).")
             s = only(matches)
             return _brm_ranef_sd_result(brmi, logical, id, coefficient, s.output,
-                _brm_total_scale_coordinate(s, constrained_names, "brm_descriptor"))
+                _brm_claimed_scale_coordinate(s, constrained_names, "brm_descriptor"))
         end
         available = unique!(Symbol[b.id for b in all_blocks if !isnothing(b.id)])
-        for block in total_effect_blocks(d.plan),
-                cid in d.plan.bindings[block.binding].column_ids
+        for (; ids) in _brm_claimed_id_blocks(d), cid in ids
             isnothing(cid) || cid in available || push!(available, cid)
         end
         error("brm_descriptor: no shared random-effect `|ID|` block `$id`. This " *
@@ -3530,19 +3529,33 @@ function _brm_margin_link(brmi, logical::Symbol)
     only(predictors).link_lhs_fn
 end
 
-# The exact total-coefficient columns that absorbed `|id|`, one per margin:
-# the block, its column `k`, the margin `(predictor, coefficient)` and the
-# descriptor output of the block's total scale vector, whose element `k` is
-# the margin's between-group SD. Empty when no total block absorbed `|id|`.
-function _brm_total_id_scales(d::BRMDescriptor, id::Symbol)
+# The exact total-coefficient and sum-to-zero (S2Z) blocks that claimed
+# one-margin `|ID|` buckets, in emission order: each block with the `|ID|` of
+# every column (`nothing` for a column of a plain `(… | g)` block).
+function _brm_claimed_id_blocks(d::BRMDescriptor)
+    blocks = Iterators.flatten((total_effect_blocks(d.plan), s2z_effect_blocks(d.plan)))
+    map(collect(blocks)) do block
+        binding = d.plan.bindings[block.binding]
+        haskey(binding, :column_ids) || error(
+            "brm_descriptor: sum-to-zero block `$(block.binding)` records no `|ID|` " *
+            "of its columns; it was built before BRM recorded them. Rebuild the SBBRMI.")
+        (; block, ids=binding.column_ids)
+    end
+end
+
+# The columns of exact total-coefficient and S2Z blocks that claimed `|id|`,
+# one per margin: the block, its column `k`, the margin `(predictor,
+# coefficient)` and the descriptor output of the block's scale vector, whose
+# element `k` is the margin's between-group SD. Empty when no such block
+# claimed `|id|`.
+function _brm_claimed_id_scales(d::BRMDescriptor, id::Symbol)
     out = NamedTuple[]
-    for block in total_effect_blocks(d.plan)
-        ids = d.plan.bindings[block.binding].column_ids
+    for (; block, ids) in _brm_claimed_id_blocks(d)
         columns = findall(isequal(id), collect(ids))
         isempty(columns) && continue
         outputs = [o for o in d.outputs if o.name === block.scales]
         length(outputs) == 1 || error(
-            "brm_descriptor: exact-total scale `$(block.scales)` of `|$id|` owns " *
+            "brm_descriptor: scale `$(block.scales)` of `|$id|` owns " *
             "$(length(outputs)) descriptor outputs; expected exactly one. " *
             "Re-reflect the model that produced the posterior draws.")
         for k in columns
@@ -3553,13 +3566,13 @@ function _brm_total_id_scales(d::BRMDescriptor, id::Symbol)
     out
 end
 
-# The index into `names` of one absorbed margin's total scale.
-function _brm_total_scale_coordinate(s, names, caller)
+# The index into `names` of one claimed margin's scale.
+function _brm_claimed_scale_coordinate(s, names, caller)
     coordinates = _brm_element_coordinates(s.output, names)
     K = length(s.block.columns)
     length(coordinates) == K || error(
-        "$caller: exact-total scale `$(s.block.scales)` owns $K between-group " *
-        "SDs but resolves to $(length(coordinates)) of the given names" *
+        "$caller: scale `$(s.block.scales)` of block `$(s.block.binding)` owns $K " *
+        "between-group SDs but resolves to $(length(coordinates)) of the given names" *
         (s.output.kind === :generated_quantity ? "; it is drawn in generated " *
             "quantities, so pass names that include them" :
             ". Re-reflect the model that produced the posterior draws") * ".")
