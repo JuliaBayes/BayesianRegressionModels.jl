@@ -14,6 +14,7 @@
 
 using Test
 using BayesianRegressionModels
+using Random
 using Statistics
 import DifferentiationInterface as DI
 import Enzyme
@@ -147,12 +148,62 @@ end
     # Before the floor, a weight whose exact log-scale is below -745 had
     # `exp(log_scale) == 0`, and its losses were NaN from the first candidate.
     @test all(s -> s.loss isa Float64 && isfinite(s.loss), scored)
+    # A floored observation (log-scale at or below exp(-110)) scores every
+    # candidate in the non-centred frame (snag adaptive-centeri-eca5a77c).
     for s in scored
         b, t = s.pair_number, s.candidate
-        scale = exp.(t .* log_scales[b, :])
+        scale = [l > -110 ? exp(t * l) : 1.0 for l in log_scales[b, :]]
         expected = cor(scale .* innovations[b, :], invariant_gradient[b, :] ./ scale)
         @test s.loss ≈ expected atol=2e-13 rtol=2e-13
     end
+    floored = [b for b in 1:FLOOR_K if all(<=(-110), log_scales[b, :])]
+    @test !isempty(floored)
+    for b in floored
+        losses = [s.loss for s in scored if s.pair_number == b]
+        @test length(losses) == 11
+        @test all(l -> l === first(losses), losses)
+    end
+end
+
+# A weight whose scale sits on the floor for a whole window cannot tell its
+# candidate frames apart. Before snag adaptive-centeri-eca5a77c its losses tied
+# up to rounding (-1 +- 1e-15 on mcycle) and the selection kept whichever
+# candidate rounding favoured; a chain that later shortened its length scale
+# then met an exp(c * ~150) funnel and stayed at the long length scale (mcycle:
+# 3 of 40 chains). The exact-tie assertion above is the regression guard. This
+# testset checks the other half end to end: WarmupHMC's selection keeps the
+# first candidate of an exact tie, so a weight scored only on the floor keeps
+# c = 0 (a tie order that picked any other candidate fails it).
+struct FloorLongScale
+    center::Vector{Float64}
+    sd::Vector{Float64}
+end
+LogDensityProblems.dimension(p::FloorLongScale) = length(p.center)
+LogDensityProblems.capabilities(::Type{FloorLongScale}) =
+    LogDensityProblems.LogDensityOrder{1}()
+floor_logcosh(u) = abs(u) + log1p(exp(-2abs(u))) - log(2)
+LogDensityProblems.logdensity(p::FloorLongScale, q) =
+    -sum(floor_logcosh, (q .- p.center) ./ p.sd)
+LogDensityProblems.logdensity_and_gradient(p::FloorLongScale, q) =
+    (LogDensityProblems.logdensity(p, q), -tanh.((q .- p.center) ./ p.sd) ./ p.sd)
+
+@testset "a weight scored only on the floor keeps the non-centred frame" begin
+    sb, block, _ = floor_problem()
+    x0 = floor_position(block, 9.0, 0.8, zeros(FLOOR_K))
+    center, sd = copy(x0), ones(length(x0))
+    sd[only(block.length_scales)] = 0.02
+    sd[block.sd] = 0.1
+    adaptive = adaptive_centering_problem(sb, FloorLongScale(center, sd), DI.AutoEnzyme();
+        unc_names=FLOOR_NAMES)
+    fit = adaptive_warmup_mcmc(Xoshiro(7), adaptive; n_draws=400)
+    draws = fit.posterior_position
+    log_scales = [FLOOR_BRM._adaptive_hsgp_log_scale(view(draws, :, j), block, b)
+                  for b in 1:FLOOR_K, j in axes(draws, 2)]
+    controls = [last(pair).c for pair in WarmupHMC.reparam_sources(adaptive)]
+    floored = [b for b in 1:FLOOR_K if all(<=(-110), log_scales[b, :])]
+    exact = [b for b in 1:FLOOR_K if all(>(-110), log_scales[b, :])]
+    @test length(floored) >= 10 && !isempty(exact)
+    @test all(iszero, controls[floored])
 end
 
 @testset "partially centred cells on a floored scale keep a finite transform" begin
