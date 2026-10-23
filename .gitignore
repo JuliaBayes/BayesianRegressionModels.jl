@@ -26,6 +26,10 @@ docs/src/public/live-*/
 # environment.
 Manifest*.toml
 !scripts/render_env/Manifest.toml
+# The deployed BRMMacro app starts from its committed, pinned Manifests
+# (Claude todo 0lhctb2; written by Claude's pin-deps.sh).
+!web-macro/Manifest.toml
+!web-macro/app/Manifest.toml
 
 # Reproducible develop-path checkouts materialized by test/setup_env.jl.
 test/.bootstrap/
