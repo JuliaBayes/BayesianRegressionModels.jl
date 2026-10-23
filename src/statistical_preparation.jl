@@ -8,10 +8,7 @@ const BRM = parentmodule(@__MODULE__)
 const _HSGP_SQRT2PI = 2.5066282746310002
 _rk_spline_fail(message) = error("BRM statistical preparation: " * message)
 _rk_fit_spline(args...; kwargs...) = BRM._brm_fit_spline(args...; kwargs...)
-function _rk_apply_spline(fit, x)
-    X, Z = BRM._brm_apply_spline(fit, x)
-    X[:, 2:2], Z
-end
+_rk_apply_spline(fit, x) = BRM._brm_apply_spline(fit, x)
 _rk_fit_cr_spline(args...; kwargs...) = BRM._brm_fit_cr_spline(args...; kwargs...)
 _rk_apply_cr_spline(args...) = BRM._brm_apply_cr_spline(args...)
 _rk_canonical_column_signs(M) = BRM._brm_canonical_column_signs(M)

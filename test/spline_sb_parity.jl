@@ -7,8 +7,11 @@ include(joinpath(@__DIR__, "spline_parity_models.jl"))
 function spline_sb_point(label, model)
     values = Dict("sigma" => -0.25, "pop_mu_beta_pop.1" => -0.3)
     if label == "s"
-        merge!(values, Dict("s_x_b_fixed.$i" => v for
-            (i, v) in enumerate([-0.2, -0.15])))
+        # The TPS fixed block is the centered linear column alone; the point
+        # that held a constant coefficient (-0.2) beside the intercept (-0.3)
+        # is this one with the two folded together.
+        values["pop_mu_beta_pop.1"] = -0.5
+        values["s_x_b_fixed.1"] = -0.15
         merge!(values, Dict("s_x_b_pen_raw.$i" => v for
             (i, v) in enumerate([-0.1, -0.05, 0.0, 0.05, 0.1, 0.15, 0.2, 0.25])))
         values["s_x_sd_pen.1"] = 0.3
@@ -27,9 +30,9 @@ end
 
 @testset "canonical spline BridgeStan anchors" begin
     for (label, fixture, dimension, anchor) in (
-            ("s", spline_s_parity_case, 13, SPLINE_S_SB_ANCHOR),
+            ("s", spline_s_parity_case, 12, SPLINE_S_SB_ANCHOR),
             ("t2", spline_t2_parity_case, 13, SPLINE_T2_SB_ANCHOR),
-            ("accel", spline_accel_parity_case, 24, SPLINE_ACCEL_SB_ANCHOR))
+            ("accel", spline_accel_parity_case, 22, SPLINE_ACCEL_SB_ANCHOR))
         @testset "$label" begin
             sb = SBBRMI(fixture().brmi; mod=@__MODULE__)
             problem = StanBlocks.stan_instantiate(sb.model)

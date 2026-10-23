@@ -2157,12 +2157,109 @@ _sb_cdar = StanBlocks.@slic begin
     return correlated_damped_walk(sigma, rho, eta, L, n_steps, group_idx, step_idx)
 end
 
-# Penalized 1-D thin-plate regression spline. `Xnull` contains the unpenalized
-# polynomial null space {1, x}; `Zpen` is the range-space basis after the
-# wiggliness penalty has been diagonalized and absorbed into the columns. The
-# standardized range coefficients therefore have one iid Gaussian scale,
-# matching the mixed-model parameterization used by mgcv/brms. The caller adds
-# the resulting length-N contribution directly to the linear predictor.
+# Areal `car(area; edges=..., type=...)`. `phi` lives on the STRUCTURED nodes
+# only (areas with at least one neighbour), ordered so that every connected
+# component is one contiguous segment `comp_start[c] .+ (0:comp_size[c]-1)`; the
+# edges index that ordering. The ICAR density is the pairwise-difference
+# kernel plus a soft sum-to-zero per component (Morris et al. 2019). The `_rng`
+# draws the same law exactly, with a hard per-component constraint: with
+# `M = Q + sum_c 1_c 1_c' / n_c` (positive definite), `y ~ N(0, inv(M))`
+# centred within each component has covariance `pinv(Q)`.
+StanBlocks.@deffun begin
+    brm_icar_rng(vector[n], node1::int[E], node2::int[E], comp_start::int[C],
+                 comp_size::int[C])::vector[n] = begin
+        M = rep_matrix(0., n, n)
+        for e in 1:E
+            M[node1[e], node1[e]] += 1.
+            M[node2[e], node2[e]] += 1.
+            M[node1[e], node2[e]] -= 1.
+            M[node2[e], node1[e]] -= 1.
+        end
+        for c in 1:C
+            for a in comp_start[c]:(comp_start[c] + comp_size[c] - 1)
+                for b in comp_start[c]:(comp_start[c] + comp_size[c] - 1)
+                    M[a, b] += 1. / comp_size[c]
+                end
+            end
+        end
+        y = multi_normal_rng(rep_vector(0., n), inverse_spd(M))
+        for c in 1:C
+            centre = mean(segment(y, comp_start[c], comp_size[c]))
+            for a in comp_start[c]:(comp_start[c] + comp_size[c] - 1)
+                y[a] -= centre
+            end
+        end
+        y
+    end
+    @lpxf brm_icar_lpdf(phi::vector[n], node1::int[E], node2::int[E], comp_start::int[C],
+                        comp_size::int[C])::real = begin
+        lp = -0.5 * dot_self(phi[node1] - phi[node2])
+        for c in 1:C
+            lp += normal_lpdf(sum(segment(phi, comp_start[c], comp_size[c])), 0., 0.001 * comp_size[c])
+        end
+        lp
+    end
+    # A joint law has no per-node decomposition: the whole density rides on
+    # the first entry so the entries still sum to it.
+    brm_icar_lpdfs(phi::vector[n], node1::int[E], node2::int[E], comp_start::int[C],
+                   comp_size::int[C])::vector[n] = begin
+        out = rep_vector(0., n)
+        out[1] = brm_icar_lpdf(phi, node1, node2, comp_start, comp_size)
+        out
+    end
+end
+
+# Per-area effects: `struct_idx[k]` is area `k`'s position in `phi` (0 for an
+# island); `inv_scale[k]` is `1 / s_c` of its component (0 for an island), so an
+# island's BYM2 effect is `sigma * theta[k]`.
+StanBlocks.@deffun begin
+    car_icar_effects(sigma::real, phi::vector[n], struct_idx::int[N])::vector[N] = begin
+        out = rep_vector(0., N)
+        for k in 1:N
+            if struct_idx[k] > 0
+                out[k] = sigma * phi[struct_idx[k]]
+            end
+        end
+        out
+    end
+    car_bym2_effects(sigma::real, rho::real, phi::vector[n], theta::vector[N],
+                     struct_idx::int[N], inv_scale::vector[N])::vector[N] = begin
+        out::vector[N]
+        for k in 1:N
+            out[k] = sqrt(1. - rho * (struct_idx[k] > 0)) * theta[k]
+            if struct_idx[k] > 0
+                out[k] += sqrt(rho * inv_scale[k]) * phi[struct_idx[k]]
+            end
+        end
+        sigma * out
+    end
+    car_rows(effects::vector[N], row_idx::int[R])::vector[R] = effects[row_idx]
+end
+
+_sb_car_icar = StanBlocks.@slic begin
+    sigma ~ normal(0., 1.; lower=0.)
+    phi::vector[n_struct] ~ brm_icar(node1, node2, comp_start, comp_size)
+    effects = car_icar_effects(sigma, phi, struct_idx)
+    return car_rows(effects, row_idx)
+end
+
+_sb_car_bym2 = StanBlocks.@slic begin
+    sigma ~ normal(0., 1.; lower=0.)
+    rho ~ beta(0.5, 0.5; lower=0., upper=1.)
+    phi::vector[n_struct] ~ brm_icar(node1, node2, comp_start, comp_size)
+    theta ~ std_normal(; n=n_nodes)
+    effects = car_bym2_effects(sigma, rho, phi, theta, struct_idx, inv_scale)
+    return car_rows(effects, row_idx)
+end
+
+# Penalized 1-D thin-plate regression spline. `Xnull` is the unpenalized
+# centered linear column: the formula intercept owns the null space's
+# constant, so `1 + s(x) + s(z)` stays identified. `Zpen` is the range-space
+# basis after the wiggliness penalty has been diagonalized and absorbed into
+# the columns. The standardized range coefficients therefore have one iid
+# Gaussian scale, matching the mixed-model parameterization used by mgcv/brms.
+# The caller adds the resulting length-N contribution directly to the linear
+# predictor.
 #
 # That scale is `sd_pen[1]` rather than a bare `sds` so `sd(<lp|:>, s(x)) ~
 # Exponential(scale)` configures THIS submodel instead of selecting a second
@@ -2173,7 +2270,7 @@ end
 # (decision `145tp0o`).
 _sb_s_generic = StanBlocks.@slic begin
     n_pen = dims(Zpen)[2]
-    b_fixed::vector[2]
+    b_fixed::vector[1]
     sd_pen ~ std_normal(; n=1, lower=0.0)
     b_pen_raw ~ std_normal(; n=n_pen)
     b_pen = sd_pen[1] * b_pen_raw
@@ -5589,6 +5686,24 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         new_data[k.time_idx] = time_idx
         push!(handled, k.n_steps)
         new_preproc[key] = PreprocEntry(:rw, merge(e.const_, (; steps)), e.raw_ref, true)
+    elseif e.kind === :car
+        # `car(area; edges=..., type=...)`: frozen, the graph and its numbering are
+        # constants of the fit and each row must name a fitted area; fresh, the
+        # graph is rebuilt from the new area and edge columns.
+        area_col, from_col, to_col = e.raw_ref
+        area_raw = _sb_df_column(df, area_col)
+        area_raw isa AbstractVector || error("sbimpl: reprocess: `car` area column must be a vector")
+        k = e.const_.keys
+        labels = _brm_car_labels(area_raw, "area")
+        graph = freeze ? e.const_.graph : _sb_car_graph_record(_brm_car_graph(labels,
+            _brm_car_labels(_sb_df_column(df, from_col), "edge"),
+            _brm_car_labels(_sb_df_column(df, to_col), "edge")))
+        row_idx = _brm_car_row_idx(graph.nodes, labels; prefix="sbimpl: reprocess")
+        _sb_car_data!(new_data, k, merge(graph, (; row_idx)))
+        foreach(other -> push!(handled, other), Base.values(k))
+        # the edge columns feed only the graph; a frozen replay needs none
+        push!(handled, from_col, to_col)
+        new_preproc[key] = PreprocEntry(:car, merge(e.const_, (; graph)), e.raw_ref, true)
     elseif e.kind === :cdar
         # `cdar(step; by=group, cor=C)`: levels and `L` are frozen from the fit (the
         # correlation is a hyperparameter of the term — rebuild the model to change
@@ -7903,7 +8018,7 @@ _sb_real_vec(label::Symbol, n::Symbol, v) =
 # marker (plus its `_sb_predictor_term!` emit method — see the group-block
 # branch of `_sb_emit_direct!`). Default is population-column treatment.
 _sb_is_direct_term(f) = false
-for _direct_builtin in (offset, mo1, s, t2, gp, hsgp, dar, rw, cdar)
+for _direct_builtin in (offset, mo1, s, t2, gp, hsgp, dar, rw, cdar, car)
     @eval _sb_is_direct_term(::typeof($_direct_builtin)) = true
 end
 _sb_classify_term!(t::ExprColumn, pop_terms, ran_terms, direct_terms) = begin
@@ -8878,9 +8993,14 @@ _sb_term_slot_config(::Val{:sigma}, entry) =
     _sb_gp_scale_prior(entry.spec, _sb_term_prior_spelling(entry);
         default=getf(entry.term) in (dar, rw, cdar) ?
             "`Normal(0, 0.2)` truncated to be positive" :
+        getf(entry.term) === car ? "`Normal(0, 1)` truncated to be positive" :
             "`LogNormal(0, 1)` truncated to be positive")
 _sb_term_slot_config(::Val{:ar}, entry) =
     _sb_dar_ar_prior(entry.spec, _sb_term_prior_spelling(entry))
+_sb_term_slot_config(::Val{:mixing}, entry) = merge(
+    _sb_dar_ar_prior(entry.spec, _sb_term_prior_spelling(entry);
+                     what="BYM2 mixing share"),
+    (; spelling=_sb_term_prior_spelling(entry)))
 # The address spelling travels with the length-scale configuration so the
 # emitter can name it when the fitted floor rules out a floor-marked prior.
 _sb_term_slot_config(::Val{:length_scale}, entry) = merge(
@@ -9142,10 +9262,12 @@ function _sb_gp_scale_const(x)
     Float64(x.args[2] / x.args[3])
 end
 
-# A differenced-AR persistence is a unit-interval coefficient. Its declaration
-# carries that structural support independently of the configured prior kernel.
+# A differenced-AR persistence (or a BYM2 mixing share) is a unit-interval
+# coefficient. Its declaration carries that structural support independently of
+# the configured prior kernel.
 # Uniform additionally narrows the declaration to its explicit support.
-function _sb_dar_ar_prior(spec, spelling::AbstractString)
+function _sb_dar_ar_prior(spec, spelling::AbstractString;
+                          what="differenced-AR persistence")
     T = _as_distribution_type(spec.family)
     if !isnothing(T) && T <: Uniform
         args = map(_sb_effect_prior_arg, spec.arguments)
@@ -9155,7 +9277,7 @@ function _sb_dar_ar_prior(spec, spelling::AbstractString)
             prior=spec.expression, lower=0.0, upper=1.0)
         (0 <= lower < upper <= 1) || error(
             "sbimpl: `$spelling ~ Uniform($lower, $upper)` must stay inside " *
-            "the differenced-AR persistence bounds `[0, 1]`.")
+            "the $what bounds `[0, 1]`.")
         return (; prior=spec.expression, lower, upper)
     end
     (; prior=spec.expression, lower=0.0, upper=1.0)
@@ -9230,6 +9352,22 @@ function _sb_rw_submodel_expr(term_overrides, t)
     sigma_cfg = _sb_term_cfg(term_overrides, t, :sigma)
     isnothing(sigma_cfg) && return :_sb_rw1
     Base.merge(_sb_rw1, _sb_gp_prior_stmt(:sigma, sigma_cfg))
+end
+
+function _sb_car_submodel_expr(term_overrides, t, type::Symbol)
+    rho_cfg = _sb_term_cfg(term_overrides, t, :mixing)
+    sigma_cfg = _sb_term_cfg(term_overrides, t, :sigma)
+    # merging a `rho` statement into the ICAR submodel would sample an unused
+    # parameter: the address names nothing in this model
+    type === :icar && !isnothing(rho_cfg) && error(
+        "sbimpl: `$(rho_cfg.spelling)` addresses a BYM2 mixing " *
+        "share, but `car(...; type=:icar)` has none")
+    base = type === :bym2 ? :_sb_car_bym2 : :_sb_car_icar
+    (isnothing(rho_cfg) && isnothing(sigma_cfg)) && return base
+    stmts = Any[]
+    isnothing(rho_cfg) || push!(stmts, _sb_gp_prior_stmt(:rho, rho_cfg))
+    isnothing(sigma_cfg) || push!(stmts, _sb_gp_prior_stmt(:sigma, sigma_cfg))
+    Base.merge(type === :bym2 ? _sb_car_bym2 : _sb_car_icar, stmts...)
 end
 
 function _sb_cdar_submodel_expr(term_overrides, t)
@@ -9535,6 +9673,11 @@ function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(cdar), t, s
                                mod::Module=@__MODULE__)
     push!(summands, _sb_predictor_term!(stmts, data, cdar, t; target, term_overrides))
 end
+function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(car), t, summands;
+                               term_overrides=Dict{Symbol,Any}(),
+                               mod::Module=@__MODULE__)
+    push!(summands, _sb_predictor_term!(stmts, data, car, t; target, term_overrides))
+end
 _sb_emit_direct_expr!(_stmts, _data, _target::Symbol, f, _t, _summands; kwargs...) =
     error("sbimpl: unsupported direct-summand term `$f`")
 
@@ -9707,6 +9850,10 @@ _sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(rw)}, gterms=(); kwargs.
     error("sbimpl: `rw(...)` is a population-level direct trajectory and cannot appear inside a random-effects term")
 _sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(cdar)}, gterms=(); kwargs...) =
     error("sbimpl: `cdar(...)` is a population-level direct trajectory and cannot appear inside a random-effects term")
+# An areal field is itself the per-area effect; a spatially varying slope over
+# the graph is not built.
+_sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(car)}, gterms=(); kwargs...) =
+    error("sbimpl: `car(...)` is a direct areal effect and cannot appear inside a random-effects term; write it as a predictor summand, `mu ~ 1 + car(area; edges=(from, to), type=...)`")
 # `a & b` in a random-effects LHS lowers through the SAME interaction expander
 # as the population path (treatment coding; cont×cont / cont×cat / cat×cat).
 # Without this the term falls through to the protect-style materializer, which
@@ -12593,11 +12740,12 @@ _sb_predictor_term!(stmts, data, ::typeof(interval_censored), t;
     col_name
 end
 # Penalized thin-plate predictor `s(x)`. Fits a frozen rank-10 TPS eigenbasis
-# from the raw training column, then stashes its two-column null-space matrix
-# and eight-column penalty-whitened range matrix as Stan data. `_sb_s` owns the
-# flat null-space coefficients, penalized coefficients, and smoothing SD; the
-# returned contribution is a direct summand (no extra `popefs` beta). Only
-# the default basis is supported -- `bs` and `k=`/`knots=` are follow-ons.
+# from the raw training column, then stashes its one-column (centered linear)
+# null-space matrix and eight-column penalty-whitened range matrix as Stan
+# data. `_sb_s` owns the flat linear coefficient, penalized coefficients, and
+# smoothing SD; the returned contribution is a direct summand (no extra
+# `popefs` beta). Only the default basis is supported -- `bs` and
+# `k=`/`knots=` are follow-ons.
 # Carriers disambiguate like `gp`/`hsgp`: the first `s(x)` keeps the
 # historical `s_<x>` names, while a repeat of the same column -- in another
 # predictor or twice in one -- takes `s_<target>_<x>` (+ serial).
@@ -13239,6 +13387,53 @@ _sb_predictor_term!(stmts, data, ::typeof(cdar), t;
     _sb_record_preproc!(data, keys_.step_idx, PreprocEntry(:cdar,
         (; steps=st.steps, groups=st.groups, L=st.L, keys=keys_), (xname, gname), true))
     submodel = _sb_cdar_submodel_expr(term_overrides, t)
+    push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
+        submodel, term_overrides, t; keys_...)))
+    col_name
+end
+# `car(area; edges=(from, to), type=...)`: the shared preparation builds the
+# graph, its components and BYM2 scaling factors; they ride as data under the
+# term's own name. `_sb_car_data!` writes them, so a fresh `reprocess` rebuild
+# and the construction emit the same keys.
+const _SB_CAR_GRAPH_FIELDS = (:nodes, :n_struct, :n_nodes, :node1, :node2,
+    :comp_start, :comp_size, :struct_idx, :inv_scale)
+_sb_car_graph_record(st) =
+    NamedTuple{_SB_CAR_GRAPH_FIELDS}(map(f -> getproperty(st, f), _SB_CAR_GRAPH_FIELDS))
+function _sb_car_keys(col_name::Symbol, type::Symbol)
+    names = type === :bym2 ?
+        (:n_struct, :n_nodes, :node1, :node2, :comp_start, :comp_size,
+         :struct_idx, :inv_scale, :row_idx) :
+        (:n_struct, :node1, :node2, :comp_start, :comp_size, :struct_idx, :row_idx)
+    NamedTuple{names}(map(n -> Symbol(col_name, :_, n), names))
+end
+function _sb_car_data!(data, keys_, st)
+    for (field, key) in pairs(keys_)
+        data[key] = getproperty(st, field)
+    end
+    data
+end
+_sb_predictor_term!(stmts, data, ::typeof(car), t;
+                    target::Symbol, term_overrides=Dict{Symbol,Any}(), kwargs...) = begin
+    area, (from, to), type = _brm_car_arguments(t)
+    aname, araw = _sb_inner_data(:car, area)
+    fname, fraw = _sb_inner_data(:car, from)
+    tname, traw = _sb_inner_data(:car, to)
+    prepared = _brm_prepare_term(t, target,
+        (; data=Dict{Symbol,Any}(aname => araw, fname => fraw, tname => traw)))
+    st = prepared.state
+    col_name = Symbol(:car_, target, :_, aname)
+    keys_ = _sb_car_keys(col_name, type)
+    for key in values(keys_)
+        haskey(data, key) && error("sbimpl: `car` reserves data key `$key`, but that name is already used")
+    end
+    _sb_car_data!(data, keys_, st)
+    # replay: the graph is a constant of the fitted term (frozen), or rebuilt from
+    # the new edge columns (fresh). Recorded on the row-index key; the other keys
+    # ride along.
+    graph = _sb_car_graph_record(st)
+    _sb_record_preproc!(data, keys_.row_idx, PreprocEntry(:car,
+        (; type, graph, keys=keys_), (aname, fname, tname), true))
+    submodel = _sb_car_submodel_expr(term_overrides, t, type)
     push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
         submodel, term_overrides, t; keys_...)))
     col_name
@@ -14748,10 +14943,12 @@ end
 # family per (component Stan family, arity, K, discrete/continuous) shape,
 # cached in `_SB_MIXTURE_CACHE`.
 #
-# Each row contributes `log_sum_exp(log(weights) + component_lpdf)` — the
+# Each row contributes `log_sum_exp(log(w_k) + component_lpdf)` — the
 # vector `log_sum_exp` StanBlocks traces (its tracer has no binary overload),
-# over one `terms::vector[K]` per row. Predictive draws select
-# `categorical_rng(weights)` per row, then draw from that row's selected
+# over one `terms::vector[K]` per row. The K weights are K per-row arguments
+# like the component arguments, so a row-varying weight (a linear predictor)
+# and a shared simplex lower the same way. Predictive draws select
+# `categorical_rng` over the row's weights, then draw from that row's selected
 # component. Component densities call the SAME `X_lpdf`/`X_lpmf`/`X_rng`
 # functions the plain single-family path resolves, with the SAME
 # `_sb_stan_dist_args` parameterization translation, so a family that lowers
@@ -14780,11 +14977,14 @@ end
 #   structurally different counts are rejected — share one column.
 # - weights are a numeric vector summing to 1 (frozen as
 #   `<target>_mixture_weights` data via `_sb_record_static!`), a length-K
-#   numeric data column, or a Dirichlet-backed simplex parameter. Anything
-#   else is rejected.
+#   numeric data column, a Dirichlet-backed simplex parameter, or a length-K
+#   vector of model expressions (`[1 - w, w]`, scalar or per row). Expression
+#   weights are not a simplex by construction, so their family checks every
+#   row at run time and rejects weights that are negative or do not sum to 1.
+#   Anything else is rejected.
 #
-# Scalar-vs-vector component arguments need no Julia-side classification:
-# every translated argument is wrapped in
+# Scalar-vs-vector component arguments and weights need no Julia-side
+# classification: every translated argument is wrapped in
 # `brm_joint_mean_rows(arg, num_elements(y))` (real positions) or
 # `brm_mixture_rows_int(arg, num_elements(y))` (trial-count positions), whose
 # two-method dispatch broadcasts scalars and passes row vectors through —
@@ -14859,7 +15059,12 @@ function _sb_mixture_check_weights(weights, K, target)
     nothing
 end
 
-function _sb_mixture_weights_expr!(target, weights, K, data)
+# The K weights as K Stan expressions, each a scalar or one value per row, and
+# whether the family must check each row's weights at run time (`checked`):
+# only weights that are not a probability vector by construction need it.
+_sb_mixture_indexed_weights(expr, K) = Any[Expr(:ref, expr, k) for k in 1:K]
+
+function _sb_mixture_weights_exprs!(target, weights, K, data)
     if weights isa Union{AbstractVector,Tuple} && all(w -> w isa Real, weights)
         _sb_mixture_check_weights(weights, K, target)
         key = Symbol(target, :_mixture_weights)
@@ -14868,33 +15073,53 @@ function _sb_mixture_weights_expr!(target, weights, K, data)
             "column; rename that column")
         data[key] = Float64.(collect(weights))
         _sb_record_static!(data, key)
-        return key
+        return (; exprs=_sb_mixture_indexed_weights(key, K), checked=false)
+    elseif weights isa Union{AbstractVector,Tuple}
+        # `[1 - w, w]`: one model expression per component, each a scalar or a
+        # per-row value (a linear predictor on its response scale).
+        length(weights) == K || error(
+            "sbimpl: `MixtureModel($target)` has $K components but " *
+            "$(length(weights)) weights")
+        for w in weights
+            w isa Bool && error(
+                "sbimpl: `MixtureModel($target)` weights must be numeric, got a Boolean")
+            w isa Real && !(isfinite(w) && 0 <= w <= 1) && error(
+                "sbimpl: `MixtureModel($target)` weight $w lies outside [0, 1]")
+        end
+        return (; exprs=Any[w isa Real ? Float64(w) : _sb_scalar_expr(w, data)
+                            for w in weights], checked=true)
     elseif weights isa NamedColumn && parent(weights) isa DataColumn
         raw = parent(parent(weights))
         raw isa AbstractVector && all(w -> w isa Real, raw) || error(
             "sbimpl: `MixtureModel($target)` data weights `$(name(weights))` must " *
             "be a numeric vector")
         _sb_mixture_check_weights(raw, K, target)
-        return _sb_scalar_expr(weights, data)
+        return (; exprs=_sb_mixture_indexed_weights(_sb_scalar_expr(weights, data), K),
+                checked=false)
     elseif weights isa NamedColumn
         backing = parent(weights)
         declaration = backing isa ExprColumn && getf(backing) === (~) ? backing : nothing
-        rhs_e = isnothing(declaration) ? nothing :
-            _as_expr_column(getargs(declaration, 2)[2])
-        isnothing(rhs_e) || !(getf(rhs_e) isa Type && getf(rhs_e) <: Dirichlet) &&
-            error(
-                "sbimpl: `MixtureModel($target)` weights `$(name(weights))` must be " *
-                "a numeric vector or a `~ Dirichlet(...)` simplex parameter")
-        return _sb_scalar_expr(weights, data)
+        expr = _sb_mixture_indexed_weights(_sb_scalar_expr(weights, data), K)
+        # A named model value that no `~` declares (an assignment) is a
+        # weight vector the family checks; a sampled one must be a simplex.
+        isnothing(declaration) && return (; exprs=expr, checked=true)
+        rhs_e = _as_expr_column(getargs(declaration, 2)[2])
+        getf(rhs_e) isa Type && getf(rhs_e) <: Dirichlet || error(
+            "sbimpl: `MixtureModel($target)` weights `$(name(weights))` must be " *
+            "a numeric vector, a `~ Dirichlet(...)` simplex parameter, or a " *
+            "vector of weight expressions such as `[1 - $(name(weights)), " *
+            "$(name(weights))]`")
+        return (; exprs=expr, checked=false)
     end
     error(
         "sbimpl: `MixtureModel($target)` weights must be a numeric vector of " *
-        "length $K or a simplex-valued model expression, got $(typeof(weights))")
+        "length $K, a simplex-valued model expression, or a vector of $K weight " *
+        "expressions such as `[1 - w, w]`, got $(typeof(weights))")
 end
 
 function _sb_mixture_family(stan_name::Symbol, n_args::Int, int_positions::Tuple,
-                            K::Int, discrete::Bool)
-    key = repr((:mixture, stan_name, n_args, int_positions, K, discrete))
+                            K::Int, discrete::Bool; checked::Bool=false)
+    key = repr((:mixture_rows, stan_name, n_args, int_positions, K, discrete, checked))
     lock(_SB_GEN_LOCK) do
         get!(_SB_MIXTURE_CACHE, key) do
         stem = Symbol(:brm_mixture_, _sb_stable_fingerprint(key))
@@ -14907,34 +15132,43 @@ function _sb_mixture_family(stan_name::Symbol, n_args::Int, int_positions::Tuple
         y_scalar = discrete ? :int : :real
         y_vector = discrete ? :int : :vector
         argname(k, j) = Symbol(:c, k, :_, j)
+        weightname(k) = Symbol(:w, k)
         scalar_kind(j) = j in int_positions ? :int : :real
         vector_kind(j) = j in int_positions ? :int : :vector
-        scalar_formals = Any[Expr(:(::), :y, y_scalar),
-                             Expr(:(::), :weights, Expr(:ref, :vector, :K))]
-        vector_formals = Any[Expr(:(::), :y, Expr(:ref, y_vector, :n)),
-                             Expr(:(::), :weights, Expr(:ref, :vector, :K))]
+        scalar_formals = Any[Expr(:(::), :y, y_scalar)]
+        vector_formals = Any[Expr(:(::), :y, Expr(:ref, y_vector, :n))]
+        for k in 1:K
+            push!(scalar_formals, Expr(:(::), weightname(k), :real))
+            push!(vector_formals, Expr(:(::), weightname(k), Expr(:ref, :vector, :n)))
+        end
         for k in 1:K, j in 1:n_args
             push!(scalar_formals, Expr(:(::), argname(k, j), scalar_kind(j)))
             push!(vector_formals, Expr(:(::), argname(k, j),
                                       Expr(:ref, vector_kind(j), :n)))
         end
-        scalar_assignments = Any[]
+        scalar_body = Any[]
+        if checked
+            total = foldl((a, b) -> Expr(:call, :+, a, b), weightname.(1:K))
+            invalid = foldl((a, b) -> Expr(:||, a, b), Any[
+                (Expr(:call, :<, weightname(k), 0) for k in 1:K)...,
+                Expr(:call, :>, Expr(:call, :abs, Expr(:call, :-, total, 1)), 1e-8)])
+            push!(scalar_body, Expr(:if, invalid, Expr(:block, Expr(:call, :reject,
+                "$(density): the mixture weights of a row must be nonnegative " *
+                "and sum to 1"))))
+        end
+        push!(scalar_body, :(terms::vector[$K]))
         for k in 1:K
             call = Expr(:call, density_fn, :y,
                         (argname(k, j) for j in 1:n_args)...)
-            push!(scalar_assignments,
+            push!(scalar_body,
                   Expr(:(=), Expr(:ref, :terms, k),
-                       Expr(:call, :+,
-                            Expr(:call, :log, Expr(:ref, :weights, k)), call)))
+                       Expr(:call, :+, Expr(:call, :log, weightname(k)), call)))
         end
-        row_actuals = Any[Expr(:ref, argname(k, j), :i)
-                          for k in 1:K for j in 1:n_args]
-        row_call = Expr(:call, density, Expr(:ref, :y, :i), :weights, row_actuals...)
-        scalar_body = quote
-            terms::vector[K]
-            $(scalar_assignments...)
-            log_sum_exp(terms)
-        end
+        push!(scalar_body, :(log_sum_exp(terms)))
+        row_actuals = Any[Expr(:ref, weightname(k), :i) for k in 1:K]
+        append!(row_actuals, (Expr(:ref, argname(k, j), :i)
+                              for k in 1:K for j in 1:n_args))
+        row_call = Expr(:call, density, Expr(:ref, :y, :i), row_actuals...)
         vector_body = quote
             rv = 0.
             for i in 1:n
@@ -14960,12 +15194,16 @@ function _sb_mixture_family(stan_name::Symbol, n_args::Int, int_positions::Tuple
                 branch = Expr(:if, Expr(:call, :(==), :k, k),
                               Expr(:block, comp_rng(k)), branch)
             end
+            probabilities = Any[Expr(:(=), Expr(:ref, :probabilities, k), weightname(k))
+                                for k in 1:K]
             quote
-                k = categorical_rng(weights)
+                probabilities::vector[$K]
+                $(probabilities...)
+                k = categorical_rng(probabilities)
                 $branch
             end
         end
-        vector_rng_call = Expr(:call, rng, :weights, row_actuals...)
+        vector_rng_call = Expr(:call, rng, row_actuals...)
         vector_rng_body = quote
             rv::$(Expr(:ref, y_vector, :n))
             for i in 1:n
@@ -14987,7 +15225,7 @@ function _sb_mixture_family(stan_name::Symbol, n_args::Int, int_positions::Tuple
                               Expr(:ref, y_vector, :n))
         density_defs = [
             :($scalar_sig = begin
-                $(nobroadcast(scalar_body)...)
+                $(scalar_body...)
             end),
             :($vector_sig = begin
                 $(nobroadcast(vector_body)...)
@@ -15094,7 +15332,7 @@ function _sb_lik_family!(stmts, target, ::Type{<:MixtureModel}, args, data)
         response isa AbstractVector{<:AbstractFloat} ||
             (data[target] = Float64.(response))
     end
-    weights_expr = _sb_mixture_weights_expr!(target, weights, K, data)
+    weights_plan = _sb_mixture_weights_exprs!(target, weights, K, data)
     translated = map(enumerate(components)) do (k, comp)
         Tuple(_sb_mixture_component_args(T, comp, target, k, data))
     end
@@ -15110,9 +15348,11 @@ function _sb_lik_family!(stmts, target, ::Type{<:MixtureModel}, args, data)
             "identical trial-count expression; value-equal but structurally " *
             "different counts could diverge on `reprocess` — share one column")
     end
-    family = _sb_mixture_family(stan_name, P, int_positions, K, discrete)
+    family = _sb_mixture_family(stan_name, P, int_positions, K, discrete;
+                                checked=weights_plan.checked)
     rows = Expr(:call, :num_elements, target)
-    actuals = Any[weights_expr]
+    actuals = Any[Expr(:call, :brm_joint_mean_rows, w, rows)
+                  for w in weights_plan.exprs]
     for t in translated, (j, arg) in enumerate(t)
         arg isa Bool && error(
             "sbimpl: `MixtureModel($target)` component arguments must be numeric, " *

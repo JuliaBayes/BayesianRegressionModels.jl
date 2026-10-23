@@ -826,6 +826,37 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     push!(pairs, BRMCoordinatePair(coefficient, rk_name, stan_name, beta, index, :identity))
 end
 
+# An areal field, paired by its area column and parameter roles: scale and
+# mixing share as scalars, the structured and unstructured fields elementwise
+# (both backends order them by the same fitted graph).
+function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
+        ::Val{:car}, record, rk, d, stan, stan_pos)
+    entry = _brm_term_entry(d, record.predictor,
+        e -> getf(e.value) === car &&
+            name(_sb_named_inner(:car, first(getargs(e.value)))) === record.area,
+        "`car($(record.area))`")
+    base = (; kind=:car, predictor=record.predictor, term=entry.term)
+    roles = record.type === :bym2 ?
+        ((:sd, :sigma, false), (:mixing, :rho, false),
+         (:structured, :phi, true), (:unstructured, :theta, true)) :
+        ((:sd, :sigma, false), (:structured, :phi, true))
+    for (parameter, local_name, elementwise) in roles
+        stan_names = _brm_transport_elements(
+            _brm_term_parameter_output(d, record.predictor, entry, parameter), stan,
+            (; base..., parameter))
+        declaration = Symbol(record.declaration, ".", getproperty(record.locals, local_name))
+        if elementwise
+            for (j, stan_name) in enumerate(stan_names)
+                push!(pairs, BRMCoordinatePair((; base..., parameter, index=j),
+                    Symbol(declaration, ".", j), stan_name, declaration, (j,), :identity))
+            end
+        else
+            push!(pairs, BRMCoordinatePair((; base..., parameter, index=1),
+                declaration, only(stan_names), declaration, (), :identity))
+        end
+    end
+end
+
 # An ungrouped HSGP component, paired by its formula axes and parameter roles.
 function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         ::Val{:hsgp}, record, rk, d, stan, stan_pos)
