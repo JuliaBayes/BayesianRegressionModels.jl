@@ -4,8 +4,29 @@
 # A basis is fitted to the fit-role columns (`x_fit`: the column itself when
 # the model is built, the training column on a frozen `reprocess`) and
 # evaluated at the bound rows.
-brm_tps_basis(x, x_fit, k) = _brm_apply_spline(_brm_fit_spline(x_fit; k), x)
+brm_tps_basis(x, x_fit, k) = brm_tps_apply(x, brm_tps_fit(x_fit, k), k)
 brm_tps_basis(x, k) = brm_tps_basis(x, x, k)
+# A thin-plate basis fitted to its fit-role axis, as one numeric vector (the
+# shape of data a program binds): the shift, the shifted training values (the
+# knots) and the penalty-whitened range projection. The emitted program
+# evaluates the basis at the rows from it with `brm_tps_apply`; the
+# three-argument `brm_tps_basis(x, x_fit, k)` above, which fits from the raw
+# axis, stays for sources printed before the fit was split from its basis.
+function brm_tps_fit(x_fit, k)
+    fit = _brm_fit_spline(x_fit; k)
+    vcat(fit.shift, fit.centers, vec(fit.range_projection))
+end
+brm_tps_apply(x, fit::AbstractVector{<:Real}, k) =
+    _brm_apply_spline(_brm_unpack_tps_fit(fit, k), x)
+
+function _brm_unpack_tps_fit(packed, k)
+    n, extra = divrem(length(packed) - 1, k - 1)
+    extra == 0 && n >= k || throw(ArgumentError(
+        "a packed thin-plate fit of rank $k holds 1 + n * $(k - 1) values for " *
+        "n >= $k knots, not $(length(packed))"))
+    (; shift=packed[1], centers=packed[2:n+1],
+        range_projection=reshape(packed[n+2:end], n, k - 2), k)
+end
 
 brm_t2_basis(x, z, x_fit, z_fit, k) = _brm_apply_t2(_brm_fit_t2(x_fit, z_fit; k), x, z)
 brm_t2_basis(x, z, k) = brm_t2_basis(x, z, x, z, k)
