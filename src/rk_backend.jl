@@ -275,7 +275,7 @@ end
 struct _RKTermSpec
     kind::Symbol # :intercept | :continuous | :factor | :offset |
                 # :ranef_gather | :spline | :gp | :hsgp | :ar |
-                # :monotonic | :monotonic_summand | :dar | :me
+                # :monotonic | :monotonic_summand | :dar | :me | :car
     columns::Vector{Symbol}
     # factor: (coding=:fullrank, levels=:observed) over every observed level,
     # or (coding=:subset, drop::Int, levels=:observed) over every observed
@@ -4718,9 +4718,10 @@ end
 const _RK_GP_HYPER_ADMITTED = "LogNormal, InverseGamma, Gamma, Exponential, " *
     "or zero-location Normal"
 
-function _rk_gp_hyper_prior(prior, role::String, target::Symbol, axis::Symbol)
+function _rk_gp_hyper_prior(prior, role::String, target::Symbol, axis::Symbol;
+                            term::String="gp")
     prefix = "RK backend"
-    where = "predictor `$target` `gp($axis)` $role"
+    where = "predictor `$target` `$term($axis)` $role"
     prior isa ExprColumn || error(
         "$prefix: $where prior is not a distribution call")
     f = getf(prior)
@@ -4759,6 +4760,83 @@ function _rk_gp_hyper_prior(prior, role::String, target::Symbol, axis::Symbol)
         Float64(arg)
     end
     (name, Tuple(resolved), nothing)
+end
+
+# ---- areal fields (car; mirrors `_sb_car_icar` / `_sb_car_bym2`) ----
+#
+# A `:car` term carries the fitted graph as generated data columns (edge ends
+# over the structured areas, each area's `phi` position or an island's padding
+# slot, its BYM2 weight), its connected components as literal segments, and the
+# area labels, which the program maps to graph positions in-graph, so a frozen
+# replay of new rows reuses the graph unchanged. The block's scale (and BYM2 mixing
+# share) priors follow the SB defaults: `sigma ~ restricted(Normal(0, 1), 0, Inf)`
+# (the kernel SB's `lower=0` declaration keeps), `rho ~ Beta(0.5, 0.5)`.
+function _rk_car_mixing_prior(prior, target::Symbol, area::Symbol)
+    prefix = "RK backend"
+    where = "predictor `$target` `car($area)` mixing share"
+    prior isa ExprColumn && getf(prior) isa Type || error(
+        "$prefix: $where prior is not a distribution call")
+    name = nameof(getf(prior))
+    name in (:Beta, :Uniform) || error(
+        "$prefix: $where prior `$name` is out of slice 1 (admitted: Beta, Uniform)")
+    isempty(getkwargs(prior)) || error(
+        "$prefix: $where prior cannot have keywords in slice 1")
+    args = getargs(prior)
+    length(args) == 2 && all(a -> a isa Number && isfinite(Float64(a)), args) || error(
+        "$prefix: $where prior `$name` needs two finite literal arguments")
+    lo, hi = Float64.(args)
+    name === :Uniform && !(0 <= lo < hi <= 1) && error(
+        "$prefix: $where prior `Uniform($lo, $hi)` must stay inside [0, 1]")
+    (name, (lo, hi), nothing)
+end
+
+function _rk_plan_car_term!(prepared::_BRMPreparedTerm{typeof(car)},
+        target::Symbol, data::AbstractDict,
+        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol})
+    state = prepared.state
+    source = prepared.source
+    stem = "car_$(target)_$(source)"
+    column(field, value) = begin
+        name = _rk_mint_generated!(taken, columns, string(stem, "_", field))
+        columns[name] = value
+        name
+    end
+    # Rows find their area among the graph's normalised labels (an `Int` area
+    # read as `Float64` codes still finds its node): the raw column when its
+    # labels already are those, otherwise a normalised copy.
+    raw = data[source]
+    labels = map(identity, _brm_car_labels(raw, "area"))
+    area = if all(isequal.(labels, raw)) && get(columns, source, raw) === raw
+        columns[source] = raw
+        source
+    else
+        column(:area_labels, labels)
+    end
+    graph = (; node1=column(:node1, state.node1), node2=column(:node2, state.node2),
+        # an island reads the padding slot `n_struct + 1`, which holds zero
+        struct_pos=column(:struct_pos,
+            [k == 0 ? state.n_struct + 1 : k for k in state.struct_idx]),
+        # component c is `phi[comp_start[c] .+ (0:comp_size[c]-1)]`
+        components=Tuple(zip(state.comp_start, state.comp_size)),
+        inv_scale=column(:inv_scale, state.inv_scale),
+        is_struct=column(:is_struct, Float64.(state.struct_idx .> 0)))
+    value = _rk_mint_generated!(taken, columns, stem)
+    sigma_family, sigma_args, sigma_support = _rk_gp_hyper_prior(
+        state.sd_prior, "scale", target, source; term="car")
+    # SB declares `sigma` with `lower=0` beside the plain kernel, so a
+    # zero-location Normal is restricted, not normalized (no `HalfNormal`)
+    sigma_support === :positive && (sigma_support = (:restricted, 0.0, Inf))
+    rho_param = state.type === :bym2 ?
+        _RKSampledParameter(:rho, _rk_car_mixing_prior(state.mixing_prior, target, source)..., :rho) :
+        nothing
+    _RKTermSpec(:car, Symbol[],
+        (; value, area, source, type=state.type, n_struct=state.n_struct, nodes=state.nodes,
+         graph..., inputs=(graph.node1, graph.node2, graph.struct_pos, graph.inv_scale,
+                           graph.is_struct),
+         sigma_param=_RKSampledParameter(
+             :sigma, sigma_family, sigma_args, sigma_support, :sigma),
+         rho_param),
+        value, value)
 end
 
 function _rk_plan_gp_term!(prepared::_BRMPreparedTerm{typeof(gp)},
@@ -5846,6 +5924,9 @@ Base.@nospecializeinfer function _rk_plan_predictor(@nospecialize(brmi::BRMI), c
         elseif prepared.callable === me
             push!(terms, _rk_plan_me_term!(
                 prepared, target, columns, taken, me_sources))
+        elseif prepared.callable === car
+            push!(terms, _rk_plan_car_term!(
+                prepared, target, context.data, columns, taken))
         else
             haskey(prepared.state, :fields) || error(
                 "$prefix: predictor `$target` structured term `$(nameof(prepared.callable))` " *
@@ -8375,6 +8456,9 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
     end
     statistical_inputs = Set{Symbol}(t.options.metadata for p in predictor_specs
         for t in p.terms if t.kind === :structured)
+    # An areal field's graph columns are read whole (edges, areas).
+    union!(statistical_inputs, (input for p in predictor_specs
+        for t in p.terms if t.kind === :car for input in t.options.inputs))
     union!(statistical_inputs, (spec.expression.args[2] for spec in derived
         if spec.expression.head === :_rk_data_preparation &&
             first(spec.expression.args) === :brm_matrix_column))

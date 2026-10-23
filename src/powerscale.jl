@@ -475,7 +475,7 @@ end
 const _BRM_POWERSCALE_PRIOR_FAMILIES = (Normal, Exponential)
 const _BRM_POWERSCALE_LIKELIHOODS = (Normal, BernoulliLogit)
 const _BRM_POWERSCALE_REJECT_HEADS =
-    ((|), doublepipe, gr, mm, gp, hsgp, s, t2, ar, dar, rw, cdar, mo, mo1,
+    ((|), doublepipe, gr, mm, gp, hsgp, s, t2, ar, dar, rw, cdar, car, mo, mo1,
      kernel, ragged, mi, me, interval_censored, LKJCovarianceFactor,
      MvNormalCholesky, effect, r2d2)
 

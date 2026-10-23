@@ -119,7 +119,7 @@ end
     @test all(e->!occursin("random\\_effect",e) && !occursin("first\\_block",e) && !occursin("second\\_block",e),r.equations)
     @test any(e->occursin("\\mathbf b_{1,g_j}",e) && occursin("\\mathbf b_{2,g_j}",e),r.equations)
     md=brm_description_markdown(r)
-    rows=filter(row->startswith(row,"| <a id="),split(md,'\n'))
+    rows=filter(row->startswith(row,"| <span id="),split(md,'\n'))
     @test length(rows)==length(r.priors)
     @test all(row->!occursin("\\sim",split(row," | ")[2]),rows)
     @test all(p->all(part->occursin("`"*string(part)*"`",md),p.id),r.priors)

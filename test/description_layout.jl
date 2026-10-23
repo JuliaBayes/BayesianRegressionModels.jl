@@ -131,7 +131,7 @@ end
     @test any(p->startswith(p,"`wide_parameter` is an unobserved sampled parameter"),r.prose)
     index=only(findall(p->p.id==id,r.priors))
     md=brm_description_markdown(r;prefix="wide prior law")
-    prior_rows=filter(row->startswith(row,"| <a id="),split(md,'\n'))
+    prior_rows=filter(row->startswith(row,"| <span id="),split(md,'\n'))
     @test length(prior_rows)==length(r.priors)
     @test all(row->!occursin("\$",row) && length(row)<240,prior_rows)
     @test occursin("[prior listing](https://example.org/prior)",md)
@@ -140,7 +140,7 @@ end
     @test all(name->occursin("\\mathrm{"*replace(string(name),"_"=>"\\_")*"}",md),
         (:location_component,:scale_component))
     @test occursin("\\mathcal N\\left(\\xi_",md) && occursin("}^{2}",md)
-    @test all(p->count("<a id=\""*brm_description_prior_anchor(p;prefix="wide prior law")*"\"",md)==1,r.priors)
+    @test all(p->count("<span id=\""*brm_description_prior_anchor(p;prefix="wide prior law")*"\"",md)==1,r.priors)
     @test stan_code(sb)==code && isequal(sb.data,frozen)
     explicit=brm_description(sb;labels=Dict(:y=>(;meaning="y",unit="mg/day")))
     @test occursin("Meaning: y\n",brm_description_markdown(explicit))
@@ -269,10 +269,10 @@ end
     prior=only(r.priors)
     md=brm_description_markdown(r;prefix="wide priors")
     target=brm_description_prior_anchor(r,prior.id;prefix="wide priors")
-    rows=filter(row->startswith(row,"| <a id="),split(md,'\n'))
-    @test length(rows)==1 && occursin("></a>P1 |",only(rows))
+    rows=filter(row->startswith(row,"| <span id="),split(md,'\n'))
+    @test length(rows)==1 && occursin("></span>P1 |",only(rows))
     @test count(target,md)>=1
-    @test count("<a id=\""*target*"\"",md)==1
+    @test count("<span id=\""*target*"\"",md)==1
     @test occursin("Prior definitions (complete logical IDs",md)
     @test all(part->occursin("`"*string(part)*"`",md),prior.id)
     lawcell=split(only(rows)," | ")[2]

@@ -73,6 +73,7 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
     absent = Dict{Symbol,Any}(name => _BRMAbsentResponse{eltype(training[name])}(name)
         for name in _rk_response_names(rk.plan)
         if haskey(training, name) && !_brm_df_has_column(new_data, name))
+    merge!(absent, _rk_car_fitted_edges(parent(rk), new_data, training))
     rebound = _brm_rebind_brmi(parent(rk), _BRMReplayData(new_data, absent))
     _, fitted = _brm_resolve_constants(parent(rk); prefix)
     constants = Dict{Symbol,Any}(c.name => c.value for c in fitted)
@@ -169,6 +170,25 @@ Base.hasproperty(d::_BRMReplayData, key::Symbol) =
     haskey(getfield(d, :absent), key) || hasproperty(getfield(d, :data), key)
 Base.getproperty(d::_BRMReplayData, key::Symbol) = haskey(getfield(d, :absent), key) ?
     getfield(d, :absent)[key] : getproperty(getfield(d, :data), key)
+
+# A frozen replay keeps each `car(area; edges=...)` term's fitted graph and reads
+# only `area`, so edge vectors the new data omits keep their fitted values. A
+# fresh replay rebuilds the graph from the new data and needs them.
+function _rk_car_fitted_edges(brmi::BRMI, new_data, training)
+    edges = Dict{Symbol,Any}()
+    for predictor in linear_predictors(brmi)
+        operation = linear_predictor_op(brmi, predictor.name)
+        isnothing(operation) && continue
+        for term in _brm_additive_terms(last(getargs(operation, 2)))
+            term isa ExprColumn && getf(term) === car || continue
+            for edge in getkwargs(term).edges
+                key = name(edge)
+                _brm_df_has_column(new_data, key) || (edges[key] = training[key])
+            end
+        end
+    end
+    edges
+end
 
 # Every response the fit conditions on, held out or not.
 _rk_response_names(plan) = _rk_observed_names(plan)

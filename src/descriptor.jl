@@ -224,8 +224,8 @@ BRM adds:
   | `:coefficients` | the population coefficient vector (`labels` names its elements) |
   | `:contrasts` / `:cell_means` | a categorical predictor's K-1 treatment contrasts, or the cell means of an intercept-free predictor's first factor |
   | `:contribution` | the per-row value a population or categorical block adds to its linear predictor |
-  | `:length_scale`, `:sd`, `:basis_weights`, `:simplex`, `:ar`, `:innovations`, the hyper-predictor roles | the term parameter of that name (`hsgp`; `mo`/`mo1`; `dar`/`rw`/`cdar`). A grouped `hsgp(...; by=g)`'s per-group weights are `:basis_weights` too, though `brm_term_coordinates` does not address them |
-  | `:value` | the term's own per-row value (`hsgp`, `mo1`, `dar`, `rw`, `cdar`) |
+  | `:length_scale`, `:sd`, `:basis_weights`, `:simplex`, `:ar`, `:innovations`, `:mixing`, `:structured`, `:unstructured`, `:effects`, the hyper-predictor roles | the term parameter of that name (`hsgp`; `mo`/`mo1`; `dar`/`rw`/`cdar`; `car`). A grouped `hsgp(...; by=g)`'s per-group weights are `:basis_weights` too, though `brm_term_coordinates` does not address them |
+  | `:value` | the term's own per-row value (`hsgp`, `mo1`, `dar`, `rw`, `cdar`, `car`) |
   | `:auxiliary` | any other internal of these blocks: an `mo` design column, a horseshoe's scales, an `hsgp` spectral density |
 
   `s`, `t2`, `gp`, `me`, `ar` and `interval_censored` terms have no public
@@ -1199,6 +1199,19 @@ function _brm_carrier_indices(outputs, pred)
     findall(o -> pred(o) && o.kind === :generated_quantity, outputs)
 end
 
+# Term roles that name a derived value of the term (a transformed parameter, as
+# `:value` is) rather than a draw carrier, matched by exact carrier name: a
+# `car` term's per-area `:effects`. A prior program re-draws it as a generated
+# quantity.
+_brm_term_derived_roles(_f) = ()
+_brm_term_derived_roles(::typeof(car)) = (:effects,)
+function _brm_term_role_indices(outputs, f, role, pred)
+    role in _brm_term_derived_roles(f) || return _brm_carrier_indices(outputs, pred)
+    idx = findall(o -> pred(o) && o.kind === :transformed_parameter, outputs)
+    isempty(idx) || return idx
+    findall(o -> pred(o) && o.kind === :generated_quantity, outputs)
+end
+
 # Attach coefficient labels to the population block's coefficient vector.
 #
 # `popefs` (sbimpl.jl) declares exactly ONE parameter, `beta_pop`, so within a
@@ -1793,7 +1806,7 @@ function _brm_output_addresses(outputs, plan, stan)
             for (role, binding) in pairs(roles)
                 expected = Symbol(_brm_stan_name(owner.declaration), :_, binding)
                 # The carrier `brm_term_coordinates(...; parameter=role)` returns.
-                idxs = _brm_carrier_indices(outputs,
+                idxs = _brm_term_role_indices(outputs, f, role,
                            o -> !isnothing(o.declaration) &&
                                 o.declaration.target === block && o.name === expected)
                 length(idxs) == 1 && (named[outputs[only(idxs)].name] = role)
@@ -2431,6 +2444,8 @@ _brm_term_label(::typeof(rw), t, target) =
     Symbol(:rw_, target, :_, name(_sb_named_inner(:rw, only(getargs(t)))))
 _brm_term_label(::typeof(cdar), t, target) =
     Symbol(:cdar_, target, :_, name(_sb_named_inner(:cdar, only(getargs(t)))))
+_brm_term_label(::typeof(car), t, target) =
+    Symbol(:car_, target, :_, name(_sb_named_inner(:car, only(getargs(t)))))
 
 _brm_term_owner_labels(f, t, target) = (_brm_term_label(f, t, target),)
 # `mo`/`mo1` carriers disambiguate like `s`/`gp`/`hsgp`: the first occurrence
@@ -2510,6 +2525,12 @@ _brm_term_parameter_bindings(::typeof(rw), _t) =
     (; sd=:sigma, innovations=:z)
 _brm_term_parameter_bindings(::typeof(cdar), _t) =
     (; ar=:rho, sd=:sigma, innovations=:eta)
+# `effects` is the per-area field in the order of the fitted graph's sorted area
+# labels; `structured` / `unstructured` are BYM2's standardized `phi` / `theta`.
+_brm_term_parameter_bindings(::typeof(car), t) =
+    getkwargs(t).type === :bym2 ?
+        (; sd=:sigma, mixing=:rho, structured=:phi, unstructured=:theta, effects=:effects) :
+        (; sd=:sigma, structured=:phi, effects=:effects)
 _brm_term_parameter_bindings(_f, _t) = NamedTuple()
 
 # Terms whose owner output is the summand the linear predictor adds as is, so
@@ -2521,6 +2542,7 @@ _brm_term_has_value(::typeof(mo1)) = true
 _brm_term_has_value(::typeof(dar)) = true
 _brm_term_has_value(::typeof(rw)) = true
 _brm_term_has_value(::typeof(cdar)) = true
+_brm_term_has_value(::typeof(car)) = true
 
 # ---- hyper-predictor term roles ---------------------------------------------
 # A hyper-predictor statement replaces its hyper's shared sampled scalar with
@@ -2625,6 +2647,14 @@ not term labels. Supported parameter roles are:
 | `dar(...)` | `:ar`, `:sd`, `:innovations`, `:value` |
 | `rw(...)` | `:sd`, `:innovations`, `:value` |
 | `cdar(...)` | `:ar`, `:sd`, `:innovations`, `:value` |
+| `car(...; type=:bym2)` | `:sd`, `:mixing`, `:structured`, `:unstructured`, `:effects`, `:value` |
+| `car(...; type=:icar)` | `:sd`, `:structured`, `:effects`, `:value` |
+
+A `car` term's label is `:car_<logical>_<area>`. `:effects` is its per-area field
+(one coordinate per area of the fitted graph, in sorted label order, islands
+included) and, like `:value`, a transformed parameter; `:structured` is the
+standardized ICAR field over the areas with neighbours, grouped by connected
+component.
 
 `:value` is the term's own collected contribution: the per-row vector this
 predictor's occurrence of the term adds to the linear predictor. It is a
@@ -2821,7 +2851,7 @@ function _brm_term_parameter_output(d::BRMDescriptor, logical::Symbol, entry,
         "no parameter role `$parameter`; available roles are $(roles).")
     binding = getproperty(bindings, parameter)
     expected = Symbol(_brm_stan_name(owner), :_, binding)
-    idxs = _brm_carrier_indices(d.outputs,
+    idxs = _brm_term_role_indices(d.outputs, getf(entry.value), parameter,
                o -> !isnothing(o.declaration) &&
                     o.declaration.target === owner.target && o.name === expected)
     length(idxs) == 1 || error(

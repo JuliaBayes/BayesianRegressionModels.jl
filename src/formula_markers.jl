@@ -114,6 +114,34 @@ see `_sb_cdar`.
 function cdar end
 
 """
+    car(area; edges=(from, to), type=:icar | :bym2)
+
+Areal spatial effect over an adjacency graph. `area` is the grouping column of
+the rows; `edges` names two equal-length data vectors whose `k`-th entries are
+the labels (values of `area`) of two neighbouring areas. Each undirected pair is
+listed once; self-loops, repeated pairs and missing labels are refused. The
+graph's nodes are every label in `edges` and in `area`, so an area without rows
+keeps its place in the graph, and an area without neighbours is an island.
+
+`type=:icar` emits `sigma * phi[area]`, where `phi` carries the intrinsic CAR
+prior `-1/2 * sum((phi[i] - phi[j])^2)` over the edges plus a soft sum-to-zero
+per connected component of at least two areas; islands get no spatial effect.
+`type=:bym2` emits the Riebler et al. (2016) convolution
+`sigma * (sqrt(rho / s) * phi + sqrt(1 - rho) * theta)[area]` with independent
+standard-normal `theta`, the mixing share `rho` in `[0, 1]`, and `s` the scaling
+factor of each component (the geometric mean of the diagonal of the generalized
+inverse of its ICAR precision), computed from the graph at preparation; an
+island's effect is `sigma * theta` (Freni-Sterrantino et al. 2018).
+
+It is a direct predictor summand: the formula intercept carries the level and no
+population coefficient multiplies it. `sd(lp, car(area))` addresses `sigma`
+(default half-`Normal(0, 1)`), `mixing(lp, car(area))` the BYM2 `rho` (default
+`Beta(0.5, 0.5)`). On replay the graph is frozen from the fit and every row must
+name a fitted area. Dispatch tag — see `_sb_car_icar` / `_sb_car_bym2`.
+"""
+function car end
+
+"""
     Horseshoe
 
 Carvalho-Polson-Scott horseshoe shrinkage prior marker. Use as a prior
