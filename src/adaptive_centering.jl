@@ -1682,17 +1682,52 @@ _adaptive_car_n_cells(block::_CARAdaptiveCenteringBlock) =
     length(block.structured) + length(block.unstructured)
 _adaptive_car_structured(block::_CARAdaptiveCenteringBlock, cell::Int) =
     cell <= length(block.structured)
-_adaptive_car_index(block::_CARAdaptiveCenteringBlock, cell::Int) =
-    _adaptive_car_structured(block, cell) ? block.structured[cell] :
-        block.unstructured[cell - length(block.structured)]
 # The area of a cell, an index into `areas`.
 _adaptive_car_area(block::_CARAdaptiveCenteringBlock, cell::Int) =
     _adaptive_car_structured(block, cell) ? block.phi_area[cell] :
         cell - length(block.structured)
-# The `phi` cell a `theta` cell is centred on, 0 for a `phi` cell or an island.
+
+# One cell as plain numbers. The differentiated accessors read only a vector of
+# these, never the block: on Julia 1.10 an Enzyme reverse pass that reads a
+# struct holding vectors corrupts GC once another thread collects (see
+# `_block_location` in BayesianRegressionModelsWarmupHMCExt), and the joint
+# wrapper's accessor crashed `test/adaptive_centering_threads.jl` while its car
+# branch read the block.
+struct _CARAdaptiveCell
+    index::Int
+    # 0: scale `sigma` (an `:icar` `phi` cell, an island's `theta` cell);
+    # 1: a BYM2 `phi` cell, `sigma * sqrt(rho / s_c)`;
+    # 2: the `theta` cell of an area with neighbours, `sigma * sqrt(1 - rho)`.
+    share::Int
+    sigma::Int
+    sigma_lower::Float64
+    sigma_upper::Float64
+    rho::Int
+    rho_lower::Float64
+    rho_upper::Float64
+    log_inv_scale::Float64
+    # The `phi` cell a `theta` cell is centred on, numbered from `phi_offset + 1`
+    # (`_adaptive_car_cell`); 0 for a `phi` cell or an island.
+    phi::Int
+end
+
+function _adaptive_car_cell(block::_CARAdaptiveCenteringBlock, cell::Int,
+                            phi_offset::Int=0)
+    n = length(block.structured)
+    hyper = (block.sigma, block.sigma_lower, block.sigma_upper,
+             block.rho, block.rho_lower, block.rho_upper)
+    if cell <= n
+        return _CARAdaptiveCell(block.structured[cell], block.bym2 ? 1 : 0, hyper...,
+                                block.log_inv_scale[cell], 0)
+    end
+    j = block.struct_idx[cell - n]
+    _CARAdaptiveCell(block.unstructured[cell - n], j > 0 ? 2 : 0, hyper..., 0.0,
+                     j > 0 ? phi_offset + j : 0)
+end
+_adaptive_car_index(block::_CARAdaptiveCenteringBlock, cell::Int) =
+    _adaptive_car_cell(block, cell).index
 _adaptive_car_phi_cell(block::_CARAdaptiveCenteringBlock, cell::Int) =
-    cell <= length(block.structured) ? 0 :
-        block.struct_idx[cell - length(block.structured)]
+    _adaptive_car_cell(block, cell).phi
 
 # `(log(rho), log(1 - rho))` of a share declared on `[lower, upper]` inside
 # `[0, 1]`, through Stan's `lub_constrain`. An end at 0 or 1 is taken in closed
@@ -1706,18 +1741,17 @@ function _adaptive_car_log_shares(x, lower, upper)
     log_rho, log1m_rho
 end
 
-function _adaptive_car_log_scale(x::AbstractVector,
-                                 block::_CARAdaptiveCenteringBlock, cell::Int)
-    1 <= cell <= _adaptive_car_n_cells(block) || throw(BoundsError(block, cell))
-    log_sigma = log(_adaptive_constrain(x[block.sigma], block.sigma_lower,
-                                        block.sigma_upper))
-    block.bym2 || return log_sigma
-    n = length(block.structured)
-    log_rho, log1m_rho = _adaptive_car_log_shares(x[block.rho], block.rho_lower,
-                                                  block.rho_upper)
-    cell <= n && return log_sigma + (log_rho + block.log_inv_scale[cell]) / 2
-    block.struct_idx[cell - n] > 0 ? log_sigma + log1m_rho / 2 : log_sigma
+function _adaptive_car_log_scale(x::AbstractVector, cell::_CARAdaptiveCell)
+    log_sigma = log(_adaptive_constrain(x[cell.sigma], cell.sigma_lower,
+                                        cell.sigma_upper))
+    cell.share == 0 && return log_sigma
+    log_rho, log1m_rho = _adaptive_car_log_shares(x[cell.rho], cell.rho_lower,
+                                                  cell.rho_upper)
+    cell.share == 1 ? log_sigma + (log_rho + cell.log_inv_scale) / 2 :
+        log_sigma + log1m_rho / 2
 end
+_adaptive_car_log_scale(x::AbstractVector, block::_CARAdaptiveCenteringBlock,
+                        cell::Int) = _adaptive_car_log_scale(x, _adaptive_car_cell(block, cell))
 
 """
     _adaptive_car_centering_blocks(model, unc_names)

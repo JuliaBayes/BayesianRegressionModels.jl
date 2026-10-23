@@ -511,58 +511,54 @@ end
 # the `phi` cell's SOURCE coordinate, so every `phi` pair precedes the `theta`
 # pairs that read it (WarmupHMC inverts in pair order). Like HSGP and cdar
 # cells they keep their own state and argument types, away from the ordinary
-# K<=2 Enzyme dispatch, and their accessors are scalar: no work vectors, and a
-# block is read once per call, never per row.
+# K<=2 Enzyme dispatch. Their accessors read only `cells`, a flat table of
+# isbits `BRM._CARAdaptiveCell`s. A first version that read the blocks from the
+# joint wrapper's accessor aborted `test/adaptive_centering_threads.jl` with
+# "GC error (probable corruption)" in its `joint` case, which has no car cell at
+# all (Julia 1.10.12, Enzyme 0.13.216; base passed the same gate); with this
+# table every case passes. `blocks`, `pair_blocks` and `pair_cells` serve only
+# the controls report.
 mutable struct BRMCARAdaptiveCenteringState
     blocks::Vector{BRM._CARAdaptiveCenteringBlock}
     pair_blocks::Vector{Int}
     pair_cells::Vector{Int}
-    # Per pair, the pair number of the `phi` cell a `theta` cell is centred on;
-    # 0 for a `phi` cell and for an island's `theta` cell.
-    pair_phi::Vector{Int}
+    # Per pair; a `theta` cell's `phi` is the pair number it is centred on.
+    cells::Vector{BRM._CARAdaptiveCell}
     sources::Vector{Float64}
     effect_indices::BitSet
 end
 
 function BRMCARAdaptiveCenteringState(blocks)
-    pair_blocks, pair_cells, pair_phi = Int[], Int[], Int[]
+    pair_blocks, pair_cells = Int[], Int[]
+    cells = BRM._CARAdaptiveCell[]
     for (bi, block) in enumerate(blocks)
-        offset = length(pair_blocks)
+        offset = length(cells)
         for cell in 1:BRM._adaptive_car_n_cells(block)
             push!(pair_blocks, bi)
             push!(pair_cells, cell)
-            j = BRM._adaptive_car_phi_cell(block, cell)
-            push!(pair_phi, j == 0 ? 0 : offset + j)
+            push!(cells, BRM._adaptive_car_cell(block, cell, offset))
         end
     end
-    effect_indices = BitSet(Iterators.flatten(
-        Iterators.flatten((b.structured, b.unstructured)) for b in blocks))
-    BRMCARAdaptiveCenteringState(collect(blocks), pair_blocks, pair_cells, pair_phi,
-                                 zeros(length(pair_blocks)), effect_indices)
+    effect_indices = BitSet(c.index for c in cells)
+    BRMCARAdaptiveCenteringState(collect(blocks), pair_blocks, pair_cells, cells,
+                                 zeros(length(cells)), effect_indices)
 end
 
 _car_pair_location(state, p) = (state.pair_blocks[p], state.pair_cells[p])
+_car_pair_index(state, p) = state.cells[p].index
+_car_log_scale(x, state, p) = BRM._adaptive_car_log_scale(x, state.cells[p])
 
-function _car_pair_index(state, p)
-    bi, cell = _car_pair_location(state, p)
-    BRM._adaptive_car_index(state.blocks[bi], cell)
-end
-
-function _car_log_scale(x, state, p)
-    bi, cell = _car_pair_location(state, p)
-    BRM._adaptive_car_log_scale(x, state.blocks[bi], cell)
-end
-
-# The spatial component `a * phi` of `phi` cell `q`, with `phi` recovered from
+# The spatial component `a * phi` of `phi` pair `q`, with `phi` recovered from
 # its coordinate `x[idx] = a^c * phi` in the frame `c`.
 function _car_spatial(x, state, q, c)
-    log_a = _car_log_scale(x, state, q)
-    exp(log_a) * (x[_car_pair_index(state, q)] * exp(-c * log_a))
+    cell = state.cells[q]
+    log_a = BRM._adaptive_car_log_scale(x, cell)
+    exp(log_a) * (x[cell.index] * exp(-c * log_a))
 end
 
 # Pair `p`'s location in the source frame (its accessors read source coordinates).
 function _car_location(x, state, p)
-    q = state.pair_phi[p]
+    q = state.cells[p].phi
     q == 0 && return zero(eltype(x))
     _car_spatial(x, state, q, state.sources[q])
 end
@@ -620,7 +616,7 @@ function _centering_frame(state::BRMCARAdaptiveCenteringState, position, gradien
         idx = _car_pair_index(state, p)
         c = source[p]
         s = exp(_car_log_scale(position, state, p))
-        q = state.pair_phi[p]
+        q = state.cells[p].phi
         m = q == 0 ? zero(T) : _car_spatial(position, state, q, source[q])
         scale[p] = s
         location[p] = m
@@ -628,7 +624,7 @@ function _centering_frame(state::BRMCARAdaptiveCenteringState, position, gradien
         invariant_gradient[p] = s^c * gradient[idx]
     end
     for p in 1:n
-        q = state.pair_phi[p]
+        q = state.cells[p].phi
         q == 0 && continue
         invariant_gradient[q] += source[p] * scale[q] * gradient[_car_pair_index(state, p)]
     end
@@ -1295,17 +1291,15 @@ end
 # Car cells inside the learned-order wrapper; `targets[offset + p]` is car pair
 # `p`'s compiled frame. A `theta` cell's location is its area's spatial
 # component, recovered from the `phi` coordinate in the frame `x` is in (the
-# source controls forward, the compiled ones inverse). `theta` cells map in the
-# first pass and `phi` cells in the second, so every `phi` value is read before
-# it is written even when `y === x`.
+# source controls forward, the compiled ones inverse). The `theta` cells that
+# read a `phi` coordinate map in the first pass and every other cell in the
+# second, so each `phi` value is read before it is written even when `y === x`.
 function _ordered_car_map!(y, x, state::BRMCARAdaptiveCenteringState, targets,
                            offset, direction)
     ljac = zero(eltype(x))
-    for structured_pass in (false, true), p in eachindex(state.sources)
-        bi, cell = _car_pair_location(state, p)
-        BRM._adaptive_car_structured(state.blocks[bi], cell) == structured_pass ||
-            continue
-        q = state.pair_phi[p]
+    for reads_phi in (true, false), p in eachindex(state.sources)
+        q = state.cells[p].phi
+        (q > 0) == reads_phi || continue
         location = q == 0 ? zero(eltype(x)) : _car_spatial(x, state, q,
             direction > 0 ? state.sources[q] : targets[offset + q])
         ljac += _cell_map!(y, x, _car_pair_index(state, p), location,
