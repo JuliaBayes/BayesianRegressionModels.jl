@@ -218,8 +218,18 @@ uses each component's probability beyond the limit in place of `f_k(y_i)`,
 and an interval-censored row its probability over the interval. Averaging a row
 over draws gives that observation's posterior membership, for example its
 probability of belonging to a contamination component. The descriptor lists
-it under role `:membership`:
-`brm_output(descriptor, :y; role=:membership)`.
+it under the response with role `:membership`, so the response, not the
+emitted name `y_membership`, is its logical target:
+
+```julia
+brm_output(descriptor, :y; role=:membership)        # name :y_membership, dims (n, K)
+M = brm_output_draws(descriptor, draws, names; logical=:y, role=:membership)
+```
+
+`M` is a draws × `n·K` matrix whose columns follow
+`names`, which for BridgeStan's names is Stan's column-major order
+(`y_membership.1.1`, `y_membership.2.1`, …), so `reshape(M[s, :], n, K)` is
+draw `s`'s `n × K` matrix.
 
 ## Adding another likelihood
 
