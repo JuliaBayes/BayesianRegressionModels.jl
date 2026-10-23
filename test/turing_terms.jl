@@ -60,7 +60,7 @@ end
 
     s_builder = @brm begin mu ~ 1 + s(x); y ~ Normal(mu, 1) end
     spline, spline_expr = prepared_term(s_builder, data, :mu, s)
-    @test size(spline.state.Xnull) == (12, 2)
+    @test size(spline.state.Xnull) == (12, 1)
     @test size(spline.state.Zpen) == (12, 8)
 
     t2_builder = @brm begin
@@ -94,7 +94,7 @@ end
     replay_data = (; x=fill(0.25, 5), z=fill(-0.1, 5), y=zeros(5))
     replay_context = BRM._brm_backend_context(s_builder(replay_data))
     replayed = BRM._brm_replay_term(spline, spline_expr, replay_context)
-    @test size(replayed.state.Xnull) == (5, 2)
+    @test size(replayed.state.Xnull) == (5, 1)
     @test size(replayed.state.Zpen) == (5, 8)
     @test all(isfinite, replayed.state.Zpen)
 
@@ -114,7 +114,7 @@ end
         (@brm begin mu ~ 1 + s(x); y ~ Normal(mu, 1) end),
         data, :mu, s)
     smodel = BRM._brm_turing_term_model(spline, 12)
-    svalues = (b_fixed=[0.3, -0.2], sd_pen=0.4,
+    svalues = (b_fixed=[-0.2], sd_pen=0.4,
                b_pen_raw=collect(range(-0.2, 0.2; length=8)))
     sresult = Turing.generated_quantities(smodel, svalues)
     @test sresult.effect ≈ spline.state.Xnull * svalues.b_fixed +

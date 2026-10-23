@@ -5,9 +5,14 @@ using Random: Xoshiro, randn
 
 # BridgeStan full-posterior values (propto=false, Jacobian included) with
 # canonical range-projection signs, StanBlocks eeee3bad, BridgeStan 2.9.0.
-const SPLINE_S_SB_ANCHOR = -1141.2148096907295
+# The `s` and accel values were re-derived (StanBlocks d3ae6ccf) when the TPS
+# fixed block dropped its constant column: the `s` value is the old
+# -1141.2148096907295 at the point that held the constant, moved into the
+# intercept, plus the Normal(0, 5) intercept-prior change; the accel value at
+# zero, where the constants were zero, is unchanged.
+const SPLINE_S_SB_ANCHOR = -1141.2180096907298
 const SPLINE_T2_SB_ANCHOR = -359.94318407167754
-const SPLINE_ACCEL_SB_ANCHOR = -69.1125421088841
+const SPLINE_ACCEL_SB_ANCHOR = -65.85073107265526
 const SPLINE_ACCEL_SB_ZERO_ANCHOR = -46.468310103713605
 
 function spline_s_parity_case()
@@ -37,8 +42,7 @@ function spline_t2_parity_case()
     (; brmi, x, z, y)
 end
 
-# Public RK test_smooth_sb.jl's accel_splines toy probe (12 observations),
-# with BRM's constant null columns retained in both predictors.
+# Public RK test_smooth_sb.jl's accel_splines toy probe (12 observations).
 function spline_accel_parity_case()
     x = [-2.5, -2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
     x2 = copy(x)

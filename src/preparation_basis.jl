@@ -4,6 +4,10 @@
 # side constraint, and diagonalize the resulting range-space penalty. Applying
 # the fitted object to new x values needs only the frozen training centers,
 # shift, and penalty-whitened range projection.
+# The applied unpenalized block is only the centered linear column. The TPS
+# null space also holds the constant, but the formula intercept owns it: a
+# flat constant coefficient beside an intercept or a second smooth makes the
+# posterior improper (as t2 drops its null x null constant; decision 1cmodra).
 # LAPACK fixes eigenvectors only up to sign. Orient each penalized column by
 # its first significant entry so the fitted coordinates agree across machines.
 # Keep this rule identical to ReactiveKernelsPPL's _rk_canonical_column_signs.
@@ -66,7 +70,7 @@ function _brm_apply_spline(fit, x::AbstractVector{<:Real})
     xs = collect(Float64, x)
     all(isfinite, xs) || error("sbimpl: `s(x)` requires finite numeric data")
     centered = xs .- fit.shift
-    Xnull = hcat(ones(Float64, length(xs)), centered)
+    Xnull = reshape(centered, :, 1)
     Zpen = _brm_tps_kernel(centered, fit.centers) * fit.range_projection
     Xnull, Zpen
 end

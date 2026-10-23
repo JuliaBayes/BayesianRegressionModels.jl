@@ -983,7 +983,7 @@ Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
 x_smooth = collect(range(-2, 2; length=50))
 smooth_model = (@brm begin
     y ~ Normal(mu, sigma)
-    mu ~ s(x)
+    mu ~ 1 + s(x)
     sigma ~ Exponential(1)
 end)((; x=x_smooth, y=sin.(x_smooth)))
 """, :smooth_model; title="Penalized smooth")
@@ -991,10 +991,14 @@ end)((; x=x_smooth, y=sin.(x_smooth)))
 
 The supported public call has exactly one numeric predictor and no keyword
 arguments. Training values must be finite and contain at least 10 unique
-values. Internally, `s(x)` uses a fixed rank-10 basis: two unpenalized
-null-space columns for `{1, x}` and eight penalty-whitened range columns. The
-range coefficients share a smoothing standard deviation whose default prior is
-a standard half-normal; `sd(<lp|:>, s(x)) ~ Exponential(scale)` replaces it (see
+values. Internally, `s(x)` uses a fixed rank-10 basis whose unpenalized null
+space is `{1, x}`. As in mgcv and brms, the formula intercept owns the constant,
+so the term contributes one centered linear column, with a flat coefficient,
+and eight penalty-whitened range columns. `1 + s(x) + s(z)` is therefore
+identified. A predictor written without `1 +` gets no level from the smooth;
+write `mu ~ 1 + s(x)` when it needs one. The range coefficients share a
+smoothing standard deviation whose default prior is a standard half-normal;
+`sd(<lp|:>, s(x)) ~ Exponential(scale)` replaces it (see
 [Term-internal priors](@ref)). The term contributes this complete smooth
 directly to the linear predictor, so it does not receive an additional
 population coefficient.
