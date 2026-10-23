@@ -485,6 +485,13 @@ function _ranef_raw_group(group::Symbol, brmi, idx_val, recorded_levels)
             from_pipe && !in_plain && return base
             reason = "identical values leave the origin unrecoverable from the formula"
         else
+            # A frozen replay keeps the training columns while its index codes
+            # the replay rows, so no column can reproduce it: the column whose
+            # labels are exactly the recorded ones is the coded one.
+            base_eq = _ranef_levels_equal(_sb_fit_levels(base_col), rec)
+            literal_eq = _ranef_levels_equal(_sb_fit_levels(literal_col), rec)
+            base_eq && !literal_eq && return base
+            literal_eq && !base_eq && return group
             reason = "neither candidate's coding reproduces the emitted index"
         end
     end

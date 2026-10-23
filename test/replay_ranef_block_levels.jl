@@ -112,6 +112,24 @@ end
     end
 end
 
+@testset "a suffix-bearing name whose base column carries some of its labels" begin
+    # Both candidates carry only recorded labels, so the coding decides; a
+    # frozen replay's target keeps the training columns while its index codes
+    # the replay rows, so there the exact label set decides.
+    sub = (; train..., h=[["p", "q"][(i - 1) % 2 + 1] for i in 1:N],
+           h__nocor__1=[H_LEVELS[i % 3 + 1] for i in 1:N])
+    m = @brm begin
+        mu ~ 1 + x + (1 | g) + (1 | h__nocor__1)
+        y ~ Normal(mu, 1.0)
+    end
+    sb = SBBRMI(m(sub); mod=@__MODULE__, total_groups=())
+    for model in (sb, reprocess(sb, (; same..., h=["p", "p"], h__nocor__1=["q", "q"])),
+                  reprocess(sb, (; new_g..., h=["p"], h__nocor__1=["q"]); resample_groups=[:g]))
+        lb = block(ranef_blocks(model), :h__nocor__1)
+        @test (lb.levels, lb.n_groups) == (H_LEVELS, 3)
+    end
+end
+
 @testset "zerocorr `||` replay (todo `12u0ozx`)" begin
     zc = @brm begin
         mu ~ 1 + x + (1 | g) + (1 + x || h)
