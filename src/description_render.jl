@@ -405,7 +405,7 @@ _brmd_builtin_call(::StanBlocks.ValueFamily,c)=isempty(_brmd_coordinates(c)) ? n
 # outside distribution position, value concatenation (`_brmd_distribution`).
 _brmd_builtin_call(::typeof(vcat),c)=!isempty(_brmd_coordinates(c)) ? _brmd_coordinatewise_fragment(c) :
     get(c.provenance,:concatenation,false) ? BRMDescriptionFragment(
-        prose=("Concatenation lays its arguments end to end, in order, as one vector; a scalar argument contributes one element.",),
+        prose=(_brmd_text(c,:concatenation),),
         covers=(c.id,)) : nothing
 function _brmd_builtin_call(::typeof(mm),c)
     normalized=c.keywords.normalize

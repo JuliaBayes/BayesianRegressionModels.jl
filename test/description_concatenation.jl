@@ -51,9 +51,13 @@ const cell_data = (; subject=["a", "b"], dose_subject=["a", "a", "b"],
             y[obs[i]] ~ normal(dose .* exp(-exp(log_CL[i])), 0.3)
         end
     end
-    r = brm_description(SBBRMI(model; mod=@__MODULE__, total_groups=()))
+    sb = SBBRMI(model; mod=@__MODULE__, total_groups=())
+    r = brm_description(sb)
     @test r.complete
     @test isempty(r.diagnostics)
+    german = brm_description(sb; texts=description_texts(:de))
+    @test german.complete
+    @test any(p -> startswith(p, "Die Verkettung reiht ihre Argumente"), german.prose)
     c = only(components(r, vcat))
     @test c.provenance.concatenation
     @test covered(r, c)
