@@ -518,7 +518,7 @@ function _brmd_constants(plan)
           if entry.kind !== :submodel_hook)
 end
 
-function _brmd_environment(d, owner, kind, priors, constants, notation=();groups=())
+function _brmd_environment(d, owner, kind, priors, constants, notation, texts;groups=())
     refs = Dict{Symbol,Symbol}(key => get(d.plan.data,key,nothing) isa Number ? :scalar : :observation for key in d.columns)
     for i in d.inputs
         isnothing(i.column) && continue
@@ -543,7 +543,8 @@ function _brmd_environment(d, owner, kind, priors, constants, notation=();groups
     provenance = (; model_id=d.id, owner, declaration=kind, attribution...,
         covariance_factor=_brmd_covariance_factor_binding(d,owner),
         design_columns=isnothing(design_columns) ? nothing : map(c->_brmd_design_column(d,c),design_columns),
-        random_effects=Tuple((;id=g.key,group=g.block.group,shared_id=g.block.id,margins=g.margins) for g in groups))
+        random_effects=Tuple((;id=g.key,group=g.block.group,shared_id=g.block.id,margins=g.margins) for g in groups),
+        description_texts=texts)
     bindings=Tuple((;name=last(p.id),role=:parameter,
                     value=BRMDescriptionReference(last(p.id),:scalar,p.id),prior_ids=(p.id,))
                    for p in priors if last(p.id) isa Symbol &&
@@ -571,7 +572,7 @@ function _brmd_design_column(d,c)
       effect_block=c.effect_block,preprocess,term=_brmd_snapshot(get(c,:term,nothing)))
 end
 
-function _brmd_components(d, priors, constants, notation=();groups=())
+function _brmd_components(d, priors, constants, notation, texts;groups=())
     program = _brm_prepare_program(d.plan.parent)
     byname = Dict(op.name => op for op in program.operations)
     result = BRMDescriptionComponent[]
@@ -594,7 +595,7 @@ function _brmd_components(d, priors, constants, notation=();groups=())
             f=_brmd_binding(only(sites).family,d.plan.model.mod)
             f isa StanBlocks.SlicModel && f.mod !== (@__MODULE__) && (role=:submodel_output)
         end
-        env = _brmd_environment(d, owner, role, priors, constants, notation;groups)
+        env = _brmd_environment(d, owner, role, priors, constants, notation, texts;groups)
         expr = _brmd_value(rhs, env, (role, owner, :expression))
         outputs = Tuple((; name=o.name, logical=o.logical, role=o.role,
                           kind=o.kind, segments=_brmd_snapshot(o.segments))
