@@ -4659,6 +4659,19 @@ function _rk_plan_spline_axis!(axis::Symbol, target::Symbol, head::String,
     nothing
 end
 
+# An axis only `rows=`-masked HSGP terms read is bound as the design holds it,
+# `missing` in uncarried rows included, and read through its in-graph values
+# (`brm_hsgp_masked_axis`), which every masked term over it shares.
+function _rk_plan_masked_axis!(axis::Symbol, raw, columns::Dict{Symbol,AbstractVector},
+        taken::Set{Symbol}, derived::Vector{_RKDerivedSpec})
+    any(spec -> spec.name === axis, derived) && return nothing
+    source = _rk_mint_generated!(taken, columns, string(axis, "_raw"))
+    columns[source] = raw
+    push!(derived, _RKDerivedSpec(axis,
+        Expr(:_rk_data_preparation, :brm_hsgp_masked_axis, source), axis))
+    nothing
+end
+
 # A spline basis is fitted in-graph to fit-role copies of its axes, so a
 # frozen `reprocess` keeps the training basis (`_rk_fit_twin!`).
 function _rk_plan_spline_term!(prepared::_BRMPreparedTerm{typeof(s)},
@@ -4916,7 +4929,8 @@ end
 function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         target::Symbol, data::AbstractDict,
         columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol}; hyper_plans=(),
-        rho_stated=false, sigma_stated=false, derived::Vector{_RKDerivedSpec})
+        rho_stated=false, sigma_stated=false, derived::Vector{_RKDerivedSpec},
+        masked_axes::AbstractDict=Dict{Symbol,Any}())
     prefix = "RK backend"
     state = prepared.state
     # A model-derived axis (an assignment or predictor value) is read by
@@ -4949,7 +4963,10 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         "combined with `by=`")
     axes = Tuple(prepared.source)
     for axis in axes
-        state.latent || _rk_plan_spline_axis!(axis, target, "hsgp", data, columns)
+        state.latent && continue
+        _rk_plan_spline_axis!(axis, target, "hsgp", data, columns)
+        haskey(masked_axes, axis) &&
+            _rk_plan_masked_axis!(axis, masked_axes[axis], columns, taken, derived)
     end
     base = "hsgp_" * join(string.(axes), "_")
     id = _rk_mint_smooth_id!(taken, columns, base)
@@ -4960,13 +4977,22 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         "$prefix: predictor `$target` uses `length_scale_floor` in a " *
         "hyper-predicted length scale's prior, which is its log-scale " *
         "intercept; the floor already binds per group")
-    # A `rows=` mask is bound data, like a grouped term's level index.
+    # A `rows=` mask is a graph value over its bound column, like a grouped
+    # term's level index.
     rows = get(state, :rows, nothing)
     mask = if isnothing(rows)
         nothing
     else
         name = _rk_mint_generated!(taken, columns, string(id, "_rows"))
         columns[name] = Float64.(rows.mask)
+        source = rows.source
+        raw = data[source]
+        if haskey(columns, source) && columns[source] !== raw
+            source = _rk_mint_generated!(taken, columns, string(id, "_rows_source"))
+        end
+        columns[source] = raw
+        push!(derived, _RKDerivedSpec(name,
+            Expr(:_rk_data_preparation, :brm_hsgp_row_mask, source), name))
         name
     end
     # An automatic exp-quad basis interval is fitted in-graph to fit-role
@@ -4987,6 +5013,7 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         rho_truncated=!rho_floor_named &&
             any(>(0), state.rho_lower isa Real ? (state.rho_lower,) : state.rho_lower),
         rho_floor_named, anchor=get(state, :anchor, nothing), mask,
+        mask_source=isnothing(rows) ? nothing : rows.source,
         hyper_plans, rho_stated, sigma_stated, fit_axes, fit_mask,
         extrapolate=get(state, :extrapolate, :error))
     if state.cov === :periodic
@@ -5904,6 +5931,7 @@ Base.@nospecializeinfer function _rk_plan_predictor(@nospecialize(brmi::BRMI), c
         elseif prepared.callable === hsgp
             push!(terms, _rk_plan_hsgp_term!(
                 prepared, target, context.data, columns, taken; derived,
+                masked_axes=_brm_masked_axis_columns(brmi),
                 hyper_plans=Tuple(p for p in _sb_collect_hyper_plans(brmi; prefix)
                     if p.lp === target && p.term_key === _brm_prepared_term_key(raw)),
                 rho_stated=_brm_term_prior_spec(raw, target, context, :term_length_scale) !== nothing,
@@ -7415,7 +7443,8 @@ end
 
 function _rk_gate_crossed_columns!(columns::Dict{Symbol,AbstractVector},
         n_obs::Int, mi_packed::Set{Symbol}=Set{Symbol}();
-        statistical_inputs::Set{Symbol}=Set{Symbol}())
+        statistical_inputs::Set{Symbol}=Set{Symbol}(),
+        masked_axes::Set{Symbol}=Set{Symbol}())
     prefix = "RK backend"
     for key in sort!(collect(keys(columns)))
         values = columns[key]
@@ -7430,7 +7459,9 @@ function _rk_gate_crossed_columns!(columns::Dict{Symbol,AbstractVector},
         key in mi_packed || key in statistical_inputs || length(values) == n_obs || error(
             "$prefix: column `$key` has $(length(values)) rows, expected " *
             "$n_obs (one observation axis in slice 1)")
-        key in mi_packed && any(ismissing, values) && continue
+        # A masked-only HSGP axis may hold `missing` in the rows no mask
+        # carries; preparation refuses it in a carried row.
+        (key in mi_packed || key in masked_axes) && any(ismissing, values) && continue
         any(ismissing, values) && error(
             "$prefix: column `$key` has missing values; v1 models " *
             "missingness for `mi()` responses only")
@@ -8477,7 +8508,10 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
         length(columns[raw]) == n_obs || error(
             "$prefix: internal: `mi()` source `$raw` does not retain the full row axis")
     end
-    _rk_gate_crossed_columns!(columns, n_obs, mi_packed; statistical_inputs)
+    masked_axes = Set{Symbol}(spec.expression.args[2] for spec in derived
+        if spec.expression.head === :_rk_data_preparation &&
+            first(spec.expression.args) === :brm_hsgp_masked_axis)
+    _rk_gate_crossed_columns!(columns, n_obs, mi_packed; statistical_inputs, masked_axes)
     _rk_gate_trials_values!(response_specs, columns, n_obs)
     _rk_gate_multinomial_trials!(response_specs, columns, n_obs)
     _rk_gate_evidence_values!(response_specs, columns, n_obs)

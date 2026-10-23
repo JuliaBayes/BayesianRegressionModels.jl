@@ -29,7 +29,8 @@ missing values) is replayed in full, and every later one is checked and bound
 into that replay's lowered program.
 
 - `binder.fitted` holds the inputs no design changes (the training columns
-  behind fitted anchors, `constant(...)` values). Bind them once with
+  behind fitted anchors, a `car(...)` term's fitted graph, `constant(...)`
+  values). Bind them once with
   `ReactiveKernels.prepare(spec; have, want, bound=binder.fitted)` and pass the
   rest per design; values that read only them are then computed once.
 - A design is refused exactly where `reprocess` refuses its values: unseen
@@ -160,16 +161,30 @@ _rk_plan_kernels(plan::_RKValuePlan) =
 _rk_plan_kernels(plan::_RKHeldOutPlan) = _rk_plan_kernels(plan.parent)
 _rk_plan_kernels(_plan) = ()
 
-# The inputs no design changes: fit-role inputs of the columns that are not
-# resampled, and fitted `constant(...)` values. A data-free backend binds no
-# fit-role input: its frozen fitted values take their place.
+# An areal field's graph inputs, by its area column: the graph is a fit of the
+# training areas and edges, refitted only when the areas are resampled
+# (`_brm_car_fitted_graph`).
+function _rk_plan_graph_inputs(plan)
+    inputs = Dict{Symbol,Symbol}()
+    for predictor in _rk_replay_predictors(plan), term in predictor.terms
+        term.kind === :car || continue
+        foreach(name -> inputs[name] = term.options.source, term.options.inputs)
+    end
+    inputs
+end
+
+# The inputs no design changes: fit-role inputs and fitted graphs of the
+# columns that are not resampled, and fitted `constant(...)` values. A
+# data-free backend binds no fit-role input: its frozen fitted values take
+# their place.
 function _rk_design_fitted(rk::RKBRMI, groups)
     columns = _rk_source_data_columns(rk.plan, _rk_retained_program(rk))
-    twins = _rk_plan_fit_inputs(rk.plan)
+    # Each fitted input, by the column whose resampling refits it.
+    fits = merge(_rk_plan_fit_inputs(rk.plan), _rk_plan_graph_inputs(rk.plan))
     constants = _rk_fit_constant_names(rk)
     frozen = rk.fitted !== nothing
     names = sort!([name for name in keys(columns) if name in constants ||
-        (!frozen && haskey(twins, name) && !(twins[name] in groups))])
+        (!frozen && haskey(fits, name) && !(fits[name] in groups))])
     fitted = NamedTuple{Tuple(names)}(Tuple(columns[name] for name in names))
     frozen || return fitted
     state = _rk_fitted_state(rk)
@@ -230,17 +245,12 @@ function _rk_design_checks(binder::RKDesignBinder, plan, design, derived)
     has(column) = _brm_df_has_column(design, column)
     for predictor in _rk_replay_predictors(plan), term in predictor.terms
         options = term.options
-        if term.kind === :hsgp && get(options, :cov, :exp_quad) === :exp_quad &&
-                !get(options, :latent, false) && get(options, :extrapolate, :error) === :error
-            if get(options, :mask, nothing) !== nothing || !all(has, term.columns)
+        if term.kind === :hsgp && !get(options, :latent, false)
+            if !all(has, _rk_design_hsgp_columns(term))
                 push!(derived, Symbol(predictor.name, "#hsgp"))
                 continue
             end
-            axes, fits = Tuple(term.columns), options.fits
-            fixed_domain = options.fixed_fits !== nothing
-            push!(checks, design -> _brm_hsgp_replay_axes(
-                Tuple(_brm_df_column(design, axis) for axis in axes), fits, nothing,
-                :error; prefix="RK reprocess", names=axes, fixed_domain))
+            push!(checks, _rk_design_hsgp_check(term))
         elseif term.kind === :factor && haskey(options, :index_levels)
             source = only(term.columns)
             has(source) || continue
@@ -253,12 +263,50 @@ function _rk_design_checks(binder::RKDesignBinder, plan, design, derived)
             levels = options.levels
             push!(checks, design -> _brm_apply_fitted_levels(levels,
                 _brm_df_column(design, source); prefix="RK reprocess"))
+        elseif term.kind === :car
+            # Each row's area must be a node of the fitted graph.
+            source = options.source
+            has(source) || continue
+            nodes = options.nodes
+            push!(checks, design -> _brm_car_row_idx(nodes,
+                _brm_car_labels(_brm_df_column(design, source), "area")))
         end
     end
     for kernel in _rk_plan_kernels(plan)
         push!(checks, _rk_design_cell_check(kernel, design))
     end
     checks
+end
+
+# The design columns a raw-axis HSGP term reads: its axes and `rows=` column.
+function _rk_design_hsgp_columns(term)
+    source = get(term.options, :mask_source, nothing)
+    source === nothing ? Tuple(term.columns) : (term.columns..., source)
+end
+
+# What `reprocess` checks of a raw-axis HSGP term's values: 0/1 `rows=` values
+# as long as the axes (`_brm_hsgp_row_mask`), `missing` only in rows the mask
+# does not carry (`_brm_axis_values`), finite axes and, unless the basis
+# clamps, the carried values inside the fitted interval. A design's kind fixes
+# which columns are empty or hold `missing`, so those refusals come from its
+# first, planned replay.
+function _rk_design_hsgp_check(term)
+    options = term.options
+    axes, source = Tuple(term.columns), get(options, :mask_source, nothing)
+    periodic = get(options, :cov, :exp_quad) === :periodic
+    interval = !periodic && get(options, :extrapolate, :error) === :error
+    fixed_domain = get(options, :fixed_fits, nothing) !== nothing
+    function check(design)
+        raw = Tuple(_brm_df_column(design, axis) for axis in axes)
+        mask = source === nothing ? nothing : _brm_hsgp_row_mask(
+            _brm_df_column(design, source), length(first(raw)), source)
+        values = mask === nothing ? raw : Tuple(_brm_axis_values(column, mask,
+            "BRM backend lowering: data column `$axis`") for (axis, column) in zip(axes, raw))
+        foreach(axis -> _brm_check_finite_axis(axis, :hsgp), values)
+        interval && _brm_hsgp_replay_axes(values, options.fits, nothing, :error, mask;
+            prefix="RK reprocess", names=axes, fixed_domain)
+        nothing
+    end
 end
 
 # A kernel's per-cell inputs and its cell label column must agree on the cell
