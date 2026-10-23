@@ -60,16 +60,16 @@ end
     sb_dup = SBBRMI(smooth_duplicate_model(df); mod=@__MODULE__)
 
     @testset "distinct carriers, identical bases" begin
-        @test size(sb_dist.data[:Xnull_h]) == (n, 2)
+        @test size(sb_dist.data[:Xnull_h]) == (n, 1)
         @test size(sb_dist.data[:Zpen_h]) == (n, 8)
-        @test size(sb_dist.data[:Xnull_log_alpha_h]) == (n, 2)
+        @test size(sb_dist.data[:Xnull_log_alpha_h]) == (n, 1)
         @test size(sb_dist.data[:Zpen_log_alpha_h]) == (n, 8)
         # Same column, same fit — only the carrier names differ.
         @test sb_dist.data[:Xnull_h] == sb_dist.data[:Xnull_log_alpha_h]
         @test sb_dist.data[:Zpen_h] == sb_dist.data[:Zpen_log_alpha_h]
         # Same-predictor repeat: first keeps `s_h`, second takes the target.
-        @test size(sb_dup.data[:Xnull_h]) == (n, 2)
-        @test size(sb_dup.data[:Xnull_mu_h]) == (n, 2)
+        @test size(sb_dup.data[:Xnull_h]) == (n, 1)
+        @test size(sb_dup.data[:Xnull_mu_h]) == (n, 1)
     end
 
     @testset "single use keeps the historical names" begin

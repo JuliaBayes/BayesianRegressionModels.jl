@@ -282,9 +282,12 @@ address its draws without reading the generated Stan.
 - `id` — the brms-style `|ID|` bucket symbol, or `nothing` for a plain ranef.
   A bucket is shared across sub-formulas, so it is addressed as ONE block.
 - `by` — the `gr(g, by=b)` stratifying column, or `nothing`.
-- `levels` — the training level labels of `group`, in the index order the
-  emitter assigned (`sort(unique(raw))`, or `levels()` for a
-  `CategoricalVector`). `levels[g]` is the label of column `g` of the block.
+- `levels` — the level labels the block's group index was coded through, in
+  index order: the training labels fitted by the emitter (`sort(unique(raw))`,
+  or `levels()` for a `CategoricalVector`). A frozen `reprocess` target keeps
+  the fitted labels even when its rows carry only some of them; a
+  `resample_groups` factor has the labels of its new rows. `levels[g]` is the
+  label of column `g` of the block.
 - `n_terms` / `n_groups` — the block's shape.
 - `z` — the emitted Stan parameter carrying the block's effect coordinates:
   the STANDARDISED draw under the default emission, the effects themselves
@@ -377,15 +380,20 @@ _ranef_id_of_binding(::Symbol, ::Any, ::Union{Nothing,Symbol}) = nothing
 # synthetic `g__nocor__N` index. That index is an emission identity, not a new
 # raw column — but a user's own data column may literally carry such a name,
 # so the suffix alone never decides. The emitted `:group_index`
-# preprocessing record carries the fit-time level LABELS in order, and those
-# labels are the origin record: everything downstream (level vectors,
-# label-aligned transport) keys off labels, not off the membership coding.
-# Two coexisting columns can share one coding while carrying different
-# labels, so membership equality must not arbitrate — only exact ordered
-# label equality identifies the column the emitter coded.
+# preprocessing record carries the level LABELS the index was coded through,
+# in order, and those labels are the origin record: everything downstream
+# (level vectors, label-aligned transport) keys off labels, not off the
+# membership coding. Two coexisting columns can share one coding while
+# carrying different labels, so membership equality must not arbitrate — only
+# a column whose labels are recorded can be the one the emitter coded. At fit
+# time those are exactly its labels; a frozen replay codes its rows through
+# the fitted labels, so its column may carry any subset of them.
 function _ranef_levels_equal(levels, recorded)
     isequal(collect(levels), collect(recorded))
 end
+_ranef_labels_recorded(col::AbstractVector, recorded) =
+    all(in(Set{Any}(recorded)), _sb_group_values(col))
+_ranef_labels_recorded(::Any, ::Any) = false
 
 # Formula-level grouping evidence, consulted ONLY for genuine ties (coexisting
 # columns with elementwise-identical values): the set of names plain `|`
@@ -420,13 +428,15 @@ function _ranef_collect_group_roles!(plain, piped, x)
     nothing
 end
 
-function _ranef_matches_index(col::AbstractVector, idx_val::AbstractVector)
+# Whether coding `col` through the recorded `levels` reproduces the emitted
+# index row for row.
+function _ranef_matches_index(col::AbstractVector, idx_val::AbstractVector, levels)
     length(col) == length(idx_val) || return false
-    levels = collect(_sb_fit_levels(col))
     code = Dict{Any,Int}(level => i for (i, level) in enumerate(levels))
-    all(i -> get(code, col[i], 0) == idx_val[i], eachindex(col, idx_val))
+    values = _sb_group_values(col)
+    all(i -> get(code, values[i], 0) == idx_val[i], eachindex(values, idx_val))
 end
-_ranef_matches_index(::Any, ::Any) = false
+_ranef_matches_index(::Any, ::Any, ::Any) = false
 
 const _RANEF_NOCOR_RE = r"^(.+)__nocor__[0-9]+$"
 
@@ -438,10 +448,14 @@ function _ranef_raw_group(group::Symbol, brmi, idx_val, recorded_levels)
     rec = collect(recorded_levels)
     base_col = column_data(brmi, base)
     literal_col = column_data(brmi, group)
-    base_ok = !isnothing(base_col) && base_col isa AbstractVector &&
-        _ranef_levels_equal(_sb_fit_levels(base_col), rec)
-    literal_ok = !isnothing(literal_col) && literal_col isa AbstractVector &&
-        _ranef_levels_equal(_sb_fit_levels(literal_col), rec)
+    # A resampled Stan-expression index records the labels fitted from its
+    # replay column, so exact ordered equality identifies that column; a
+    # concrete index's column carries some or all of its recorded labels.
+    concrete = !(idx_val isa StanBlocks.StanExpr)
+    carries(col) = concrete ? _ranef_labels_recorded(col, rec) :
+        col isa AbstractVector && _ranef_levels_equal(_sb_fit_levels(col), rec)
+    base_ok = carries(base_col)
+    literal_ok = carries(literal_col)
     # Initialized up front so no branch-analysis slip can leave the
     # fail-closed error below referencing an unbound reason.
     reason = "no raw data column carries its recorded level labels"
@@ -453,9 +467,8 @@ function _ranef_raw_group(group::Symbol, brmi, idx_val, recorded_levels)
         # A resampled Stan-expression index carries no coding to verify, so it
         # joins the identical-values tie: the formula text decides, exactly as
         # at fit time (replay preserves the formula by construction).
-        concrete = !(idx_val isa StanBlocks.StanExpr)
-        base_repro = concrete && _ranef_matches_index(base_col, idx_val)
-        literal_repro = concrete && _ranef_matches_index(literal_col, idx_val)
+        base_repro = concrete && _ranef_matches_index(base_col, idx_val, rec)
+        literal_repro = concrete && _ranef_matches_index(literal_col, idx_val, rec)
         if base_repro && !literal_repro
             return base
         elseif literal_repro && !base_repro
@@ -472,6 +485,13 @@ function _ranef_raw_group(group::Symbol, brmi, idx_val, recorded_levels)
             from_pipe && !in_plain && return base
             reason = "identical values leave the origin unrecoverable from the formula"
         else
+            # A frozen replay keeps the training columns while its index codes
+            # the replay rows, so no column can reproduce it: the column whose
+            # labels are exactly the recorded ones is the coded one.
+            base_eq = _ranef_levels_equal(_sb_fit_levels(base_col), rec)
+            literal_eq = _ranef_levels_equal(_sb_fit_levels(literal_col), rec)
+            base_eq && !literal_eq && return base
+            literal_eq && !base_eq && return group
             reason = "neither candidate's coding reproduces the emitted index"
         end
     end
@@ -580,27 +600,34 @@ function _ranef_blocks(plan, stan)
                 "key `$(idx_key)` for `$(d.target)`.")
             group, by = parsed
             idx_val = _ranef_data_vec(data, idx_key, d.target, fam)
-            # Origin recovery from the `:group_index` record is needed for
-            # synthetic `__nocor__` names (any index) and for resampled
-            # Stan-expression indices (any name — the coding is Stan-side).
-            # Every other shape — plain, bucket, and stratified `gr(g, by=b)`
-            # concrete indices, the last of which carries no such record —
-            # keeps the historical direct answer.
+            # The `:group_index` record holds the level labels the index was
+            # coded through, in order: fitted from the column at fit time, and
+            # on a frozen replay the fitted set even when the replay rows carry
+            # only some of them (a `resample_groups` factor records labels
+            # fitted from its new rows). Stratified `gr(g, by=b)` indices carry
+            # no record and re-derive their labels from the column.
+            gi_entry = get(plan.preproc, idx_key, nothing)
+            recorded = gi_entry isa PreprocEntry && gi_entry.kind === :group_index ?
+                gi_entry.const_ : nothing
+            # Origin recovery from that record is needed for synthetic
+            # `__nocor__` names (any index) and for resampled Stan-expression
+            # indices (any name — the coding is Stan-side). Every other shape —
+            # plain, bucket, and stratified concrete indices — keeps the
+            # historical direct answer.
             raw_group = if isnothing(match(_RANEF_NOCOR_RE, String(group))) &&
                     !(idx_val isa StanBlocks.StanExpr)
                 group
             else
-                gi_entry = get(plan.preproc, idx_key, nothing)
-                (gi_entry isa PreprocEntry && gi_entry.kind === :group_index) || error(
+                isnothing(recorded) && error(
                     "BRM prediction: `$(d.target) ~ $(fam)(…)` group index `$(idx_key)` has no ",
                     "`:group_index` preprocessing record; its grouping origin cannot be recovered.")
-                _ranef_raw_group(group, brmi, idx_val, gi_entry.const_.levels)
+                _ranef_raw_group(group, brmi, idx_val, recorded.levels)
             end
             raw = column_data(brmi, raw_group)
             isnothing(raw) && error(
                 "BRM prediction: grouping factor `$raw_group` (from `$(idx_key)`) is not ",
                 "a raw data column of this model.")
-            levels = collect(_sb_fit_levels(raw))
+            levels = collect(isnothing(recorded) ? _sb_fit_levels(raw) : recorded.levels)
             if idx_val isa StanBlocks.StanExpr
                 # RESAMPLE target: `resample_groups` marked this factor's index
                 # with `maybecv(...)`, so it is a Stan-side expression (not a data
@@ -609,25 +636,28 @@ function _ranef_blocks(plan, stan)
                 # iterating the expression — read it off the `:group_index`
                 # preprocessing record required above. Actual sampled/generated
                 # activity is read from the traced carrier below.
-                n_groups = _ranef_data_int(data, gi_entry.const_.n_groups_key,
+                n_groups = _ranef_data_int(data, recorded.n_groups_key,
                                            d.target, fam)
             else
-                # CONTROL. `levels` is reconstructed from the training column with
-                # the same fit/apply split the emitter used; the emitted `n_groups`
-                # is the count the Stan program was built with. If those disagree,
-                # the group name derived from `idx_key` is wrong (or the level
-                # coding drifted).
-                n_groups = if haskey(d.keywords, :n_groups) && d.keywords.n_groups isa Symbol
-                    ng_key = d.keywords.n_groups
-                    if ng_key === Symbol(d.target, :_n_g) ||
-                       endswith(String(ng_key), "_n_g")
-                        # cv-contagious sizing uses a Stan-side local, not a data key.
-                        maximum(idx_val)
-                    else
-                        _ranef_data_int(data, ng_key, d.target, fam)
-                    end
+                # CONTROL. `levels` are the labels the index was coded through;
+                # the emitted `n_groups` is the count the Stan program was built
+                # with. If those disagree, the group name derived from `idx_key`
+                # is wrong (or the level coding drifted).
+                sized_by_index =
+                    !(haskey(d.keywords, :n_groups) && d.keywords.n_groups isa Symbol) ||
+                    d.keywords.n_groups === Symbol(d.target, :_n_g) ||
+                    endswith(String(d.keywords.n_groups), "_n_g")
+                n_groups = if sized_by_index
+                    # cv-contagious sizing uses a Stan-side local, not a data
+                    # key: the block holds one column per code up to the largest
+                    # its rows carry, so it addresses that prefix of the
+                    # recorded labels (a replay may carry only some levels).
+                    n = maximum(idx_val)
+                    !isnothing(recorded) && n <= length(levels) &&
+                        (levels = levels[1:n])
+                    n
                 else
-                    maximum(idx_val)
+                    _ranef_data_int(data, d.keywords.n_groups, d.target, fam)
                 end
             end
         end
