@@ -378,9 +378,9 @@ end
     binder = check_binder(rk, fitted; want=:loc)
     @test length(binder.classes) == 1 && !occursin("replayed in full", sprint(show, binder))
     # A design with its responses: the planner still gathers each subject's
-    # observations in Julia (`y`), because RKPPL refuses a derived response
-    # whose raw column a design without responses omits (ReactiveKernels
-    # snag `rkppl-derived-re-79a3a684`).
+    # observations in Julia (`y`): RKPPL does not yet lower a derived
+    # response whose raw column a design without responses omits
+    # (ReactiveKernels todo `120ic2x`), and BRM lowers every replay afresh.
     observed = [flat_pk_data(rng, length(labels); labels)
         for labels in (["s2", "s5"], ["s1", "s4"])]
     binder = check_binder(rk, observed; want=:loc)
