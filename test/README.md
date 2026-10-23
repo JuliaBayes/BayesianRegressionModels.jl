@@ -138,7 +138,8 @@ operations in the cell, `vcat(0.0, log_F[doses[i]])` read at
 RK density and gradient equal the same model on the operation stream with its
 read rows filled, with a subject that has no doses. A frozen `reprocess` onto a
 new schedule gives the same density on RK and the same HSGP basis rows at the
-doses on Stan, and both backends replay onto new subjects.
+doses on Stan, and both backends replay onto new subjects. Both models have
+complete scientific descriptions.
 
 `plate_empty_axis.jl` checks a `groups(group => labels)` binding over an empty
 `group` vector: a formula LP, a data vector and an observed response (against a
@@ -452,6 +453,16 @@ describes the same censoring as the call form
 
 ```sh
 julia --startup-file=no --project=test test/description_cell_combinators.jl
+```
+
+`description_concatenation.jl` describes StanBlocks' `vcat` token in its two
+roles. As a value in a `@plate for` cell or an included `@slic` submodel, such
+as the dose-axis gather's `vcat(0.0, log_F[doses[i]])`, it is Julia's `vcat`,
+a covered built-in rendered as a stacked vector. As the distribution of `~` it
+stays the block-wise prior family. It runs under the test project:
+
+```sh
+julia --startup-file=no --project=test test/description_concatenation.jl
 ```
 
 ## ODE solvers in kernel cells

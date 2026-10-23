@@ -7,7 +7,7 @@ function _brmd_prior(d, id, expression, support, source, anchors, notation;bindi
         support=merge(support,(; (k=>_brmd_snapshot(v) for (k,v) in pairs(getkwargs(expression))
             if k in (:lower,:upper))...))
     end
-    value = _brmd_value(expression, env, (:prior, id...))
+    value = _brmd_distribution(expression, env, (:prior, id...))
     if value isa BRMDescriptionComponent && _brmd_law(value.callable)===:uniform
         a=value.arguments
         support=merge((;lower=isempty(a) ? 0.0 : first(a),upper=isempty(a) ? 1.0 : a[2]),support)
