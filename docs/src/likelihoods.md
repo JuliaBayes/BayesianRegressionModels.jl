@@ -199,7 +199,20 @@ native translations); bespoke families, `Uniform` / `Pareto`
 (parameter-dependent continuous support), and `Categorical` (simplex
 parameters) are rejected. Binomial-family components must share one
 identical trial-count expression. Weights are a numeric vector summing to 1,
-a length-`K` numeric data column, or a Dirichlet-backed simplex parameter.
+a length-`K` numeric data column, a Dirichlet-backed simplex parameter, or a
+vector of `K` model expressions such as `[1 - w, w]` (a sampled scalar, or a
+per-row linear predictor `logit(w) ~ 1 + x`); expression weights are checked
+per row when the density is evaluated, and a row whose weights are negative
+or do not sum to 1 is rejected.
+
+Every mixture response also emits `<response>_membership`, an `n × K`
+generated quantity whose row `i` is the posterior probability that
+observation `i` came from each component,
+`w_ik f_k(y_i) / sum_j w_ij f_j(y_i)`, evaluated per draw. Averaging a row
+over draws gives that observation's posterior membership, for example its
+probability of belonging to a contamination component. The descriptor lists
+it under role `:membership`:
+`brm_output(descriptor, :y; role=:membership)`.
 
 ## Adding another likelihood
 

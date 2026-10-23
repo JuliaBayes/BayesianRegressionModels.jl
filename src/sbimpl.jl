@@ -93,6 +93,10 @@ const _SB_VECTOR_PRIOR_CACHE = Dict{Tuple{String,Tuple},StanBlocks.ValueFamily}(
 # instead of parsing a generated name or body.
 const _SB_VECTOR_PRIOR_COORDINATES = IdDict{StanBlocks.ValueFamily,Tuple}()
 const _SB_MIXTURE_CACHE = Dict{String,StanBlocks.ValueFamily}()
+# The membership function and component count of every generated mixture
+# family, keyed by the family object, so the descriptor recognizes a mixture
+# observation by its family instead of parsing a generated name.
+const _SB_MIXTURE_MEMBERSHIP = IdDict{StanBlocks.ValueFamily,NamedTuple}()
 # Synchronize every cache lookup and publication. Generated families own their
 # syntax and are read-only after construction; they install no Julia bindings
 # or methods. One reentrant lock also permits nested family construction.
@@ -4028,6 +4032,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
                   r2d2=(; overrides=r2d2_overrides, names=r2d2_names,
                           joint=r2d2_joint))
     end
+    _sb_check_mixture_membership_names(stmts, keys(brmi.operations))
     # Post-pass: fuse pure-population Gaussian likelihoods into Stan's
     # `normal_id_glm_lpdf`. Whole-model, because its decisive guard is
     # "this linear predictor is read by exactly one likelihood". Every
@@ -14788,6 +14793,12 @@ end
 #   row at run time and rejects weights that are negative or do not sum to 1.
 #   Anything else is rejected.
 #
+# Every mixture response also emits `<target>_membership`, an `n x K` matrix
+# whose row `i` holds the posterior probability that row `i` came from each
+# component: `softmax` over the same `log(w_k) + component_lpdf` terms whose
+# `log_sum_exp` is the row's density. It is computed after the likelihood and
+# read by nothing, so StanBlocks places it in generated quantities.
+#
 # Scalar-vs-vector component arguments and weights need no Julia-side
 # classification: every translated argument is wrapped in
 # `brm_joint_mean_rows(arg, num_elements(y))` (real positions) or
@@ -14961,19 +14972,35 @@ function _sb_mixture_family(stan_name::Symbol, n_args::Int, int_positions::Tuple
                 "$(density): the mixture weights of a row must be nonnegative " *
                 "and sum to 1"))))
         end
-        push!(scalar_body, :(terms::vector[$K]))
+        # The row's per-component terms `log(w_k) + component_lpdf`: their
+        # `log_sum_exp` is the density, their `softmax` the membership.
+        terms = Any[:(terms::vector[$K])]
         for k in 1:K
             call = Expr(:call, density_fn, :y,
                         (argname(k, j) for j in 1:n_args)...)
-            push!(scalar_body,
+            push!(terms,
                   Expr(:(=), Expr(:ref, :terms, k),
                        Expr(:call, :+, Expr(:call, :log, weightname(k)), call)))
         end
+        append!(scalar_body, terms)
         push!(scalar_body, :(log_sum_exp(terms)))
         row_actuals = Any[Expr(:ref, weightname(k), :i) for k in 1:K]
         append!(row_actuals, (Expr(:ref, argname(k, j), :i)
                               for k in 1:K for j in 1:n_args))
         row_call = Expr(:call, density, Expr(:ref, :y, :i), row_actuals...)
+        membership = Symbol(stem, :_membership)
+        row_membership = Expr(:call, membership, Expr(:ref, :y, :i), row_actuals...)
+        membership_body = quote
+            rv::matrix[n, $K]
+            for i in 1:n
+                probabilities::vector[$K]
+                probabilities = $row_membership
+                for k in 1:$K
+                    rv[i, k] = probabilities[k]
+                end
+            end
+            rv
+        end
         vector_body = quote
             rv = 0.
             for i in 1:n
@@ -15052,9 +15079,46 @@ function _sb_mixture_family(stan_name::Symbol, n_args::Int, int_positions::Tuple
                 $(nobroadcast(vector_rng_body)...)
             end),
         ]
-        StanBlocks.ValueFamily(stem, suffix, density_defs, pointwise_defs, rng_defs,
-            @__MODULE__)
+        membership_defs = [
+            :($(Expr(:(::), Expr(:call, membership, scalar_formals...),
+                     Expr(:ref, :vector, K))) = begin
+                $(terms...)
+                softmax(terms)
+            end),
+            :($(Expr(:(::), Expr(:call, membership, vector_formals...),
+                     Expr(:ref, :matrix, :n, K))) = begin
+                $(nobroadcast(membership_body)...)
+            end),
+        ]
+        family = StanBlocks.ValueFamily(stem, suffix, density_defs, pointwise_defs,
+            rng_defs, @__MODULE__)
+        _SB_MIXTURE_MEMBERSHIP[family] = (;
+            membership=StanBlocks.ValueUDF(membership, membership_defs, @__MODULE__),
+            components=K)
+        family
         end
+    end
+end
+
+"""Membership function and component count of a BRM-generated mixture family, or `nothing`."""
+_sb_mixture_membership(family) = nothing
+_sb_mixture_membership(family::StanBlocks.ValueFamily) =
+    lock(() -> get(_SB_MIXTURE_MEMBERSHIP, family, nothing), _SB_GEN_LOCK)
+
+"""The output carrying a mixture response's per-row component-membership probabilities."""
+_brm_mixture_membership_name(target::Symbol) = Symbol(target, :_membership)
+
+# A model value named like a mixture response's membership output would bind
+# that name twice, which StanBlocks refuses only with an internal assertion.
+function _sb_check_mixture_membership_names(stmts, names)
+    for stmt in stmts
+        Meta.isexpr(stmt, :call) && length(stmt.args) == 3 && stmt.args[1] === :~ &&
+            stmt.args[2] isa Symbol && Meta.isexpr(stmt.args[3], :call) || continue
+        isnothing(_sb_mixture_membership(stmt.args[3].args[1])) && continue
+        key = _brm_mixture_membership_name(stmt.args[2])
+        key in names && error(
+            "sbimpl: `$key` is reserved for the component-membership probabilities " *
+            "of the mixture response `$(stmt.args[2])`; rename the model value `$key`")
     end
 end
 
@@ -15170,6 +15234,12 @@ function _sb_lik_family!(stmts, target, ::Type{<:MixtureModel}, args, data)
               Expr(:call, :brm_joint_mean_rows, arg, rows))
     end
     push!(stmts, Expr(:call, :~, target, Expr(:call, family, actuals...)))
+    key = _brm_mixture_membership_name(target)
+    haskey(data, key) && error(
+        "sbimpl: reserved mixture-membership output `$key` collides with a " *
+        "model/data column; rename that column")
+    push!(stmts, Expr(:(=), key,
+        Expr(:call, _sb_mixture_membership(family).membership, target, actuals...)))
     nothing
 end
 
