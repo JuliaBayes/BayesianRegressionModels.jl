@@ -14751,10 +14751,12 @@ end
 # family per (component Stan family, arity, K, discrete/continuous) shape,
 # cached in `_SB_MIXTURE_CACHE`.
 #
-# Each row contributes `log_sum_exp(log(weights) + component_lpdf)` — the
+# Each row contributes `log_sum_exp(log(w_k) + component_lpdf)` — the
 # vector `log_sum_exp` StanBlocks traces (its tracer has no binary overload),
-# over one `terms::vector[K]` per row. Predictive draws select
-# `categorical_rng(weights)` per row, then draw from that row's selected
+# over one `terms::vector[K]` per row. The K weights are K per-row arguments
+# like the component arguments, so a row-varying weight (a linear predictor)
+# and a shared simplex lower the same way. Predictive draws select
+# `categorical_rng` over the row's weights, then draw from that row's selected
 # component. Component densities call the SAME `X_lpdf`/`X_lpmf`/`X_rng`
 # functions the plain single-family path resolves, with the SAME
 # `_sb_stan_dist_args` parameterization translation, so a family that lowers
@@ -14783,11 +14785,14 @@ end
 #   structurally different counts are rejected — share one column.
 # - weights are a numeric vector summing to 1 (frozen as
 #   `<target>_mixture_weights` data via `_sb_record_static!`), a length-K
-#   numeric data column, or a Dirichlet-backed simplex parameter. Anything
-#   else is rejected.
+#   numeric data column, a Dirichlet-backed simplex parameter, or a length-K
+#   vector of model expressions (`[1 - w, w]`, scalar or per row). Expression
+#   weights are not a simplex by construction, so their family checks every
+#   row at run time and rejects weights that are negative or do not sum to 1.
+#   Anything else is rejected.
 #
-# Scalar-vs-vector component arguments need no Julia-side classification:
-# every translated argument is wrapped in
+# Scalar-vs-vector component arguments and weights need no Julia-side
+# classification: every translated argument is wrapped in
 # `brm_joint_mean_rows(arg, num_elements(y))` (real positions) or
 # `brm_mixture_rows_int(arg, num_elements(y))` (trial-count positions), whose
 # two-method dispatch broadcasts scalars and passes row vectors through —
@@ -14862,7 +14867,12 @@ function _sb_mixture_check_weights(weights, K, target)
     nothing
 end
 
-function _sb_mixture_weights_expr!(target, weights, K, data)
+# The K weights as K Stan expressions, each a scalar or one value per row, and
+# whether the family must check each row's weights at run time (`checked`):
+# only weights that are not a probability vector by construction need it.
+_sb_mixture_indexed_weights(expr, K) = Any[Expr(:ref, expr, k) for k in 1:K]
+
+function _sb_mixture_weights_exprs!(target, weights, K, data)
     if weights isa Union{AbstractVector,Tuple} && all(w -> w isa Real, weights)
         _sb_mixture_check_weights(weights, K, target)
         key = Symbol(target, :_mixture_weights)
@@ -14871,33 +14881,53 @@ function _sb_mixture_weights_expr!(target, weights, K, data)
             "column; rename that column")
         data[key] = Float64.(collect(weights))
         _sb_record_static!(data, key)
-        return key
+        return (; exprs=_sb_mixture_indexed_weights(key, K), checked=false)
+    elseif weights isa Union{AbstractVector,Tuple}
+        # `[1 - w, w]`: one model expression per component, each a scalar or a
+        # per-row value (a linear predictor on its response scale).
+        length(weights) == K || error(
+            "sbimpl: `MixtureModel($target)` has $K components but " *
+            "$(length(weights)) weights")
+        for w in weights
+            w isa Bool && error(
+                "sbimpl: `MixtureModel($target)` weights must be numeric, got a Boolean")
+            w isa Real && !(isfinite(w) && 0 <= w <= 1) && error(
+                "sbimpl: `MixtureModel($target)` weight $w lies outside [0, 1]")
+        end
+        return (; exprs=Any[w isa Real ? Float64(w) : _sb_scalar_expr(w, data)
+                            for w in weights], checked=true)
     elseif weights isa NamedColumn && parent(weights) isa DataColumn
         raw = parent(parent(weights))
         raw isa AbstractVector && all(w -> w isa Real, raw) || error(
             "sbimpl: `MixtureModel($target)` data weights `$(name(weights))` must " *
             "be a numeric vector")
         _sb_mixture_check_weights(raw, K, target)
-        return _sb_scalar_expr(weights, data)
+        return (; exprs=_sb_mixture_indexed_weights(_sb_scalar_expr(weights, data), K),
+                checked=false)
     elseif weights isa NamedColumn
         backing = parent(weights)
         declaration = backing isa ExprColumn && getf(backing) === (~) ? backing : nothing
-        rhs_e = isnothing(declaration) ? nothing :
-            _as_expr_column(getargs(declaration, 2)[2])
-        isnothing(rhs_e) || !(getf(rhs_e) isa Type && getf(rhs_e) <: Dirichlet) &&
-            error(
-                "sbimpl: `MixtureModel($target)` weights `$(name(weights))` must be " *
-                "a numeric vector or a `~ Dirichlet(...)` simplex parameter")
-        return _sb_scalar_expr(weights, data)
+        expr = _sb_mixture_indexed_weights(_sb_scalar_expr(weights, data), K)
+        # A named model value that no `~` declares (an assignment) is a
+        # weight vector the family checks; a sampled one must be a simplex.
+        isnothing(declaration) && return (; exprs=expr, checked=true)
+        rhs_e = _as_expr_column(getargs(declaration, 2)[2])
+        getf(rhs_e) isa Type && getf(rhs_e) <: Dirichlet || error(
+            "sbimpl: `MixtureModel($target)` weights `$(name(weights))` must be " *
+            "a numeric vector, a `~ Dirichlet(...)` simplex parameter, or a " *
+            "vector of weight expressions such as `[1 - $(name(weights)), " *
+            "$(name(weights))]`")
+        return (; exprs=expr, checked=false)
     end
     error(
         "sbimpl: `MixtureModel($target)` weights must be a numeric vector of " *
-        "length $K or a simplex-valued model expression, got $(typeof(weights))")
+        "length $K, a simplex-valued model expression, or a vector of $K weight " *
+        "expressions such as `[1 - w, w]`, got $(typeof(weights))")
 end
 
 function _sb_mixture_family(stan_name::Symbol, n_args::Int, int_positions::Tuple,
-                            K::Int, discrete::Bool)
-    key = repr((:mixture, stan_name, n_args, int_positions, K, discrete))
+                            K::Int, discrete::Bool; checked::Bool=false)
+    key = repr((:mixture_rows, stan_name, n_args, int_positions, K, discrete, checked))
     lock(_SB_GEN_LOCK) do
         get!(_SB_MIXTURE_CACHE, key) do
         stem = Symbol(:brm_mixture_, _sb_stable_fingerprint(key))
@@ -14910,34 +14940,43 @@ function _sb_mixture_family(stan_name::Symbol, n_args::Int, int_positions::Tuple
         y_scalar = discrete ? :int : :real
         y_vector = discrete ? :int : :vector
         argname(k, j) = Symbol(:c, k, :_, j)
+        weightname(k) = Symbol(:w, k)
         scalar_kind(j) = j in int_positions ? :int : :real
         vector_kind(j) = j in int_positions ? :int : :vector
-        scalar_formals = Any[Expr(:(::), :y, y_scalar),
-                             Expr(:(::), :weights, Expr(:ref, :vector, :K))]
-        vector_formals = Any[Expr(:(::), :y, Expr(:ref, y_vector, :n)),
-                             Expr(:(::), :weights, Expr(:ref, :vector, :K))]
+        scalar_formals = Any[Expr(:(::), :y, y_scalar)]
+        vector_formals = Any[Expr(:(::), :y, Expr(:ref, y_vector, :n))]
+        for k in 1:K
+            push!(scalar_formals, Expr(:(::), weightname(k), :real))
+            push!(vector_formals, Expr(:(::), weightname(k), Expr(:ref, :vector, :n)))
+        end
         for k in 1:K, j in 1:n_args
             push!(scalar_formals, Expr(:(::), argname(k, j), scalar_kind(j)))
             push!(vector_formals, Expr(:(::), argname(k, j),
                                       Expr(:ref, vector_kind(j), :n)))
         end
-        scalar_assignments = Any[]
+        scalar_body = Any[]
+        if checked
+            total = foldl((a, b) -> Expr(:call, :+, a, b), weightname.(1:K))
+            invalid = foldl((a, b) -> Expr(:||, a, b), Any[
+                (Expr(:call, :<, weightname(k), 0) for k in 1:K)...,
+                Expr(:call, :>, Expr(:call, :abs, Expr(:call, :-, total, 1)), 1e-8)])
+            push!(scalar_body, Expr(:if, invalid, Expr(:block, Expr(:call, :reject,
+                "$(density): the mixture weights of a row must be nonnegative " *
+                "and sum to 1"))))
+        end
+        push!(scalar_body, :(terms::vector[$K]))
         for k in 1:K
             call = Expr(:call, density_fn, :y,
                         (argname(k, j) for j in 1:n_args)...)
-            push!(scalar_assignments,
+            push!(scalar_body,
                   Expr(:(=), Expr(:ref, :terms, k),
-                       Expr(:call, :+,
-                            Expr(:call, :log, Expr(:ref, :weights, k)), call)))
+                       Expr(:call, :+, Expr(:call, :log, weightname(k)), call)))
         end
-        row_actuals = Any[Expr(:ref, argname(k, j), :i)
-                          for k in 1:K for j in 1:n_args]
-        row_call = Expr(:call, density, Expr(:ref, :y, :i), :weights, row_actuals...)
-        scalar_body = quote
-            terms::vector[K]
-            $(scalar_assignments...)
-            log_sum_exp(terms)
-        end
+        push!(scalar_body, :(log_sum_exp(terms)))
+        row_actuals = Any[Expr(:ref, weightname(k), :i) for k in 1:K]
+        append!(row_actuals, (Expr(:ref, argname(k, j), :i)
+                              for k in 1:K for j in 1:n_args))
+        row_call = Expr(:call, density, Expr(:ref, :y, :i), row_actuals...)
         vector_body = quote
             rv = 0.
             for i in 1:n
@@ -14963,12 +15002,16 @@ function _sb_mixture_family(stan_name::Symbol, n_args::Int, int_positions::Tuple
                 branch = Expr(:if, Expr(:call, :(==), :k, k),
                               Expr(:block, comp_rng(k)), branch)
             end
+            probabilities = Any[Expr(:(=), Expr(:ref, :probabilities, k), weightname(k))
+                                for k in 1:K]
             quote
-                k = categorical_rng(weights)
+                probabilities::vector[$K]
+                $(probabilities...)
+                k = categorical_rng(probabilities)
                 $branch
             end
         end
-        vector_rng_call = Expr(:call, rng, :weights, row_actuals...)
+        vector_rng_call = Expr(:call, rng, row_actuals...)
         vector_rng_body = quote
             rv::$(Expr(:ref, y_vector, :n))
             for i in 1:n
@@ -14990,7 +15033,7 @@ function _sb_mixture_family(stan_name::Symbol, n_args::Int, int_positions::Tuple
                               Expr(:ref, y_vector, :n))
         density_defs = [
             :($scalar_sig = begin
-                $(nobroadcast(scalar_body)...)
+                $(scalar_body...)
             end),
             :($vector_sig = begin
                 $(nobroadcast(vector_body)...)
@@ -15097,7 +15140,7 @@ function _sb_lik_family!(stmts, target, ::Type{<:MixtureModel}, args, data)
         response isa AbstractVector{<:AbstractFloat} ||
             (data[target] = Float64.(response))
     end
-    weights_expr = _sb_mixture_weights_expr!(target, weights, K, data)
+    weights_plan = _sb_mixture_weights_exprs!(target, weights, K, data)
     translated = map(enumerate(components)) do (k, comp)
         Tuple(_sb_mixture_component_args(T, comp, target, k, data))
     end
@@ -15113,9 +15156,11 @@ function _sb_lik_family!(stmts, target, ::Type{<:MixtureModel}, args, data)
             "identical trial-count expression; value-equal but structurally " *
             "different counts could diverge on `reprocess` — share one column")
     end
-    family = _sb_mixture_family(stan_name, P, int_positions, K, discrete)
+    family = _sb_mixture_family(stan_name, P, int_positions, K, discrete;
+                                checked=weights_plan.checked)
     rows = Expr(:call, :num_elements, target)
-    actuals = Any[weights_expr]
+    actuals = Any[Expr(:call, :brm_joint_mean_rows, w, rows)
+                  for w in weights_plan.exprs]
     for t in translated, (j, arg) in enumerate(t)
         arg isa Bool && error(
             "sbimpl: `MixtureModel($target)` component arguments must be numeric, " *
