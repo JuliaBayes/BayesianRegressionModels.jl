@@ -24,6 +24,7 @@ _brm_prepares_term(term::ExprColumn{typeof(ar)}) = true
 _brm_prepares_term(term::ExprColumn{typeof(dar)}) = true
 _brm_prepares_term(term::ExprColumn{typeof(rw)}) = true
 _brm_prepares_term(term::ExprColumn{typeof(cdar)}) = true
+_brm_prepares_term(term::ExprColumn{typeof(car)}) = true
 
 _brm_term_arg_name(value::NamedColumn) = name(value)
 _brm_term_arg_name(_value) = nothing
@@ -163,6 +164,10 @@ _brm_term_prior_expressions(term::_BRMPreparedTerm{typeof(rw)}) =
     (; sd=term.state.sd_prior)
 _brm_term_prior_expressions(term::_BRMPreparedTerm{typeof(cdar)}) =
     (; ar=term.state.ar_prior, sd=term.state.sd_prior)
+_brm_term_prior_expressions(term::_BRMPreparedTerm{typeof(car)}) =
+    term.state.type === :bym2 ?
+        (; sd=term.state.sd_prior, mixing=term.state.mixing_prior) :
+        (; sd=term.state.sd_prior)
 _brm_prepare_term(term::ExprColumn{typeof(mo)}, target::Symbol, context) =
     _brm_prepare_monotonic(term, target, context)
 _brm_prepare_term(term::ExprColumn{typeof(mo1)}, target::Symbol, context) =
@@ -362,6 +367,208 @@ function _brm_prepare_term(term::ExprColumn{typeof(cdar)}, target::Symbol, conte
         (; target, steps, groups, n_groups=P, n_steps=W, cor=C, L, step_idx, group_idx,
            ar_prior, sd_prior), sources)
 end
+
+# `car(area; edges=(from, to), type=:icar|:bym2)`: an areal field over the graph
+# whose nodes are every label in `edges` and in `area`. Labels compare by value
+# after normalisation (integer-valued numbers become `Int`, strings `String`),
+# so an edge list read as `Float64` codes still names the `Int` areas.
+const _BRM_CAR_TYPES = (:icar, :bym2)
+_brm_car_label(x::AbstractString, what) = String(x)
+_brm_car_label(x::Integer, what) = Int(x)
+_brm_car_label(x::Real, what) = isfinite(x) && isinteger(x) ? Int(x) : error(
+    "BRM term preparation: `car` $what label $x is not an integer code or a string")
+_brm_car_label(x::CA.CategoricalValue, what) = _brm_car_label(CA.unwrap(x), what)
+_brm_car_label(::Missing, what) = error(
+    "BRM term preparation: `car` $what holds a missing label")
+_brm_car_label(x, what) = error(
+    "BRM term preparation: `car` $what label $(repr(x)) is neither an integer code " *
+    "nor a string")
+_brm_car_labels(raw, what) = Any[_brm_car_label(x, what) for x in raw]
+
+function _brm_car_arguments(term)
+    args, kw = getargs(term), getkwargs(term)
+    length(args) == 1 || error(
+        "BRM term preparation: `car(area; edges=(from, to), type=...)` takes exactly " *
+        "one area column, got $(length(args)) positional arguments")
+    extra = setdiff(keys(kw), (:edges, :type))
+    isempty(extra) || error(
+        "BRM term preparation: `car` takes only `edges=` and `type=`, got $(collect(extra))")
+    haskey(kw, :edges) || error(
+        "BRM term preparation: `car(area; edges=(from, to), type=...)` needs `edges=`")
+    haskey(kw, :type) || error(
+        "BRM term preparation: `car(area; edges=(from, to), type=...)` needs `type=` " *
+        "(`:icar` or `:bym2`)")
+    kw.type in _BRM_CAR_TYPES || error(
+        "BRM term preparation: `car(...; type=$(repr(kw.type)))` is not supported; " *
+        "use `:icar` or `:bym2`")
+    edges = kw.edges
+    edges isa Tuple && length(edges) == 2 && all(e -> e isa NamedColumn, edges) || error(
+        "BRM term preparation: `car(...; edges=...)` must name two data vectors, " *
+        "`edges=(from, to)`, got $(repr(edges))")
+    only(args), edges, kw.type
+end
+
+# Connected components of the structured nodes, each as the ascending node list,
+# ordered by their smallest node.
+function _brm_car_components(n::Int, pairs)
+    parent = collect(1:n)
+    root(i) = (while parent[i] != i; parent[i] = parent[parent[i]]; i = parent[i]; end; i)
+    for (a, b) in pairs
+        ra, rb = root(a), root(b)
+        ra == rb || (parent[max(ra, rb)] = min(ra, rb))
+    end
+    members = Dict{Int,Vector{Int}}()
+    for i in 1:n
+        push!(get!(members, root(i), Int[]), i)
+    end
+    sort!(collect(values(members)); by=first)
+end
+
+# BYM2 scaling factor of one connected component: the geometric mean of the
+# diagonal of the generalized inverse of its ICAR precision `Q = D - W`, which
+# is the covariance of the field under its sum-to-zero constraint (Riebler et al.
+# 2016; Morris et al. 2019).
+function _brm_car_scaling_factor(n::Int, pairs)
+    Q = zeros(n, n)
+    for (a, b) in pairs
+        Q[a, a] += 1; Q[b, b] += 1; Q[a, b] -= 1; Q[b, a] -= 1
+    end
+    F = LinearAlgebra.eigen(LinearAlgebra.Symmetric(Q))
+    tol = 1e-9 * maximum(F.values)
+    keep = findall(>(tol), F.values)
+    length(keep) == n - 1 || error(
+        "BRM term preparation: internal: a connected `car` component of $n areas " *
+        "has $(n - length(keep)) null directions")
+    V = F.vectors[:, keep]
+    exp(sum(log, vec(sum(abs2.(V) ./ permutedims(F.values[keep]); dims=2))) / n)
+end
+
+function _brm_car_graph(area_labels, from_labels, to_labels)
+    length(from_labels) == length(to_labels) || error(
+        "BRM term preparation: `car` edge vectors have unequal lengths " *
+        "($(length(from_labels)) and $(length(to_labels)))")
+    all_labels = vcat(area_labels, from_labels, to_labels)
+    kinds = unique(map(typeof, all_labels))
+    length(kinds) <= 1 || error(
+        "BRM term preparation: `car` area and edge labels mix $(join(kinds, " and ")); " *
+        "write them all as integer codes or all as strings")
+    nodes = sort!(unique(all_labels))
+    lookup = Dict(label => k for (k, label) in enumerate(nodes))
+    seen = Set{Tuple{Int,Int}}()
+    pairs = Tuple{Int,Int}[]
+    for (a, b) in zip(from_labels, to_labels)
+        i, j = lookup[a], lookup[b]
+        i == j && error("BRM term preparation: `car` edge $(repr(a)) – $(repr(b)) is a self-loop")
+        e = (min(i, j), max(i, j))
+        e in seen && error(
+            "BRM term preparation: `car` edge $(repr(a)) – $(repr(b)) is listed twice; " *
+            "list each undirected pair once")
+        push!(seen, e)
+        push!(pairs, e)
+    end
+    degree = zeros(Int, length(nodes))
+    for (i, j) in pairs
+        degree[i] += 1; degree[j] += 1
+    end
+    structured = findall(>(0), degree)
+    local_of = Dict(k => p for (p, k) in enumerate(structured))
+    local_pairs = [(local_of[i], local_of[j]) for (i, j) in pairs]
+    components = _brm_car_components(length(structured), local_pairs)
+    # Number the structured nodes component by component, so each component is
+    # one contiguous `phi` segment.
+    order = reduce(vcat, components; init=Int[])
+    position = zeros(Int, length(structured))
+    position[order] = 1:length(order)
+    struct_idx = zeros(Int, length(nodes))
+    for (p, k) in enumerate(structured)
+        struct_idx[k] = position[p]
+    end
+    comp_size = Int[length(c) for c in components]
+    comp_start = cumsum(vcat(1, comp_size))[1:end-1]
+    node1 = Int[struct_idx[i] for (i, _) in pairs]
+    node2 = Int[struct_idx[j] for (_, j) in pairs]
+    inv_scale = zeros(length(nodes))
+    scaling = Float64[]
+    for c in components
+        members = Set(c)
+        comp_pairs = [(searchsortedfirst(c, a), searchsortedfirst(c, b))
+                      for (a, b) in local_pairs if a in members]
+        s = _brm_car_scaling_factor(length(c), comp_pairs)
+        push!(scaling, s)
+        for p in c
+            inv_scale[structured[p]] = 1 / s
+        end
+    end
+    (; nodes, n_nodes=length(nodes), n_struct=length(structured),
+       n_edges=length(pairs), n_comp=length(components), node1, node2,
+       comp_start, comp_size, struct_idx, inv_scale, scaling)
+end
+
+# The graph is a fit of its area and edge columns: an RK frozen replay builds it
+# from the training columns (`_BRMFrozenReplay`), so the replay rows only find
+# their areas in it.
+function _brm_car_fitted_graph(names::NTuple{3,Symbol}, columns::NTuple{3,Any})
+    fit(area, from, to) = _brm_car_graph(_brm_car_labels(area, "area"),
+        _brm_car_labels(from, "edge"), _brm_car_labels(to, "edge"))
+    frozen = _brm_frozen_replay()
+    (frozen === nothing || first(names) in frozen.resample) && return fit(columns...)
+    _brm_frozen_fit(frozen, (:car_graph, first(names))) do
+        fit(map((name, values) -> get(frozen.training, name, values), names, columns)...)
+    end
+end
+
+function _brm_car_row_idx(nodes, area_labels; prefix="BRM term preparation")
+    lookup = Dict(label => k for (k, label) in enumerate(nodes))
+    map(area_labels) do label
+        k = get(lookup, label, nothing)
+        isnothing(k) && error(
+            "$prefix: `car` area $(repr(label)) is not an area of the fitted graph")
+        k
+    end
+end
+
+function _brm_prepare_term(term::ExprColumn{typeof(car)}, target::Symbol, context)
+    area, (from, to), type = _brm_car_arguments(term)
+    source, area_raw = _brm_term_data(:car, area, context)
+    from_source, from_raw = _brm_term_data(:car, from, context)
+    to_source, to_raw = _brm_term_data(:car, to, context)
+    area_labels = _brm_car_labels(area_raw, "area")
+    graph = _brm_car_fitted_graph((source, from_source, to_source),
+                                  (area_raw, from_raw, to_raw))
+    graph.n_struct > 0 || error(
+        "BRM term preparation: `car` graph has no edges; an areal field needs neighbours")
+    row_idx = _brm_car_row_idx(graph.nodes, area_labels)
+    sd_prior = _brm_term_prior_expression(term, target, context, :term_sd;
+                                          default=ExprColumn(Normal, 0.0, 1.0))
+    mixing_spec = _brm_term_prior_spec(term, target, context, :term_mixing)
+    type === :icar && !isnothing(mixing_spec) && error(
+        "BRM term preparation: `$(_brm_term_prior_spelling(mixing_spec))` addresses " *
+        "a BYM2 mixing share, but `car(...; type=:icar)` has none")
+    mixing_prior = type === :bym2 ? something(mixing_spec,
+        (; expression=ExprColumn(Beta, 0.5, 0.5))).expression : nothing
+    _BRMPreparedTerm(car, source,
+        (; target, type, graph..., row_idx, edge_sources=(from_source, to_source),
+           sd_prior, mixing_prior),
+        (source, from_source, to_source))
+end
+
+# Frozen replay: the graph and its numbering are constants of the fit; each new
+# row must name a fitted area.
+function _brm_replay_car(training, area_raw)
+    row_idx = _brm_car_row_idx(training.state.nodes,
+                               _brm_car_labels(area_raw, "area");
+                               prefix="BRM term replay")
+    _BRMPreparedTerm(car, training.source, merge(training.state, (; row_idx)),
+                     training.dependencies)
+end
+function _brm_replay_term(::typeof(car), training, fresh::ExprColumn, context)
+    area, _, _ = _brm_car_arguments(fresh)
+    source, raw = _brm_term_data(:car, area, context)
+    source === training.source || error("BRM term replay: `car` area column changed")
+    _brm_replay_car(training, raw)
+end
+_brm_replay_term(::typeof(car), training, fresh::_BRMPreparedTerm, context) =
+    _brm_replay_car(training, context.data[training.source])
 
 function _brm_replay_term(training::_BRMPreparedTerm,
                           fresh::ExprColumn, context::_BRMBackendContext)

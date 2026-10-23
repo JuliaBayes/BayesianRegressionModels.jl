@@ -98,7 +98,10 @@ end
 _rk_fitted_state_boundary(term) = term.kind === :spline && term.options.kind === :tps ?
     "`s($(only(term.columns)))` builds its thin-plate basis from every training " *
     "value of `$(only(term.columns))` (its knots), so a fitted state would hold " *
-    "that training column" : nothing
+    "that training column" :
+    term.kind === :car ?
+    "`car($(term.options.source))` reads its fitted adjacency graph as data columns, " *
+    "which a fitted state does not export yet" : nothing
 
 # The fitted values of an emitted program: its data-only definitions that read
 # fit-role inputs (or other such definitions) and no other data, which a
