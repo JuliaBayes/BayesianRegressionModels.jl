@@ -1,3 +1,5 @@
+include("description_texts.jl")
+
 """A named value and its declared indexing axis, never guessed from its name."""
 struct BRMDescriptionReference
     name::Symbol
@@ -83,7 +85,9 @@ end
 Deterministic description of an existing prepared model. `complete` is true
 only when every inventoried semantic component is covered. It certifies inventory
 coverage, not the independent scientific correctness of handwritten hooks.
-`model_id` is the unchanged inference identity; labels and prose do not alter it.
+`model_id` is the unchanged inference identity; labels, prose and `texts` do not
+alter it. `texts` holds the language the description was written in; a
+description constructed without it is English.
 """
 struct BRMDescription
     model_id::String
@@ -95,7 +99,28 @@ struct BRMDescription
     coverage::Tuple
     diagnostics::Tuple
     complete::Bool
+    texts::BRMDescriptionTexts
 end
+# Without texts, a description is in the default English, as in brm_description.
+BRMDescription(model_id,components,prose,equations,notation,priors,coverage,diagnostics,complete) =
+    BRMDescription(model_id,components,prose,equations,notation,priors,coverage,diagnostics,complete,_BRMD_EN_TEXTS)
+
+"""
+    brm_description_texts(description_or_context)
+
+The [`BRMDescriptionTexts`](@ref) a description was written with. A hook reads
+it from its context to write its own prose in the same language, e.g. by
+dispatching on `brm_description_texts(context).locale`.
+"""
+brm_description_texts(d::BRMDescription) = d.texts
+function brm_description_texts(c::BRMDescriptionComponent)
+    haskey(c.provenance,:description_texts) || throw(ArgumentError(
+        "description component $(c.id) carries no description texts; build it with brm_description"))
+    c.provenance.description_texts
+end
+brm_description_texts(p::BRMPriorDescription) = p.provenance.description_texts
+_brmd_text(c::Union{BRMDescription,BRMDescriptionComponent},name::Symbol;values...) =
+    _brmd_text(brm_description_texts(c),name;values...)
 
 """
     brm_describe_component(callable, context::BRMDescriptionContext)
