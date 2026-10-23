@@ -932,8 +932,10 @@ whose `L` is `length_scale_floor` or a data scalar, per axis for an
 anisotropic term. Because the wrapper's density identities hold for any
 function of those coordinates, each compiled model that adapts first compares
 the physical value every cell reads with BridgeStan's `param_constrain`, then
-checks the wrapper identities. A bound written as arithmetic over data is a
-`@test_broken` capability gap.
+checks the wrapper identities. A bound-independent oracle checks that a
+`truncated(LogNormal(0, 1); lower=length_scale_floor)` prior wraps exactly like
+the default floor plus one constant. A bound written as arithmetic over data is
+a `@test_broken` capability gap.
 
 `adaptive_centering_threads.jl` differentiates the ordinary, joint (ordinary +
 R2D2 + HSGP), learned-order (`ranef_order=:learned` over the joint cells),
