@@ -86,7 +86,8 @@ Deterministic description of an existing prepared model. `complete` is true
 only when every inventoried semantic component is covered. It certifies inventory
 coverage, not the independent scientific correctness of handwritten hooks.
 `model_id` is the unchanged inference identity; labels, prose and `texts` do not
-alter it. `texts` holds the language the description was written in.
+alter it. `texts` holds the language the description was written in; a
+description constructed without it is English.
 """
 struct BRMDescription
     model_id::String
@@ -100,6 +101,9 @@ struct BRMDescription
     complete::Bool
     texts::BRMDescriptionTexts
 end
+# Without texts, a description is in the default English, as in brm_description.
+BRMDescription(model_id,components,prose,equations,notation,priors,coverage,diagnostics,complete) =
+    BRMDescription(model_id,components,prose,equations,notation,priors,coverage,diagnostics,complete,_BRMD_EN_TEXTS)
 
 """
     brm_description_texts(description_or_context)
