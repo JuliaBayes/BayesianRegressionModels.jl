@@ -872,17 +872,24 @@ end
 # its decomposed twin (fused heads desugar pre-spine on whole
 # responses only — components always spell the wrapper form), with
 # predictor locations link-wrapped and param/literal locations bare.
-# Literal weights inline; a Dirichlet simplex name rides bare.
+# Literal weights inline; a Dirichlet simplex name rides bare; the
+# complementary weights of one scalar spell `[1 - w, w]` (or `[w, 1 - w]`).
+_rk_ast_mixture_weights(weights::Vector) = Expr(:vect, weights...)
+_rk_ast_mixture_weights(weights::Symbol) = weights
+function _rk_ast_mixture_weights(weights::_RKMixtureComplement)
+    w = weights.parameter
+    complement = Expr(:call, :-, 1, w)
+    weights.complement_first ? Expr(:vect, complement, w) : Expr(:vect, w, complement)
+end
+_rk_ast_mixture_weights(::Nothing) =
+    error("RK backend: internal: mixture has no planned weights")
+
 function _rk_ast_mixture_dist(response::_RKLikelihoodSpec,
         leaf::Dict{Symbol,Any})
     comp_exprs = map(leaf[:mixture]) do (cspec, cleaf, wrap)
         _rk_ast_response_dist(cspec, cleaf, false, wrap)
     end
-    weights = response.mixture_weights
-    weights_expr = weights isa Vector ? Expr(:vect, weights...) :
-        weights isa Symbol ? weights :
-        error("RK backend: internal: response `$(response.response)` " *
-              "mixture has no planned weights")
+    weights_expr = _rk_ast_mixture_weights(response.mixture_weights)
     _rk_ast_dotted(:MixtureModel, _rk_ast_dotted(:vcat, comp_exprs...),
         Expr(:call, :Ref, weights_expr))
 end

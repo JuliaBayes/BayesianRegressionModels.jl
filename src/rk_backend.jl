@@ -175,6 +175,14 @@ struct _RKMixtureComponent
     scale_predictor::Union{Nothing,Symbol}
 end
 
+# Two complementary mixture weights from one sampled scalar parameter,
+# `[1 - w, w]` (`complement_first`) or `[w, 1 - w]`: RKPPL's shared-weight
+# form, whose binding checks that the parameter's support lies in [0, 1].
+struct _RKMixtureComplement
+    parameter::Symbol
+    complement_first::Bool
+end
+
 struct _RKLikelihoodSpec
     family::Symbol # :gaussian | :bernoulli_logit | :poisson_log |
                    # :binomial_logit | :nb2_log | :gamma_log |
@@ -240,8 +248,9 @@ struct _RKLikelihoodSpec
     # Finite-mixture trailing fields; every other family leaves them at
     # defaults. Binomial-mixture trials ride the shared `trials` field.
     mixture_components::Vector{_RKMixtureComponent}
-    mixture_weights::Union{Nothing,Vector{Float64},Symbol} # frozen
-        # literal or Dirichlet simplex-param name
+    mixture_weights::Union{Nothing,Vector{Float64},Symbol,_RKMixtureComplement}
+        # frozen literal, Dirichlet simplex-param name, or the
+        # complementary weights of one sampled scalar
     # Student-t trailing fields (thin-layer LikelihoodSpec mirror once
     # the nu slot lands there); every other family leaves them at
     # default. Exactly one of `nu` / `nu_predictor` is non-nothing; a
@@ -1771,7 +1780,8 @@ function _rk_classify_mixture(rhs::ExprColumn, candidates::Vector{Symbol},
     trials = _rk_mixture_shared_trials(
         components, first(classified).family, parameters, assignments,
         consts, aliases, response)
-    weights = _rk_mixture_weights(weights_arg, K, response, vectors)
+    weights = _rk_mixture_weights(weights_arg, K, response, vectors,
+        parameters)
     anchor = _rk_mixture_anchor(classified, weights, response)
     (; family=:mixture, link=first(classified).link,
         components=classified, weights, trials, anchor,
@@ -2177,13 +2187,28 @@ function _rk_mixture_same_trials(a, b)
     false
 end
 
-# Mixture weights: a numeric vector/tuple summing to 1 (frozen), or a
-# Dirichlet-backed simplex parameter of matching width. Data-column
+# Mixture weights: a numeric vector/tuple summing to 1 (frozen), a
+# Dirichlet-backed simplex parameter of matching width, or two
+# complementary weights `[1 - w, w]` from one sampled scalar. Data-column
 # weights are out of mixture v1 (they are not n_obs columns, so they
-# cannot cross as data — the thin layer agrees).
+# cannot cross as data — the thin layer agrees). Other weight expressions
+# (per-row weights from a linear predictor, several scalars) are SBBRMI-only:
+# RKPPL shares one weight vector across rows and documents only the
+# complementary scalar form.
 function _rk_mixture_weights(arg, K::Int, response::Symbol,
-        vectors::Dict{Symbol,_RKVectorParameter})
+        vectors::Dict{Symbol,_RKVectorParameter}, parameters::Set{Symbol})
     prefix = "RK backend"
+    if arg isa Union{AbstractVector,Tuple} &&
+            !all(w -> w isa Real && !(w isa Bool), arg)
+        complement = K == 2 && length(arg) == 2 ?
+            _rk_mixture_complement(arg[1], arg[2], parameters) : nothing
+        isnothing(complement) || return complement
+        error("$prefix: response `$response` `MixtureModel` expression " *
+              "weights must be two complementary weights of one sampled " *
+              "scalar, `[1 - w, w]` or `[w, 1 - w]`; other weight " *
+              "expressions, such as per-row weights from a linear " *
+              "predictor, are supported on SBBRMI only")
+    end
     if arg isa Union{AbstractVector,Tuple} &&
             all(w -> w isa Real && !(w isa Bool), arg)
         length(arg) == K || error(
@@ -2224,16 +2249,38 @@ function _rk_mixture_weights(arg, K::Int, response::Symbol,
           "parameter, got $(typeof(arg))")
 end
 
+_rk_mixture_scalar_parameter(node, parameters::Set{Symbol}) =
+    node isa NamedColumn && name(node) in parameters ? name(node) : nothing
+
+function _rk_mixture_is_complement(node, parameter::Symbol)
+    node isa ExprColumn && getf(node) === (-) || return false
+    args = getargs(node)
+    length(args) == 2 && args[1] isa Real && !(args[1] isa Bool) &&
+        isone(args[1]) && args[2] isa NamedColumn && name(args[2]) === parameter
+end
+
+function _rk_mixture_complement(first, second, parameters::Set{Symbol})
+    w = _rk_mixture_scalar_parameter(second, parameters)
+    !isnothing(w) && _rk_mixture_is_complement(first, w) &&
+        return _RKMixtureComplement(w, true)
+    w = _rk_mixture_scalar_parameter(first, parameters)
+    !isnothing(w) && _rk_mixture_is_complement(second, w) &&
+        return _RKMixtureComplement(w, false)
+    nothing
+end
+
 # The struct predictor anchor for a mixture response: the anchor is
 # never resolved as a predictor (component slots ride dedicated
 # fields), but the struct field is non-nullable, so predictor-less
 # mixtures still anchor it. Order (mirrored thin-side, verbatim):
 # first location predictor, else first scale predictor, else the
-# Dirichlet weights name, else the first location/scale param (a scale
+# Dirichlet weights name (or the complementary weights' scalar), else the
+# first location/scale param (a scale
 # assignment anchors only when nothing else names a free value). A
 # fully-fixed mixture (zero free names) has no RK plan.
 function _rk_mixture_anchor(classified::Vector{_RKMixtureComponent},
-        weights::Union{Vector{Float64},Symbol}, response::Symbol)
+        weights::Union{Vector{Float64},Symbol,_RKMixtureComplement},
+        response::Symbol)
     prefix = "RK backend"
     for comp in classified
         comp.location_kind === :predictor && return comp.location::Symbol
@@ -2242,6 +2289,7 @@ function _rk_mixture_anchor(classified::Vector{_RKMixtureComponent},
         comp.scale_predictor !== nothing && return comp.scale_predictor
     end
     weights isa Symbol && return weights
+    weights isa _RKMixtureComplement && return weights.parameter
     for comp in classified
         comp.location_kind === :param && return comp.location::Symbol
     end
@@ -2301,6 +2349,11 @@ function _rk_evidence_name_bound(name::Symbol, response::Symbol, side::String,
           "out of slice 1)")
 end
 
+# A mixture's bounded evidence is the evidence of its component family: the
+# wrapper sees one same-family mixture (`censored(MixtureModel(...), lo, hi)`).
+_rk_evidence_family(family::Symbol, components) =
+    family === :mixture ? only(unique!(map(c -> c.family, components))) : family
+
 function _rk_plan_evidence(modifier, family::Symbol, data::AbstractDict,
         response::Symbol, columns::Dict{Symbol,AbstractVector},
         consts::Dict{Symbol,Float64}, aliases::Dict{Symbol,Symbol},
@@ -2357,7 +2410,7 @@ function _rk_gate_evidence_values!(specs::AbstractVector,
         end
         # Mirrors the thin layer: the poisson.cdf(::Int) endpoint needs
         # integer-valued bounds (literals and columns alike).
-        if spec.family === :poisson_log
+        if _rk_evidence_family(spec.family, spec.mixture_components) === :poisson_log
             for (side, bound) in (("lower", lower), ("upper", upper))
                 bound === nothing && continue
                 all(v -> v == round(v), bound) || error(
@@ -8137,7 +8190,8 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
         extra = get(response_extra_predictors, entry.key, Symbol[])
         candidates = response_predictors[entry.key]
         mixture_components = _RKMixtureComponent[]
-        mixture_weights::Union{Nothing,Vector{Float64},Symbol} = nothing
+        mixture_weights::Union{Nothing,Vector{Float64},Symbol,
+            _RKMixtureComplement} = nothing
         family, link, scale, scale_predictor, trials, predictor, nu,
         nu_predictor, zero_inflation, interval = if head === Categorical
             length(getargs(entry.rhs)) == 1 || error(
@@ -8210,17 +8264,14 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
                 Expr(:_rk_data_preparation, :brm_prepared_indices, raw,
                     _rk_ast_level_values(levels)), entry.key))
         end
-        # Mixture v1 admits no response-level weights or bounded
-        # evidence (no driving case), and no `gp` mixture predictors
-        # (the AST plate ranges over one response per predictor).
+        # Mixture v1 admits no response-level weights (no driving case)
+        # and no `gp` mixture predictors (the AST plate ranges over one
+        # response per predictor). Bounded evidence wraps the whole mixture
+        # and is planned against its component family below.
         if family === :mixture
             entry.weight_plan === nothing || error(
                 "$prefix: response `$(entry.key)` weights on a " *
                 "`MixtureModel` response are out of mixture v1")
-            entry.modifier === nothing || error(
-                "$prefix: response `$(entry.key)` evidence " *
-                "($(entry.modifier.kind)) on a `MixtureModel` response " *
-                "is out of mixture v1")
             for pname in candidates
                 spec = only(s for s in predictor_specs if s.name === pname)
                 any(t -> t.kind === :gp, spec.terms) && error(
@@ -8298,7 +8349,8 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
             columns[source] = entry.weight_plan.values
             source
         end
-        evidence = _rk_plan_evidence(entry.modifier, family,
+        evidence = _rk_plan_evidence(entry.modifier,
+            _rk_evidence_family(family, mixture_components),
             context.data, entry.key, columns, consts, aliases, parameter_names,
             assignment_names)
         if family === :mvnormal_cholesky
