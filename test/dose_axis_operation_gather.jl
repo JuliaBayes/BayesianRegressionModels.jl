@@ -90,6 +90,16 @@ probe_points(n) = (zeros(n), fill(0.1, n), collect(range(-0.4, 0.4; length=n)))
           [[1, 0, 2, 0], [1, 0], [0, 1], [0, 0]]
 end
 
+@testset "both axes have complete scientific descriptions" begin
+    # `vcat(0.0, log_F[doses[i]])` is value concatenation, not the `vcat`
+    # prior family (test/description_concatenation.jl).
+    for model in (dose_axis_model(TRAINING.dose_axis), filled_model(TRAINING.filled))
+        r = brm_description(sb_of(model))
+        @test r.complete
+        @test isempty(r.diagnostics)
+    end
+end
+
 @testset "Stan: the dose axis equals the filled operation axis" begin
     dose_sb = sb_of(dose_axis_model(TRAINING.dose_axis))
     @test StanBlocks.stanc_check(BRM.stan_code(dose_sb); warn_pedantic=false).ok

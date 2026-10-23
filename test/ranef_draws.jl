@@ -343,6 +343,19 @@ end
     @test all(isapprox(p.cor[i, :, :], [1 0.3; 0.3 1]; atol = 1e-12) for i in 1:3)
     @test check_rows(c, p, "r_mu_p_subject", 1:2, Zboth, data.subject)
     @test check_noncentered(c, p, "b_p_subject_z")
+
+    # The centered emissions report the same values and read the sampled effects.
+    c = constrained_draws(build(known_mixed_builder; total_groups = (), centered_groups = [:subject]))
+    p = only(brm_ranef_draws(c.d, c.draws, c.names; id = :p))
+    @test p.family === :ranef_correlated_draws_centered_known_scale
+    @test all(p.sd[:, 1] .≈ sqrt(0.1))
+    @test check_rows(c, p, "r_mu_p_subject", 1:2, Zboth, data.subject)
+    c = constrained_draws(build(known_all_builder; total_groups = (), centered_groups = [:subject]))
+    p = only(brm_ranef_draws(c.d, c.draws, c.names; id = :p))
+    @test p.family === :ranef_correlated_draws_centered_known_cor
+    @test all(p.sd .≈ 0.3)
+    @test all(isapprox(p.cor[i, :, :], [1 0.3; 0.3 1]; atol = 1e-12) for i in 1:3)
+    @test check_rows(c, p, "r_mu_p_subject", 1:2, Zboth, data.subject)
 end
 
 @testset "R2D2-derived scales" begin

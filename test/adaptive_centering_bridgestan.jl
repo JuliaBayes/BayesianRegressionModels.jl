@@ -640,7 +640,9 @@ function manual_blocks_map(x, blocks, controls)
     ljac, y
 end
 
-function check_r2d2_wrapper(sb)
+# `stan_tau(problem, x, block)` is Stan's own value of a derived-scale block's
+# scales at `x`.
+function check_r2d2_wrapper(sb; stan_tau=r2d2_stan_tau)
     problem = StanBlocks.stan_instantiate(sb.model)
     unc_names = StanBlocks.BridgeStan.param_unc_names(problem.model)
     blocks = adaptive_centering_blocks(sb, unc_names)
@@ -650,7 +652,7 @@ function check_r2d2_wrapper(sb)
     x = 0.6 .* sin.(1:n) .+ 0.1 .* cos.(3 .* (1:n))
     for block in r2d2
         @test BayesianRegressionModels._adaptive_block_taus(x, block) ≈
-              r2d2_stan_tau(problem, x, block) rtol=1e-12
+              stan_tau(problem, x, block) rtol=1e-12
     end
 
     wrapped = adaptive_centering_problem(sb, problem, AutoEnzyme())
@@ -766,4 +768,97 @@ end
     )
     @test inverse_ljac ≈ -ljac atol=2e-12
     @test roundtrip ≈ x atol=2e-12
+end
+
+# ---- Known-value blocks (`sd(...) = value`, `cor(:, ID) = R`) ---------------
+#
+# A known scale is a constant log-scale and a known correlation a constant
+# Cholesky factor, so these blocks adapt in derived-scale form under either
+# emission. Same exactness contract as the R2D2 recipes above.
+const KNOWN_DF = (; subject=repeat(1:5, inner=3),
+                  x=collect(range(-1.0, 1.0, length=15)), y=sin.(1:15) ./ 3)
+const KNOWN_VARIANTS = [
+    "one known SD beside a sampled one" => @brm(begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 + x | p | subject)
+        sd(mu, p, Intercept) = sqrt(0.1)
+        sd(mu, p, x) ~ Exponential(0.5)
+        y ~ Normal(mu, sigma)
+    end),
+    "known SDs and correlation" => @brm(begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 + x | p | subject)
+        sd(:, p) = 0.4
+        cor(:, p) = [1 0.3; 0.3 1]
+        y ~ Normal(mu, sigma)
+    end),
+    "known correlation, sampled SDs" => @brm(begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 + x | p | subject)
+        cor(:, p) = [1 -0.4; -0.4 1]
+        y ~ Normal(mu, sigma)
+    end),
+    "plain (1 | g) with a known SD" => @brm(begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 | subject)
+        sd(mu, subject) = 3.0
+        y ~ Normal(mu, sigma)
+    end),
+]
+
+# Stan's value of a known-value block's scales: the transformed `<binding>_tau`
+# of a block that samples some of them, else its data vector.
+function known_stan_tau(sb, problem, x, block)
+    name = "$(block.ranef.binding)_tau"
+    names = StanBlocks.BridgeStan.param_names(problem.model; include_tp=true)
+    values = StanBlocks.BridgeStan.param_constrain(problem.model, x; include_tp=true)
+    idx = findall(n -> n == name || startswith(n, name * "."), names)
+    isempty(idx) ? BayesianRegressionModels.stan_data(sb)[Symbol(name)] : values[idx]
+end
+
+@testset "BridgeStan known-value $label adapts exactly, centered=$centered" for
+        (label, builder) in KNOWN_VARIANTS, centered in (false, true)
+    sb = SBBRMI(builder(KNOWN_DF); total_groups=(), mod=@__MODULE__,
+                centered_groups=centered ? [:subject] : ())
+    check_r2d2_wrapper(sb; stan_tau=(problem, x, block) -> known_stan_tau(sb, problem, x, block))
+end
+
+# A known correlation has no Cholesky coordinates for the learned order to
+# reorder: its block keeps the declared order, its groups still learn theirs,
+# and the map stays exact.
+@testset "learned order over a known correlation, centered=$centered" for centered in (false, true)
+    sb = SBBRMI(last(KNOWN_VARIANTS[2])(KNOWN_DF); total_groups=(), mod=@__MODULE__,
+                centered_groups=centered ? [:subject] : ())
+    problem = StanBlocks.stan_instantiate(sb.model)
+    names = StanBlocks.BridgeStan.param_unc_names(problem.model)
+    block = only(adaptive_centering_blocks(sb, names))
+    @test isempty(block.cholesky_free) && !isempty(block.cholesky_known)
+    K, G = size(block.effects)
+    # Margin 2 leads on mean control (0.58 against 0.42), which would reorder a
+    # sampled correlation's block.
+    controls = vcat([isodd(g) ? [0.1, 0.9] : [0.9, 0.1] for g in 1:G]...)
+    wrapped = adaptive_centering_problem(sb, problem, AutoEnzyme(); ranef_order=:learned,
+                                         centeredness=controls)
+    ir = WarmupHMC.reparametrizer(wrapped)
+    @test ir isa AC_EXT.BRMOrderedCenteringReparametrization
+    @test only(ir.block_orders) == [1, 2]
+    @test only(ir.orders) == reduce(hcat, [isodd(g) ? [2, 1] : [1, 2] for g in 1:G])
+    x = 0.5 .* sin.(1:length(names))
+    ljac, mapped = ir(x)
+    @test mapped[setdiff(eachindex(names), vec(block.effects))] ==
+          x[setdiff(eachindex(names), vec(block.effects))]
+    inverse_ljac, roundtrip = WarmupHMC.InverseFunctions.inverse(ir)(mapped)
+    @test roundtrip ≈ x atol=1e-12
+    @test inverse_ljac ≈ -ljac atol=1e-12
+    lp, gradient = LogDensityProblems.logdensity_and_gradient(wrapped, x)
+    @test lp ≈ ljac + LogDensityProblems.logdensity(problem, mapped) atol=1e-10
+    step = 1e-5
+    finite_difference = [begin
+        plus, minus = copy(x), copy(x)
+        plus[i] += step
+        minus[i] -= step
+        (LogDensityProblems.logdensity(wrapped, plus) -
+         LogDensityProblems.logdensity(wrapped, minus)) / (2step)
+    end for i in eachindex(x)]
+    @test gradient ≈ finite_difference atol=2e-5 rtol=2e-5
 end

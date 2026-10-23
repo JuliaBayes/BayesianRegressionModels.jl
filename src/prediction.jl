@@ -178,6 +178,12 @@ const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
         internals = (; L = :correlation_cholesky, z = :standardized, tau_free = :scale)),
     :ranef_correlated_draws_known_cor => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :tau, known = true, effects = :self,
         internals = (; L = :correlation_cholesky, z = :standardized, tau_free = :scale)),
+    # Their `centered_groups=` siblings: the `ranef_correlated_draws_centered`
+    # layout over the same caller-level `tau` (and data `L`).
+    :ranef_correlated_draws_centered_known_scale => (; z = :b, layout = :group_term, noncentered = false, tau = :tau, known = true, effects = :self,
+        internals = (; L = :correlation_cholesky, tau_free = :scale)),
+    :ranef_correlated_draws_centered_known_cor => (; z = :b, layout = :group_term, noncentered = false, tau = :tau, known = true, effects = :self,
+        internals = (; L = :correlation_cholesky, tau_free = :scale)),
     # Native constrained-matrix plate emission (StanBlocks 0421b28). The
     # per-group standardised cell is namespaced under the group plate result
     # `b_T`; the collected storage is term-major (`matrix[K, G]`), so the
@@ -981,11 +987,12 @@ _ranef_check_draws(draws, unc_names) =
 # family's (same `tau` / `L` coordinates): the frame rebuilds
 # `C = diag(tau) * L`, and each level's `sqrt(w)` is applied where its weight is
 # known (`transport_draws`' centered phase).
-function _ranef_centered_frame(bf::RanefBlock, unc_from)
+function _ranef_centered_frame(bf::RanefBlock, unc_from, plan)
     base = get(_RANEF_STUDENT_T_BASES, bf.family, nothing)
     gaussian = isnothing(base) ? bf : RanefBlock(
         (f === :family ? base : getfield(bf, f) for f in fieldnames(RanefBlock))...)
     frame = _adaptive_block(gaussian, unc_from, _ranef_name_positions(unc_from);
+                            known=_adaptive_known_record(plan, gaussian),
                             effects=ranef_coordinates(bf, unc_from))
     isnothing(frame) && error(
         "BRM prediction: block `$(bf.binding)` (`$(bf.family)`) is a centered ",
@@ -1213,7 +1220,8 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
                          resample = (), rng::Random.AbstractRNG = Random.default_rng())
     _ranef_check_draws(draws, unc_from)
     resample_set = Set{Symbol}(resample isa Symbol ? (resample,) : resample)
-    blocks_from = ranef_blocks(from)
+    plan_from = _ranef_plan(from)
+    blocks_from = ranef_blocks(plan_from)
     blocks_to   = ranef_blocks(to)
     totals_from = total_effect_blocks(from)
     totals_to = total_effect_blocks(to)
@@ -1314,7 +1322,7 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
         # the centered variants are distinct families, so `bf` shares `bt`'s
         # emission here.
         centered = !bt.noncentered
-        frame = centered ? _ranef_centered_frame(bf, unc_from)::AdaptiveCenteringBlock : nothing
+        frame = centered ? _ranef_centered_frame(bf, unc_from, plan_from) : nothing
         coords_to = ranef_coordinates(bt, unc_to)
         coords_from = ranef_coordinates(bf, unc_from)
         level_pos = Dict(l => g for (g, l) in enumerate(bf.levels))

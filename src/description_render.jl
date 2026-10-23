@@ -147,6 +147,8 @@ function brm_description_math(c::BRMDescriptionContext, x::BRMDescriptionCompone
             return brm_description_math(c,base)*"."*brm_description_math(c,field)
         end
     end
+    get(x.provenance,:concatenation,false) &&
+        return "\\left["*join((brm_description_math(c,a) for a in x.arguments),";\\ ")*"\\right]"
     if x.callable===StanBlocks.stan.builtin.maybe_index
         value=first(x.arguments)
         (value isa Number || value isa BRMDescriptionReference && value.axis===:scalar) &&
@@ -402,8 +404,12 @@ _brmd_builtin_call(::StanBlocks.SlicModel,c)=BRMDescriptionFragment(covers=(c.id
 # Only BRM-generated vector priors decompose; other value families stay gaps.
 _brmd_builtin_call(::StanBlocks.ValueFamily,c)=isempty(_brmd_coordinates(c)) ? nothing :
     _brmd_coordinatewise_fragment(c)
-_brmd_builtin_call(::typeof(StanBlocks.stan.builtin.vcat),c)=isempty(_brmd_coordinates(c)) ? nothing :
-    _brmd_coordinatewise_fragment(c)
+# `vcat` is SLIC's block-wise prior family, decomposing the same way, or,
+# outside distribution position, value concatenation (`_brmd_distribution`).
+_brmd_builtin_call(::typeof(vcat),c)=!isempty(_brmd_coordinates(c)) ? _brmd_coordinatewise_fragment(c) :
+    get(c.provenance,:concatenation,false) ? BRMDescriptionFragment(
+        prose=(_brmd_text(c,:concatenation),),
+        covers=(c.id,)) : nothing
 function _brmd_builtin_call(::typeof(mm),c)
     normalized=c.keywords.normalize
     weights=c.keywords.weights

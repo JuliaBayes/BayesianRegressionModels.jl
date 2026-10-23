@@ -13,7 +13,7 @@
 # the value" against the established sampled emission rather than against a
 # hand-written Stan program.
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
-using Random, LinearAlgebra
+using Random, LinearAlgebra, Statistics
 using Distributions: Exponential, Normal, LKJCholesky, TDist, Dirac, logpdf
 
 const FIXED_RUNTIME = get(ENV, "BRM_FIXED_RANEF_RUNTIME", "1") != "0"
@@ -196,9 +196,27 @@ end
     @test occursin("b_p_subject_tau_free", code)
     @test !occursin("b_p_subject_L_known", code)
 
-    # refused: a known-value block has no centered emission yet (follow-up).
-    @test_throws "centered emission of a known-value block" build(mixed_builder;
-        centered_groups=[:subject])
+    # `centered_groups` emits the centered sibling over the same `tau` and `L`:
+    # the effects themselves are the parameter.
+    centered = Dict(b => build(b; centered_groups=[:subject]) for b in
+        (mixed_builder, known_builder, cor_builder, single_builder))
+    @test all(stanc_ok, values(centered))
+    @test only(ranef_blocks(centered[mixed_builder])).family ===
+        :ranef_correlated_draws_centered_known_scale
+    @test only(ranef_blocks(centered[single_builder])).family ===
+        :ranef_correlated_draws_centered_known_scale
+    @test only(ranef_blocks(centered[known_builder])).family ===
+        :ranef_correlated_draws_centered_known_cor
+    @test only(ranef_blocks(centered[cor_builder])).family ===
+        :ranef_correlated_draws_centered_known_cor
+    @test !any(b -> only(ranef_blocks(b)).noncentered, values(centered))
+    data = stan_data_of(centered[known_builder])
+    @test data[:b_p_subject_tau] == [0.4, 0.4]
+    @test data[:b_p_subject_L_known] ≈ Matrix(cholesky(R).L)
+    @test stan_data_of(centered[mixed_builder])[:b_p_subject_tau_known] == [sqrt(0.1)]
+    code = BRM.stan_code(centered[mixed_builder])
+    @test occursin("b_p_subject_tau_free", code)
+    @test !occursin("z_flat", code)
     # refused: an R2D2 decomposition derives the block's scales, so it cannot
     # share the block with a known scale or correlation.
     @test_throws "r2d2" SBBRMI(eval(:(@brm $DF begin
@@ -298,6 +316,48 @@ FIXED_RUNTIME && @stestset "BridgeStan: known equals sampled at the known value"
         logpdf(LKJCholesky(2, 1.0), Cholesky(LowerTriangular(Matrix(cholesky(R).L)))) atol=1e-8
 end
 
+# A centered known-value block is its non-centered twin through `b = C z`,
+# `C = diag(tau) * L`, per level: at matching points the two log densities (no
+# Jacobian) differ by exactly `G * log(det(C))`.
+FIXED_RUNTIME && @stestset "BridgeStan: centered = non-centered through b = C z" begin
+    rng = MersenneTwister(11)
+    for (builder, block, K, free, known_scales, known_L) in (
+            (single_builder, "b_ka_subject", 1, String[], [sqrt(0.1)], nothing),
+            (mixed_builder, "b_p_subject", 2, ["b_p_subject_tau_free.1"],
+             [sqrt(0.1), nothing], nothing),
+            (known_builder, "b_p_subject", 2, String[], [0.4, 0.4], R),
+            (cor_builder, "b_p_subject", 2, ["b_p_subject_tau.1", "b_p_subject_tau.2"],
+             [nothing, nothing], R))
+        nc = instantiate(build(builder)).model
+        c = instantiate(build(builder; centered_groups=[:subject])).model
+        c_names = BridgeStan.param_names(c)
+        for _ in 1:3
+            base = Dict{String,Float64}("sigma" => 0.5 + rand(rng),
+                "pop_mu_beta_pop.1" => randn(rng), "pop_mu_beta_pop.2" => randn(rng))
+            sampled = Dict(n => 0.2 + rand(rng) for n in free)
+            r = 0.6rand(rng) - 0.3
+            L = isnothing(known_L) ? (K == 1 ? ones(1, 1) : Matrix(cholesky([1 r; r 1]).L)) :
+                Matrix(cholesky(known_L).L)
+            correlation = isnothing(known_L) ?
+                (K == 1 ? Dict("$(block)_L.1.1" => 1.0) : lkj_factor("$(block)_L", r)) :
+                Dict{String,Float64}()
+            tau = Union{Nothing,Float64}[known_scales...]
+            for (j, k) in enumerate(findall(isnothing, known_scales))
+                tau[k] = sampled[free[j]]
+            end
+            C = Diagonal(Float64.(tau)) * L
+            z = randn(rng, K, 6)
+            zvalues = Dict("$(block)_z_flat.$i" => z[i] for i in eachindex(z))
+            b = C * z
+            bvalues = Dict("$(block)_b.$g.$k" => b[k, g] for g in 1:6, k in 1:K)
+            @test issubset(keys(bvalues), c_names)
+            lp_nc = stan_lp(nc, merge(base, sampled, correlation, zvalues))
+            lp_c = stan_lp(c, merge(base, sampled, correlation, bvalues))
+            @test lp_nc - lp_c ≈ 6 * sum(log, diag(C)) atol=1e-9
+        end
+    end
+end
+
 FIXED_RUNTIME && @stestset "RKBRMI: the same law as SBBRMI" begin
     for (name, builder, data) in (("mixed", mixed_builder, DF), ("known", known_builder, DF),
             ("cor", cor_builder, DF), ("single", single_builder, DF),
@@ -324,6 +384,33 @@ FIXED_RUNTIME && @stestset "RKBRMI: the same law as SBBRMI" begin
     end
 end
 
+# RKBRMI's random effects are always standardized draws; a centered SB block
+# moves through the per-point map `b = diag(tau) * L * z`, with a known scale
+# or correlation entering as its constant.
+FIXED_RUNTIME && @stestset "RKBRMI: the law of a centered known-value block" begin
+    for (name, builder) in (("mixed", mixed_builder), ("known", known_builder),
+            ("cor", cor_builder), ("single", single_builder))
+        brmi = builder(DF)
+        rk, problem = consumer_problem(brmi)
+        sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=(), centered_groups=[:subject])
+        stan = instantiate(sb)
+        transport = brm_coordinate_transport(rk, sb, BridgeStan.param_unc_names(stan.model))
+        @test length(transport.centered) == 1
+        for u in (zeros(length(transport)),
+                  collect(range(-0.43, 0.51; length=length(transport))))
+            stan_u = brm_rk_point_to_stan(transport, u)
+            @test brm_stan_point_to_rk(transport, stan_u) ≈ u atol=1e-12
+            @test brm_check_coordinate_transport(transport, rk, stan.model, u).max_error <= 1e-12
+            value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
+            stan_gradient = similar(stan_u)
+            stan_value, _ = BridgeStan.log_density_gradient!(stan.model, stan_u,
+                stan_gradient; propto=false, jacobian=true)
+            @test value ≈ brm_stan_logdensity_to_rk(transport, u, stan_value) atol=2e-11 rtol=2e-11
+            @test gradient ≈ brm_stan_gradient_to_rk(transport, u, stan_gradient) atol=2e-10 rtol=2e-10
+        end
+    end
+end
+
 FIXED_RUNTIME && @stestset "compositions: prediction, replay and prior programs" begin
     sb = build(mixed_builder)
     unc = BridgeStan.param_unc_names(instantiate(sb).model)
@@ -340,6 +427,25 @@ FIXED_RUNTIME && @stestset "compositions: prediction, replay and prior programs"
     cv = reprocess(sb, new_subjects; resample_groups=[:subject])
     @test stanc_ok(cv)
     @test BRM.stan_data(cv)[:b_p_subject_tau_known] == [sqrt(0.1)]
+
+    # A centered block's fresh levels are drawn through the fitted covariance,
+    # `b = C * z`, so they carry the known SD, never a bare `N(0, 1)`.
+    csb = build(single_builder; centered_groups=[:subject])
+    cunc = BridgeStan.param_unc_names(instantiate(csb).model)
+    fresh_df = (; subject=[1, 1, 9, 9], x=[0.1, -0.2, 0.3, 0.0], y=zeros(4),
+                omega_sd=0.4)
+    cplan = generative_plan(single_builder, fresh_df; mod=@__MODULE__,
+        centered_groups=[:subject])
+    bt = only(ranef_blocks(cplan))
+    @test bt.family === :ranef_correlated_draws_centered_known_scale
+    cunc_to = BridgeStan.param_unc_names(StanBlocks.stan_instantiate(cplan.model).model)
+    cdraws = randn(MersenneTwister(3), 4000, length(cunc))
+    moved = transport_draws(csb, cplan, cdraws, cunc, cunc_to; rng=MersenneTwister(4))
+    coords_to = ranef_coordinates(bt, cunc_to)
+    coords_from = ranef_coordinates(only(ranef_blocks(csb)), cunc)
+    @test moved[:, coords_to[1, 1]] == cdraws[:, coords_from[1, 1]]
+    @test isapprox(std(moved[:, coords_to[1, 2]]), sqrt(0.1); rtol=0.05)
+    @test all(iszero, population_draws(csb, cdraws, cunc; groups=:subject)[:, vec(coords_from)])
 
     # A prior program (the response omitted) keeps the known block whole.
     prior = SBBRMI(known_builder((; subject=DF.subject, x=DF.x, omega_sd=0.4));
@@ -372,6 +478,14 @@ FIXED_RUNTIME && @stestset "brm_start: known values are restated, sampled ones s
         (; p=0.16 .* [1 0.5; 0.5 1]))
     @test_throws "contradicts it" brm_start(RKBRMI(known_builder(DF)),
         (; p=0.16 .* [1 0.5; 0.5 1]))
+    # A centered block starts its sampled scales the same way.
+    centered = build(mixed_builder; centered_groups=[:subject])
+    centered_model = instantiate(centered).model
+    values = BridgeStan.param_constrain(centered_model,
+        brm_start(centered, centered_model, (; p=Sigma, sigma=0.7)))
+    @test values[only(findall(==("b_p_subject_tau_free.1"),
+        BridgeStan.param_names(centered_model)))] ≈ 0.5
+    @test_throws "contradicts it" brm_start(centered, centered_model, (; p=contradicting))
 end
 
 @stestset "descriptors, descriptions and the loud edges" begin
@@ -395,6 +509,38 @@ end
     # refused: NLMEEstimation cannot hold a covariance family fixed yet
     # (NLMEEstimation snag `fixed-omega-fami-a1322422`).
     @test_throws "fixed-omega-fami-a1322422" brm_nlme_view(RKBRMI(mixed_builder(DF)))
-    # refused: adaptive centering of a known-value block is a follow-up.
-    @test_throws "known-value block" adaptive_centering_blocks(sb, String[])
+    # Adaptive centering describes a known-value block in derived-scale form:
+    # a known SD is a constant log-scale, a sampled one its coordinate, and a
+    # known correlation a constant factor with no Cholesky coordinates.
+    if FIXED_RUNTIME
+        for (builder, centered_groups, target_c) in ((mixed_builder, [], 0.0),
+                (mixed_builder, [:subject], 1.0), (known_builder, [:subject], 1.0),
+                (known_builder, [], 0.0), (single_builder, [:subject], 1.0))
+            model = build(builder; centered_groups)
+            unc = BridgeStan.param_unc_names(instantiate(model).model)
+            block = only(adaptive_centering_blocks(model, unc))
+            @test block isa R2D2AdaptiveCenteringBlock
+            @test block.target_c == target_c
+            @test sort(vec(block.effects)) == sort(vec(ranef_coordinates(
+                only(ranef_blocks(model)), unc)))
+            x = collect(range(-0.3, 0.4; length=length(unc)))
+            C = BRM._adaptive_block_cholesky(x, block)
+            if builder === known_builder
+                @test isempty(block.cholesky_free)
+                @test C ≈ 0.4 .* Matrix(cholesky(R).L) atol=1e-14
+            elseif builder === single_builder
+                @test C ≈ fill(sqrt(0.1), 1, 1) atol=1e-14
+            else
+                free = only(i for (i, n) in enumerate(unc) if n == "b_p_subject_tau_free.1")
+                @test diag(C) ./ diag(BRM._adaptive_block_correlation(x, block)) ≈
+                    [sqrt(0.1), exp(x[free])] atol=1e-14
+            end
+        end
+        # A known-value Student-t block is not adapted yet (todo `16jywsl`):
+        # each level's factor is `sqrt(w[g]) * C`, so it is left out rather
+        # than described without its weights.
+        model = build(studentt_builder)
+        @test isempty(adaptive_centering_blocks(model,
+            BridgeStan.param_unc_names(instantiate(model).model)))
+    end
 end

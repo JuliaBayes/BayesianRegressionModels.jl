@@ -1188,6 +1188,32 @@ ranef_correlated_draws_centered_generic_student_t =
     _sb_student_t_ranef(ranef_correlated_draws_centered_generic,
                         :ranef_correlated_draws_centered_generic)
 
+# Centered siblings of the known-value families (`sd(...) = value`,
+# `cor(:, ID) = R`): the effect itself is the parameter, under the block's
+# covariance. `tau` -- and `L` for `_known_cor` -- arrive as caller kwargs
+# exactly as in `ranef_correlated_draws_known_scale` / `_known_cor`, so the
+# known part is data and the sampled part keeps its caller-level prior.
+ranef_correlated_draws_centered_known_scale = StanBlocks.@slic begin
+    L ~ lkj_corr_cholesky(lkj_eta; n=n_terms)
+    b::vector[n_groups, n_terms] ~ multi_normal_cholesky0(diag_pre_multiply(tau, L))
+    return ranef_b_matrix(b)   # n_groups x n_terms
+end
+
+ranef_correlated_draws_centered_known_cor = StanBlocks.@slic begin
+    b::vector[n_groups, n_terms] ~ multi_normal_cholesky0(diag_pre_multiply(tau, L))
+    return ranef_b_matrix(b)   # n_groups x n_terms
+end
+
+# The centered emission of a known-value block, keyed by whether its
+# correlation is known. A known-value Student-t block has no centered emission
+# (`_sb_refuse_centered_student_t`).
+const _SB_KNOWN_CENTERED_RANEF_FAMILIES = Dict{Bool,Tuple{Symbol,StanBlocks.SlicModel}}(
+    false => (:ranef_correlated_draws_centered_known_scale,
+              ranef_correlated_draws_centered_known_scale),
+    true => (:ranef_correlated_draws_centered_known_cor,
+             ranef_correlated_draws_centered_known_cor),
+)
+
 # Stratified gather + Cholesky scale, kept as a Stan function (loops are not
 # allowed in @slic bodies, but they are allowed in @deffun bodies). For each
 # group g, pick the stratum s = stratum_idx[g] and compute
@@ -11860,6 +11886,17 @@ function _sb_emit_student_t_id_bucket!(stmts, data, bucket_name, n_terms_name,
     nothing
 end
 
+# A Student-t `|ID|` block that holds a known scale or correlation has only the
+# non-centered emission (its mixing weights scale the standardized draws): the
+# centered Student-t families derive from the sampled-scale Gaussian ones only
+# (`ranef_correlated_draws_centered*_student_t`).
+_sb_refuse_centered_student_t(gname, centered_groups, id_sym) =
+    gname in centered_groups && error(
+        "sbimpl: group `$gname` is in `centered_groups`, but its `|$id_sym|` " *
+        "block is Student-t and holds a known scale or correlation; the " *
+        "centered emission of a known-value Student-t block is not " *
+        "implemented. Use the default non-centered emission for this group")
+
 # Emit a shared `|ID|` block that holds some marginal scales and/or its
 # correlation at known values (`sd(...) = value`, `cor(:, ID) = R`). Known
 # scales and the known Cholesky factor are data; the remaining scales keep
@@ -11871,16 +11908,14 @@ end
 #                         `<bucket>_tau_known` into `<bucket>_tau`.
 #
 # cv sizing rides the `n_groups` size expression exactly as in the sampled
-# families; a Student-t block uses the derived `_student_t` family.
+# families; a Student-t block uses the derived `_student_t` family, and a group
+# in `centered_groups` the `_centered_` family over the same `tau` and `L`.
 function _sb_emit_known_id_bucket!(stmts, data, bucket_name, n_terms_name,
                                    gname, idx_name, n_name; cv_groups,
                                    centered_groups, id_sym, ranef_effect,
                                    mod::Module)
-    gname in centered_groups && error(
-        "sbimpl: group `$gname` is in `centered_groups`, but its `|$id_sym|` " *
-        "block holds a known scale or correlation (`sd(...) = value` / " *
-        "`cor(:, $id_sym) = R`); the centered emission of a known-value block " *
-        "is not implemented. Use the default non-centered emission for this group")
+    dist = ranef_effect.dist
+    isnothing(dist) || _sb_refuse_centered_student_t(gname, centered_groups, id_sym)
     n_groups = n_name
     if gname in cv_groups
         n_groups = Symbol(bucket_name, :_n_g)
@@ -11890,8 +11925,10 @@ function _sb_emit_known_id_bucket!(stmts, data, bucket_name, n_terms_name,
     tau = _sb_emit_known_ranef_tau!(stmts, data, bucket_name, n_terms_name,
                                     priors; mod)
     known_cor = ranef_effect.known_cor
-    dist = ranef_effect.dist
-    family, model = _SB_KNOWN_RANEF_FAMILIES[(!isnothing(known_cor), !isnothing(dist))]
+    # `SBBRMI` refuses a group in both `cv_groups` and `centered_groups`.
+    family, model = gname in centered_groups ?
+        _SB_KNOWN_CENTERED_RANEF_FAMILIES[!isnothing(known_cor)] :
+        _SB_KNOWN_RANEF_FAMILIES[(!isnothing(known_cor), !isnothing(dist))]
     kwargs = Any[Expr(:kw, :group_idx, idx_name), Expr(:kw, :n_groups, n_groups),
                  Expr(:kw, :n_terms, n_terms_name), Expr(:kw, :tau, tau)]
     if isnothing(known_cor)
