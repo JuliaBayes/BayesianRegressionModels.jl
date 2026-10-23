@@ -119,18 +119,30 @@ function _brm_prepare_response(::Type{<:OrderedLogistic}, target, rhs, raw;
                                 training=nothing)
     length(getargs(rhs)) == 1 || return (
         ; distribution=rhs, response=raw, parameters=(), fit=nothing)
-    all(x -> x isa Real && isinteger(x) && x >= 1, raw) || error(
-        "BRM: `OrderedLogistic($target)` expects positive integer outcome data")
-    n_levels = isnothing(training) ? maximum(Int, raw) : training.n_levels
-    all(<=(n_levels), raw) || error(
-        "BRM: `OrderedLogistic($target)` contains an outcome beyond its fitted levels")
+    n_levels = _brm_ordered_outcome_levels(target, raw, training)
     fit = _BRMResponseLevels(1:n_levels, n_levels)
     name = Symbol(target, :_cutpoints)
     prior = ExprColumn(_BRMThresholdPrior{true}, n_levels - 1)
     ref = NamedColumn(name, MissingColumn())
     distribution = ExprColumn(OrderedLogistic, only(getargs(rhs)), ref)
-    (; distribution, response=Int.(raw), parameters=(name => prior,), fit)
+    (; distribution, response=_brm_ordered_outcomes(raw), parameters=(name => prior,), fit)
 end
+
+# The level count of ordered outcomes: the fit's (`training`), else their own
+# maximum. Each outcome is a positive integer within it. An omitted replay
+# response has no outcomes to check.
+function _brm_ordered_outcome_levels(target, raw, training)
+    all(x -> x isa Real && isinteger(x) && x >= 1, raw) || error(
+        "BRM: `OrderedLogistic($target)` expects positive integer outcome data")
+    n_levels = isnothing(training) ? maximum(Int, raw) : training.n_levels
+    all(<=(n_levels), raw) || error(
+        "BRM: `OrderedLogistic($target)` contains an outcome beyond its fitted levels")
+    n_levels
+end
+_brm_ordered_outcome_levels(target, ::_BRMAbsentResponse, training) = training.n_levels
+
+_brm_ordered_outcomes(raw) = Int.(raw)
+_brm_ordered_outcomes(raw::_BRMAbsentResponse) = raw
 
 function _brm_prepare_response(::Type{<:Ordinal}, target, rhs, raw;
                                 training=nothing)

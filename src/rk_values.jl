@@ -674,15 +674,30 @@ Base.@nospecializeinfer function _rk_value_leveled_responses(@nospecialize(obser
         raw = get(data, name(lhs), nothing)
         raw isa AbstractVector && !(raw isa AbstractVector{<:AbstractVector}) || continue
         records[observation.key] = (; raw, head=getf(rhs),
-            prepared=_brm_prepare_response(observation.key, rhs, raw))
+            prepared=_brm_prepare_response(observation.key, rhs, raw;
+                training=_rk_value_response_training(observation.key, rhs, raw)))
     end
     records
 end
 
+# An `OrderedLogistic` response's level count on a frozen replay is the fit's,
+# so a design's outcomes, or an omitted response, bind to the fitted program.
+# Otherwise, and for the responses whose levels the graph codes, the response's
+# own.
+function _rk_value_response_training(key::Symbol, rhs, raw)
+    getf(rhs) === OrderedLogistic && _brm_frozen_replay() !== nothing || return nothing
+    _brm_fitted(values -> _brm_prepare_response(key, rhs, values).fit,
+        :response_levels, key, raw)
+end
+
 # Fitted level coding runs in emitted source from the original labels, as on
-# the formula-predictor route. `OrderedLogistic` keeps SB's raw 1:K codes.
-_rk_value_codes_levels(::Type{OrderedLogistic}) = false
-_rk_value_codes_levels(_head) = true
+# the formula-predictor route. `OrderedLogistic` keeps SB's raw 1:K codes: an
+# integer response binds as the data hold it, any other is coded in emitted
+# source against the levels 1:K.
+_rk_value_codes_levels(entry) = entry.head !== OrderedLogistic ||
+    !(eltype(entry.raw) <: Integer) || eltype(entry.raw) === Bool
+_rk_value_response(entry) = _rk_value_codes_levels(entry) ?
+    entry.prepared.response : entry.raw
 
 # Per-threshold coefficients form a terms × stages matrix that only their
 # threshold-effect design reads; the response emitter declares that matrix.
@@ -712,7 +727,7 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
         for parameter in entry.prepared.parameters]
     prepared = _brm_prepare_model(brmi; program, additional_parameters=implicit,
         observation_overrides=Dict(key => (; distribution=entry.prepared.distribution,
-            response=entry.prepared.response, modifier=nothing, weight=nothing,
+            response=_rk_value_response(entry), modifier=nothing, weight=nothing,
             missing_response=nothing) for (key, entry) in leveled))
     implicit_names = Set{Symbol}(first.(implicit))
     clashes = intersect(implicit_names,
@@ -807,7 +822,7 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     end
     for key in sort!(collect(keys(leveled)))
         entry = leveled[key]
-        _rk_value_codes_levels(entry.head) || continue
+        _rk_value_codes_levels(entry) || continue
         raw = _rk_ast_fresh_name(string(key, "_raw"), taken)
         value_columns[raw] = entry.raw
         push!(derived, _RKDerivedSpec(key, Expr(:_rk_data_preparation,
