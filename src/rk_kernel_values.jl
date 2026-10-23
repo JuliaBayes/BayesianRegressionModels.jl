@@ -1150,13 +1150,11 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
     data = filter(bound, Any[slice.inputs..., kernel.inputs...])
     axis = bound(authored) || isempty(data) ? authored : first(data)
     inputs = Dict(zip(slice.params, slice.inputs))
-    # A ragged join computes its row partition from bound raw columns, and the
-    # plate then iterates the bound cell label column, when the cell reads a
-    # bound data input holding one array per cell: that input makes RK run the
-    # cell as a loop over cells (rkppl-use §1). A computed partition alone does
-    # not, so the partition otherwise stays a bound input.
-    looped = _rk_kernel_cell_loop(kernel, values(inputs))
-    graph_partition(input) = looped && input.kind === :gather &&
+    # A ragged join computes its row partition in the graph from bound raw
+    # columns, and the plate then iterates the bound cell label column. A join
+    # without a cell label column (a `groups(g)` plate) keeps its partition as
+    # a bound input.
+    graph_partition(input) = input.kind === :gather &&
         get(input, :partition, nothing) !== nothing
     for input in values(inputs)
         graph_partition(input) && _rk_emit_kernel_partition!(statements, input)
@@ -1192,19 +1190,6 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
     push!(statements, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
         Expr(:for, Expr(:(=), index, Expr(:call, :eachindex, range)),
             Expr(:block, body...))))
-end
-
-# Whether the cell reads a bound data input holding one array per cell. A
-# response does not count: a prediction design may omit it.
-function _rk_kernel_cell_loop(kernel, inputs)
-    observed = Set{Symbol}(observation.source for observation in kernel.observations)
-    any(inputs) do input
-        input.kind === :element && input.column !== nothing && !(input.column in observed) ||
-            return false
-        value = get(kernel.columns, input.source, nothing)
-        value isa AbstractVector && !(value isa _BRMAbsentResponse) &&
-            eltype(value) <: AbstractArray
-    end
 end
 
 # `<rows> = brm_ragged_rows([x, group, cell, axes...], group, cell, axes...)`

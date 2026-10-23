@@ -536,11 +536,23 @@ end
                     [sqrt(0.1), exp(x[free])] atol=1e-14
             end
         end
-        # A known-value Student-t block is not adapted yet (todo `16jywsl`):
-        # each level's factor is `sqrt(w[g]) * C`, so it is left out rather
-        # than described without its weights.
+        # A known-value Student-t block is described in the same form, level
+        # `g`'s factor scaled by its mixing weight: `sqrt(w[g]) * C`.
         model = build(studentt_builder)
-        @test isempty(adaptive_centering_blocks(model,
-            BridgeStan.param_unc_names(instantiate(model).model)))
+        unc = BridgeStan.param_unc_names(instantiate(model).model)
+        block = only(adaptive_centering_blocks(model, unc))
+        @test block isa R2D2AdaptiveCenteringBlock
+        @test block.target_c == 0.0
+        @test block.ranef.family === :ranef_correlated_draws_known_scale_student_t
+        @test sort(vec(block.effects)) == sort(vec(ranef_coordinates(
+            only(ranef_blocks(model)), unc)))
+        @test unc[block.mixing] == ["b_p_subject_w.$g" for g in 1:6]
+        x = collect(range(-0.3, 0.4; length=length(unc)))
+        free = only(i for (i, n) in enumerate(unc) if n == "b_p_subject_tau_free.1")
+        for g in 1:6
+            C = BRM._adaptive_block_cholesky(x, block, g)
+            @test diag(C) ./ diag(BRM._adaptive_block_correlation(x, block)) ≈
+                sqrt(exp(x[block.mixing[g]])) .* [0.3, exp(x[free])] atol=1e-14
+        end
     end
 end
