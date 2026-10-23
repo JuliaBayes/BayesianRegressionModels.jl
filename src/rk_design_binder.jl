@@ -42,8 +42,10 @@ into that replay's lowered program.
   determine, such as a basis at its rows.
 - A design is refused exactly where `reprocess` refuses its values: unseen
   factor, `mo` or group levels, HSGP axis values past the fitted basis
-  interval or fixed domain, ragged labels that name no cell, and per-cell
-  inputs whose cell counts disagree.
+  interval or fixed domain, non-finite HSGP axis values, a `rows=` column
+  that is not 0/1 or not as long as the axis, a `missing` axis value in a row
+  the mask carries, a `car` area outside the fitted graph, ragged labels that
+  name no cell, and per-cell inputs whose cell counts disagree.
 - A model whose inputs include a value BRM derives from the design in Julia
   replays every design in full; `show(binder)` names those inputs.
 """
