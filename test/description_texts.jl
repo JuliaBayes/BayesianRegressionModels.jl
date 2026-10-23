@@ -6,10 +6,14 @@ using BayesianRegressionModels: aweights
 const TEXT_DATA=(;x=[-2.0,-0.5,0.7,2.5,3.0,4.2],g=[1,1,2,2,3,3],
     y=[0.4,0.1,1.1,1.7,2.4,2.8],z=[1.4,1.1,2.1,2.7,3.4,3.8],
     w=[1.,2.,1.,3.,2.,1.],z_upper=[1.9,1.6,2.6,3.2,3.9,4.3])
+# Areas a..h: component {a, b, c, d, h}, component {e, f}, island g.
+const AREA_DATA=(;area=["a","b","c","d","e","f","g","a","e"],y=zeros(9),
+    from=["a","b","c","a","d","e"],to=["b","c","d","c","h","f"])
 
 # Synthetic models reaching the main description paths: random-effect blocks
 # and covariance factors, prepared columns, structured terms, R2D2 allocation,
-# observation wrappers, imputation, multi-membership and a coverage gap.
+# observation wrappers, imputation, multi-membership, areal fields and a
+# coverage gap.
 const TEXT_MODELS=(
     hierarchical=@brm(TEXT_DATA, begin
         sigma ~ Exponential(2)
@@ -50,6 +54,14 @@ const TEXT_MODELS=(
     membership=@brm((;g1=["a","a","b"],g2=["b","c","c"],w1=[2.,1.,0.],w2=[1.,1.,3.],y=[.2,.5,.7]), begin
         mu ~ 1+(1|mm(g1,g2;weights=(w1,w2)))
         y ~ Normal(mu,1.0)
+    end),
+    bym2=@brm(AREA_DATA, begin
+        mu ~ 1 + car(area; edges=(from, to), type=:bym2)
+        y ~ Normal(mu, 1.0)
+    end),
+    icar=@brm(AREA_DATA, begin
+        mu ~ 1 + car(area; edges=(from, to), type=:icar)
+        y ~ Normal(mu, 1.0)
     end),
     horseshoe=@brm(TEXT_DATA, begin
         mu ~ 1+x

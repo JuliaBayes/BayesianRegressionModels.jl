@@ -206,6 +206,7 @@ _brmd_law(::Type{<:Uniform}) = :uniform
 _brmd_law(::typeof(MvNormalCholesky)) = :mvnormal_cholesky
 _brmd_law(::typeof(StanBlocks.stan.builtin.dummy)) = :allocation_only
 _brmd_law(::typeof(brm_total)) = :exact_total
+_brmd_law(::typeof(brm_icar)) = :icar
 # These are exact producer-owned StanBlocks bindings, never a name heuristic
 # applied to arbitrary user callables.
 for (name,law) in ((:normal,:normal_sd),(:std_normal,:standard_normal),
@@ -234,6 +235,10 @@ _brmd_law_math(c,::Val{:lognormal_sd},a) = "\\operatorname{LogNormal}_{\\mathrm{
 _brmd_law_math(_c,::Val{:bernoulli_logit},a) = "\\operatorname{Bernoulli}(\\operatorname{logit}^{-1}(" * only(a) * "))"
 _brmd_law_math(_c,::Val{:binomial_logit},a) = "\\operatorname{Binomial}(" * a[1] * ",\\operatorname{logit}^{-1}(" * a[2] * "))"
 _brmd_law_math(_c,::Val{:lkj},a) = "\\operatorname{LKJCholesky}(" * join(a,",") * ")"
+# `brm_icar(node1, node2, comp_start, comp_size)`: the edge lists and component
+# segments are data, named rather than spelled out.
+_brmd_law_math(c,::Val{:icar},_a) = "\\operatorname{ICAR}(\\text{"*_brmd_text(c,:math_icar_edges)*
+    "};\\ \\text{"*_brmd_text(c,:math_icar_sum_to_zero)*"})"
 _brmd_law_math(_c,::Val{:uniform},a) = "\\operatorname{Uniform}(" * (isempty(a) ? "0,1" : join(a,",")) * ")"
 _brmd_law_math(_c,::Val{:student_t_standard},a) = "t_{"*only(a)*"}(0,1)"
 _brmd_law_math(_c,::Val{:student_t_location_scale},a) = "t_{"*a[1]*"}("*join(a[2:3],",")*")"
@@ -247,6 +252,7 @@ _brmd_law_math(_c,::Val{:exact_total},a) = _brmd_exact_total_math(a[1])
 _brmd_law_math(_c,::Val{L},a) where L = "\\operatorname{" * _brmd_escape(L) * "}(" * join(a,",") * ")"
 _brmd_law_prose(c,::Val{:normal_sd}) = _brmd_text(c,:law_normal_sd)
 _brmd_law_prose(c,::Val{:standard_normal}) = _brmd_text(c,:law_standard_normal)
+_brmd_law_prose(c,::Val{:icar}) = _brmd_text(c,:law_icar)
 _brmd_law_prose(c,::Val{:improper_flat}) = _brmd_text(c,:law_improper_flat)
 _brmd_law_prose(c,::Val{:allocation_only}) = _brmd_text(c,:law_allocation_only)
 _brmd_law_prose(c,::Val{:exponential_rate}) = _brmd_text(c,:law_exponential_rate)
@@ -349,7 +355,7 @@ function _brmd_term_call_math(::typeof(factor),c,x)
     a isa BRMDescriptionReference || return brm_description_math(c,x)
     something(_brmd_factor_math(c,a.name),"0")
 end
-for f in (s,t2,gp,hsgp,me,mi,mo,mo1,ar,dar,rw,cdar,interval_censored)
+for f in (s,t2,gp,hsgp,me,mi,mo,mo1,ar,dar,rw,cdar,car,interval_censored)
     @eval _brmd_term_call_math(::$(typeof(f)),c,x) = brm_description_math(c,x)
 end
 _brmd_term_call_math(::typeof(kernel),c,x) = _brmd_kernel_math(c,x)
@@ -631,6 +637,23 @@ _brmd_builtin_call(::typeof(cdar),c)=BRMDescriptionFragment(
 _brmd_builtin_call(::typeof(rw),c) = BRMDescriptionFragment(
     prose=(_brmd_text(c,:random_walk),),
     equations=("f_1=0,\\quad f_{t+1}=f_t+\\sigma z_t,\\quad z_t\\sim\\mathcal N(0,1)",),covers=(c.id,))
+# The areal field's law depends on `type=`; the keyword rides on the call.
+function _brmd_builtin_call(::typeof(car),c)
+    type=get(c.keywords,:type,nothing)
+    # a literal `type=:bym2` is snapshotted as a reference to its name
+    type isa BRMDescriptionReference && (type=type.name)
+    common=_brmd_text(c,:areal_effect)
+    type===:bym2 ? BRMDescriptionFragment(
+        prose=(common*" "*_brmd_text(c,:areal_bym2),),
+        equations=("b_k=\\sigma\\left(\\sqrt{\\rho/s_{c(k)}}\\,\\phi_k+\\sqrt{1-\\rho}\\,\\theta_k\\right),\\quad\\theta_k\\sim\\mathcal N(0,1)",
+            "\\log p(\\phi)=-\\tfrac12\\sum_{i\\sim j}(\\phi_i-\\phi_j)^2+\\sum_c\\log\\mathcal N\\!\\left(\\textstyle\\sum_{k\\in c}\\phi_k\\mid 0,\\,0.001\\,n_c\\right)"),
+        covers=(c.id,)) :
+    BRMDescriptionFragment(
+        prose=(common*" "*_brmd_text(c,:areal_icar_isolated),),
+        equations=("b_k=\\sigma\\,\\phi_k",
+            "\\log p(\\phi)=-\\tfrac12\\sum_{i\\sim j}(\\phi_i-\\phi_j)^2+\\sum_c\\log\\mathcal N\\!\\left(\\textstyle\\sum_{k\\in c}\\phi_k\\mid 0,\\,0.001\\,n_c\\right)"),
+        covers=(c.id,))
+end
 _brmd_builtin_call(::typeof(dar),c) = BRMDescriptionFragment(
     prose=(_brmd_text(c,:differenced_autoregressive),),
     equations=("d_t=\\rho d_{t-1}+\\sigma z_t,\\quad f_{t+1}=f_t+d_t,\\quad z_t\\sim\\mathcal N(0,1)",),covers=(c.id,))
@@ -810,7 +833,7 @@ function _brmd_extra_terms(c,x::BRMDescriptionReference)
 end
 function _brmd_extra_terms(c,x::BRMDescriptionComponent)
     x.callable===(+) && return Tuple(t for a in x.arguments for t in _brmd_extra_terms(c,a))
-    x.callable in (|,doublepipe,factor,offset,s,t2,gp,hsgp,mo1,dar,rw,cdar,kernel) ?
+    x.callable in (|,doublepipe,factor,offset,s,t2,gp,hsgp,mo1,dar,rw,cdar,car,kernel) ?
         (_brmd_term_math(c,x),) : ()
 end
 function _brmd_builtin_kind(::Val{:observation},c)
@@ -1110,13 +1133,20 @@ function brm_description_markdown(description::BRMDescription;prefix=nothing)
         println(io,"\n\$\$\n",equation,"\n\$\$")
     end
     if !isempty(description.priors)
+        targets=Dict{String,Tuple}()
+        for p in description.priors
+            target=brm_description_prior_anchor(p;prefix)
+            haskey(targets,target) && throw(ArgumentError(
+                "priors $(targets[target]) and $(p.id) share the link target $target"))
+            targets[target]=p.id
+        end
         println(io,"\n",text(:effective_priors),"\n\n| ",text(:logical_parameter_column)," | ",
             text(:distribution_column)," | ",text(:prior_listing_column)," |\n| --- | --- | --- |")
         for (index,p) in enumerate(description.priors)
             label=text(:prior_prefix)*string(index)
             family=p.distribution isa BRMDescriptionComponent ? _brmd_family_caption(p.distribution) : text(:declared_prior)
             link=isnothing(p.anchor) ? "" : "["*text(:prior_listing_link)*"]("*replace(p.anchor," "=>"%20")*")"
-            println(io,"| <a id=\"",brm_description_prior_anchor(p;prefix),"\"></a>",label," | ",
+            println(io,"| <span id=\"",brm_description_prior_anchor(p;prefix),"\"></span>",label," | ",
                 text(:prior_definition_reference;family,label)," | ",link," |")
         end
         println(io,"\n",text(:prior_definitions))

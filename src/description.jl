@@ -171,12 +171,14 @@ end
 """
     brm_description_prior_anchor(description_or_context, id::Tuple; prefix=nothing)
 
-Stable HTML target for an exact logical prior, scoped to the model identity.
-Supply a unique `prefix` when mounting repeated instances of one model artifact.
-The Markdown renderer creates this target in its complete effective-prior table.
+Stable HTML target ID for an exact logical prior, scoped to the model identity:
+`brm-prior-` and the first 16 hexadecimal digits of the SHA-256 digest of the
+scope and the logical ID. Supply a unique `prefix` when mounting repeated
+instances of one model artifact. The Markdown renderer creates this target in
+its complete effective-prior table.
 """
 _brmd_prior_anchor(prefix::AbstractString,id::Tuple) =
-    "brm-prior-"*bytes2hex(codeunits(prefix))*"-"*bytes2hex(codeunits(repr(id)))
+    "brm-prior-"*bytes2hex(sha256(prefix*"\0"*repr(id)))[1:16]
 brm_description_prior_anchor(d::BRMDescription,id::Tuple;prefix=nothing) =
     _brmd_prior_anchor(isnothing(prefix) ? d.model_id : String(prefix),id)
 brm_description_prior_anchor(c::BRMDescriptionContext,id::Tuple;prefix=nothing) =

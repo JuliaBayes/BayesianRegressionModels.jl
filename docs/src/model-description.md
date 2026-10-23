@@ -79,6 +79,12 @@ inventory retains the actual density factor on that support.
 
 The Markdown renderer creates a stable target for each row of its complete
 effective-prior table and links component prior references to those targets.
+CommonMark has no Markdown syntax for an element ID, so each target is an empty
+raw-HTML element in the row's first cell:
+`<span id="brm-prior-5a1f36447d850e2a"></span>P1`. Pandoc keeps it in HTML
+output and turns it into a LaTeX label in Quarto PDF output; CommonMark.jl's
+`html` and VitePress pass it through. A renderer that escapes all raw HTML
+shows it as text unless it keeps empty ID targets.
 `brm_description_prior_anchor(result_or_context, prior.id)` returns the target ID;
 `brm_description_prior_references(context)` returns the related logical prior IDs.
 Targets are scoped to `model_id`. For repeated instances of one model artifact,

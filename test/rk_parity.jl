@@ -2334,9 +2334,8 @@ end
     backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 12
-    # Preserve the original BridgeStan point by emitted coordinate identity:
-    # [mu.Intercept, log(sigma), b_fixed.1, b_raw.1..8, log(sd)].
-    # Fold SB's flat constant coefficient (-0.2) into its intercept (-0.3).
+    # The BridgeStan point of test/spline_sb_parity.jl, by emitted coordinate
+    # identity: [mu.Intercept, log(sigma), b_fixed.1, b_raw.1..8, log(sd)].
     u = [-0.5, -0.25, -0.15, -0.1, -0.05, 0.0, 0.05, 0.1,
         0.15, 0.2, 0.25, 0.3]
     # Values route through the bound translated plan (see the helper):
@@ -2350,7 +2349,7 @@ end
     sig = nt.sigma
     sd = nt.s_x.sd1
     Xnull, Zpen = BRM._brm_apply_spline(BRM._brm_fit_spline(x; k=10), x)
-    mu_hat = _parity_population(nt, backend, :mu)[1] .+ Xnull[:, 2:2] * nt.s_x.fixed .+ Zpen * (sd .* nt.s_x.raw1)
+    mu_hat = _parity_population(nt, backend, :mu)[1] .+ Xnull * nt.s_x.fixed .+ Zpen * (sd .* nt.s_x.raw1)
     ll = sum(logpdf.(Normal.(mu_hat, sig), y))
     pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) + logpdf(Normal(), sd) +
         sum(logpdf.(Normal(), nt.s_x.raw1)) + logpdf(Exponential(1), sig)
@@ -2359,12 +2358,11 @@ end
     @test _rk_query_translated(backend, translated, :prior, u) ≈ pr
     @test logjac(layout, u) ≈ jac
     @test _rk_query_translated(backend, translated, :sampler, u) ≈ ll + pr + jac
-    # Independent BridgeStan anchor at SB's original 13-coordinate point
-    # (test/spline_sb_parity.jl). Folding its constant into the intercept
-    # preserves the likelihood; only the Normal(0,5) intercept prior moves.
-    intercept_bridge = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) - logpdf(Normal(0, 5), -0.3)
+    # Independent BridgeStan anchor (test/spline_sb_parity.jl): both backends
+    # hold the same 12 coordinates, the TPS fixed block being the centered
+    # linear column alone.
     @test _rk_query_translated(backend, translated, :sampler, u) ≈
-        SPLINE_S_SB_ANCHOR + intercept_bridge atol=1e-9
+        SPLINE_S_SB_ANCHOR atol=1e-9
     problem = BRM.rk_logdensity_problem(backend;
         ad_backend = _PARITY_BACKEND, u0 = u)
     value, grad = LogDensityProblems.logdensity_and_gradient(problem, u)
@@ -2579,6 +2577,108 @@ end
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
+end
+
+# Snag censored-finite-cbe5c30d: response evidence wraps the whole mixture
+# (an assay limit applies to the mixed law, so a BLOQ row contributes the
+# mixture's CDF), and two complementary weights come from one sampled scalar.
+@stestset "rk parity mixture gaussian evidence" begin
+    df = (; y=[-2.0, -2.0, -1.1, 1.9, 2.2], lloq=fill(-2.0, 5))
+    censored_brmi = @brm df begin
+        mu1 ~ Normal(-1, 0.5)
+        mu2 ~ Normal(2, 0.1)
+        log(sigma) ~ 1
+        y ~ censored(MixtureModel([Normal(mu1, sigma), Normal(mu2, sigma)],
+            [0.4, 0.6]); lower = lloq)
+    end
+    truncated_brmi = @brm df begin
+        mu1 ~ Normal(-1, 0.5)
+        mu2 ~ Normal(2, 0.1)
+        log(sigma) ~ 1
+        y ~ truncated(MixtureModel([Normal(mu1, sigma), Normal(mu2, sigma)],
+            [0.4, 0.6]); lower = -2.5)
+    end
+    interval_brmi = @brm df begin
+        mu1 ~ Normal(-1, 0.5)
+        mu2 ~ Normal(2, 0.1)
+        log(sigma) ~ 1
+        y ~ interval_censored(MixtureModel([Normal(mu1, sigma), Normal(mu2, sigma)],
+            [0.4, 0.6]); upper = 3.0)
+    end
+    for (kind, brmi) in ((:censored, censored_brmi), (:truncated, truncated_brmi),
+                         (:interval_censored, interval_brmi))
+        backend = _parity_backend(brmi)
+        layout = backend.model.layout
+        @test layout.total == 3
+        u = collect(range(-0.4, 0.4; length = layout.total))
+        nt = constrain(layout, u)
+        mu1 = _parity_population(nt, backend, :mu1)
+        mu2 = _parity_population(nt, backend, :mu2)
+        sigma = exp(_parity_population(nt, backend, :sigma)[1])
+        mixture = MixtureModel([Normal(mu1, sigma), Normal(mu2, sigma)], [0.4, 0.6])
+        ll = kind === :censored ?
+            sum(y == -2.0 ? log(cdf(mixture, y)) : logpdf(mixture, y) for y in df.y) :
+            kind === :truncated ?
+            sum(logpdf(mixture, y) - log1p(-cdf(mixture, -2.5)) for y in df.y) :
+            sum(log(cdf(mixture, 3.0) - cdf(mixture, y)) for y in df.y)
+        pr = logpdf(Normal(-1, 0.5), mu1) + logpdf(Normal(2, 0.1), mu2) +
+            logpdf(Normal(), _parity_population(nt, backend, :sigma)[1])
+        @test _rk_query(backend, :likelihood, u) ≈ ll
+        @test _rk_query(backend, :posterior, u) ≈ ll + pr
+        _check_parity_gradient(backend, u)
+    end
+end
+
+@stestset "rk parity mixture poisson evidence" begin
+    df = (; y=[0, 1, 3, 6, 6], hi=fill(6, 5))
+    brmi = @brm df begin
+        lambda1 ~ Exponential(1)
+        lambda2 ~ Exponential(5)
+        y ~ censored(MixtureModel([Poisson(lambda1), Poisson(lambda2)], [0.3, 0.7]);
+            upper = hi)
+    end
+    backend = _parity_backend(brmi)
+    layout = backend.model.layout
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    mixture = MixtureModel([Poisson(nt.lambda1), Poisson(nt.lambda2)], [0.3, 0.7])
+    ll = sum(y == 6 ? log1p(-cdf(mixture, 5)) : logpdf(mixture, y) for y in df.y)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    _check_parity_gradient(backend, u)
+end
+
+@stestset "rk parity mixture complementary weights" begin
+    df = (; y=[-2.0, -1.8, 1.9, 2.2, 0.3])
+    for complement_first in (true, false)
+        brmi = complement_first ? (@brm df begin
+            mu1 ~ Normal(-2, 0.1)
+            mu2 ~ Normal(2, 0.1)
+            w ~ Beta(2, 5)
+            y ~ MixtureModel([Normal(mu1, 0.5), Normal(mu2, 0.5)], [1 - w, w])
+        end) : (@brm df begin
+            mu1 ~ Normal(-2, 0.1)
+            mu2 ~ Normal(2, 0.1)
+            w ~ Beta(2, 5)
+            y ~ MixtureModel([Normal(mu1, 0.5), Normal(mu2, 0.5)], [w, 1 - w])
+        end)
+        backend = _parity_backend(brmi)
+        layout = backend.model.layout
+        @test layout.total == 3
+        u = collect(range(-0.4, 0.4; length = layout.total))
+        nt = constrain(layout, u)
+        w = _parity_population(nt, backend, :w)
+        weights = complement_first ? [1 - w, w] : [w, 1 - w]
+        mixture = MixtureModel([Normal(_parity_population(nt, backend, :mu1), 0.5),
+                                Normal(_parity_population(nt, backend, :mu2), 0.5)], weights)
+        ll = sum(logpdf.(mixture, df.y))
+        pr = logpdf(Normal(-2, 0.1), _parity_population(nt, backend, :mu1)) +
+            logpdf(Normal(2, 0.1), _parity_population(nt, backend, :mu2)) +
+            logpdf(Beta(2, 5), w)
+        @test _rk_query(backend, :likelihood, u) ≈ ll
+        @test _rk_query(backend, :prior, u) ≈ pr
+        @test _rk_query(backend, :posterior, u) ≈ ll + pr + logjac(layout, u)
+        _check_parity_gradient(backend, u)
+    end
 end
 
 @stestset "rk parity mi() missing-response obs-only likelihood" begin

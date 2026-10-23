@@ -251,13 +251,14 @@ end
 # classes are added.
 const _NON_EFFECT_CLASSES =
     (:sd, :cor, :ranef, :term_sd, :term_ar, :term_simplex, :term_latent,
-     :term_length_scale)
+     :term_length_scale, :term_mixing)
 
 # The classes that address a TERM's own parameters, as built by
 # `_prior_address`. Kept beside `_NON_EFFECT_CLASSES` so adding a class means
 # editing one place.
 const _TERM_PRIOR_CLASSES =
-    (:term_sd, :term_ar, :term_simplex, :term_latent, :term_length_scale)
+    (:term_sd, :term_ar, :term_simplex, :term_latent, :term_length_scale,
+     :term_mixing)
 
 """
     effect_priors(brmi::BRMI) -> Vector{NamedTuple}
@@ -385,7 +386,7 @@ end
     term_priors(brmi::BRMI) -> Vector{NamedTuple}
 
 Return the prior statements captured by [`@brm`](@ref) that address a *term's
-own* parameters — the `sd`, `ar`, `simplex`, `latent` and `length_scale` heads
+own* parameters — the `sd`, `ar`, `simplex`, `latent`, `length_scale` and `mixing` heads
 applied to a term rather than to a coefficient or a grouping factor — in
 formula order. Each entry has
 
@@ -394,8 +395,8 @@ formula order. Each entry has
    qualifiers)
 ```
 
-`class` is `:term_sd`, `:term_ar`, `:term_simplex`, `:term_latent` or
-`:term_length_scale`. `term` is the canonicalised term key: the term as the
+`class` is `:term_sd`, `:term_ar`, `:term_simplex`, `:term_latent`,
+`:term_length_scale` or `:term_mixing`. `term` is the canonicalised term key: the term as the
 formula spells it, minus numeric and keyword arguments, so `me(x, 0.5)` and
 `me(x)` both key as `Symbol("me(x)")`,
 `interval_censored(x; upper=lloq)` keys as
@@ -422,8 +423,10 @@ Which parameter each class reaches:
 | `ar(lp, dar(time))` | the differenced-AR persistence coefficient `beta` |
 | `sd(lp, rw(time))` | the random walk's innovation scale `sigma` |
 | `sd(lp, cdar(step))` / `ar(lp, cdar(step))` | the grouped damped walk's innovation scale `sigma` / persistence `rho` |
+| `sd(lp, car(area))` / `mixing(lp, car(area))` | the areal effect's scale `sigma` / BYM2 spatial share `rho` |
 
-Standardized raw innovations (`b_pen_raw`, `z`, `beta_raw`, `epsilon`) are
+Standardized raw innovations (`b_pen_raw`, `z`, `beta_raw`, `epsilon`, and
+`car`'s `phi` / `theta`) are
 deliberately NOT addressable: they carry no independent scale, and giving them
 a prior would duplicate or confound the model-scale parameter above
 (decision `145tp0o`).
