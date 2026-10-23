@@ -1116,12 +1116,19 @@ function brm_description_markdown(description::BRMDescription;prefix=nothing)
         println(io,"\n\$\$\n",equation,"\n\$\$")
     end
     if !isempty(description.priors)
+        targets=Dict{String,Tuple}()
+        for p in description.priors
+            target=brm_description_prior_anchor(p;prefix)
+            haskey(targets,target) && throw(ArgumentError(
+                "priors $(targets[target]) and $(p.id) share the link target $target"))
+            targets[target]=p.id
+        end
         println(io,"\nEffective priors:\n\n| Logical parameter | Distribution and support | Prior listing |\n| --- | --- | --- |")
         for (index,p) in enumerate(description.priors)
             label="P"*string(index)
             family=p.distribution isa BRMDescriptionComponent ? _brmd_family_caption(p.distribution) : "Declared prior"
             link=isnothing(p.anchor) ? "" : "[prior listing]("*replace(p.anchor," "=>"%20")*")"
-            println(io,"| <a id=\"",brm_description_prior_anchor(p;prefix),"\"></a>",label," | ",family,"; definition ",label," below | ",link," |")
+            println(io,"| <span id=\"",brm_description_prior_anchor(p;prefix),"\"></span>",label," | ",family,"; definition ",label," below | ",link," |")
         end
         println(io,"\nPrior definitions (complete logical IDs, distributions and support):")
         for (index,p) in enumerate(description.priors)
