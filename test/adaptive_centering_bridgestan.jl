@@ -699,9 +699,9 @@ function check_r2d2_wrapper(sb; stan_tau=r2d2_stan_tau)
     @test frame.source == controls
     p = sum(b.ranef.n_terms * b.ranef.n_groups for b in ordered
             if b isa AdaptiveCenteringBlock; init=0)
-    for block in r2d2
-        C = BayesianRegressionModels._adaptive_block_cholesky(x, block)
-        for g in 1:block.ranef.n_groups, k in 1:block.ranef.n_terms
+    for block in r2d2, g in 1:block.ranef.n_groups
+        C = BayesianRegressionModels._adaptive_block_cholesky(x, block, g)
+        for k in 1:block.ranef.n_terms
             p += 1
             @test frame.scale[p] ≈ C[k, k] rtol=1e-14
         end
@@ -847,6 +847,183 @@ end
     ljac, mapped = ir(x)
     @test mapped[setdiff(eachindex(names), vec(block.effects))] ==
           x[setdiff(eachindex(names), vec(block.effects))]
+    inverse_ljac, roundtrip = WarmupHMC.InverseFunctions.inverse(ir)(mapped)
+    @test roundtrip ≈ x atol=1e-12
+    @test inverse_ljac ≈ -ljac atol=1e-12
+    lp, gradient = LogDensityProblems.logdensity_and_gradient(wrapped, x)
+    @test lp ≈ ljac + LogDensityProblems.logdensity(problem, mapped) atol=1e-10
+    step = 1e-5
+    finite_difference = [begin
+        plus, minus = copy(x), copy(x)
+        plus[i] += step
+        minus[i] -= step
+        (LogDensityProblems.logdensity(wrapped, plus) -
+         LogDensityProblems.logdensity(wrapped, minus)) / (2step)
+    end for i in eachindex(x)]
+    @test gradient ≈ finite_difference atol=2e-5 rtol=2e-5
+end
+
+# ---- Student-t blocks (`ranef(:, ID) ~ TDist(nu)`) --------------------------
+#
+# Level `g`'s factor is `sqrt(w[g]) * diag(tau) * L`, with `w` the block's
+# mixing weights, so a Student-t block adapts in derived-scale form under either
+# emission (todo `16jywsl`). Same exactness contract as the R2D2 and known-value
+# recipes, plus the scale oracle: the wrapper at `c = 1` over the non-centered
+# model is the compiled `centered_groups` twin, and at `c = 0` over the centered
+# model the non-centered one, density and gradient.
+using Distributions: Gamma, TDist
+const STUDENT_T_DF = (; subject=repeat(1:5, inner=3),
+                      x=collect(range(-1.0, 1.0, length=15)), y=sin.(1:15) ./ 3)
+const STUDENT_T_VARIANTS = [
+    "sampled scales, literal nu" => @brm(begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 + x | p | subject)
+        ranef(:, p) ~ TDist(4)
+        y ~ Normal(mu, sigma)
+    end),
+    "configured scales, declared nu" => @brm(begin
+        sigma ~ Exponential(1)
+        nu ~ Gamma(2, 10; lower=1.0)
+        mu ~ 1 + x + (1 + x | p | subject)
+        sd(:, p) ~ Exponential(1)
+        cor(:, p) ~ LKJCholesky(2, 2)
+        ranef(:, p) ~ TDist(nu)
+        y ~ Normal(mu, sigma)
+    end),
+    "one margin" => @brm(begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 | p | subject)
+        ranef(:, p) ~ TDist(3)
+        y ~ Normal(mu, sigma)
+    end),
+]
+# Known values have no centered Student-t emission; non-centered only.
+const KNOWN_STUDENT_T = @brm begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 + x | p | subject)
+    sd(mu, p, Intercept) = 0.3
+    ranef(:, p) ~ TDist(4)
+    y ~ Normal(mu, sigma)
+end
+
+student_t_sb(builder; centered=false) = SBBRMI(builder(STUDENT_T_DF); total_groups=(),
+    mod=@__MODULE__, centered_groups=centered ? [:subject] : ())
+
+function check_student_t_block(sb)
+    problem = StanBlocks.stan_instantiate(sb.model)
+    names = StanBlocks.BridgeStan.param_unc_names(problem.model)
+    block = only(adaptive_centering_blocks(sb, names))
+    @test block isa R2D2AdaptiveCenteringBlock
+    @test BayesianRegressionModels._ranef_mixing(block.ranef.family) === :w
+    @test names[block.mixing] == ["$(block.ranef.binding)_w.$g" for g in 1:5]
+    @test sort(vec(block.effects)) ==
+          sort(vec(ranef_coordinates(only(ranef_blocks(sb)), names)))
+    block
+end
+
+@testset "BridgeStan Student-t $label adapts exactly, centered=$centered" for
+        (label, builder) in STUDENT_T_VARIANTS, centered in (false, true)
+    sb = student_t_sb(builder; centered)
+    block = check_student_t_block(sb)
+    @test block.target_c == (centered ? 1.0 : 0.0)
+    check_r2d2_wrapper(sb; stan_tau=(problem, x, block) -> known_stan_tau(sb, problem, x, block))
+    # The controls report lists every (level, term) cell.
+    problem = StanBlocks.stan_instantiate(sb.model)
+    rows = adaptive_centering_controls(adaptive_centering_problem(sb, problem,
+        AutoEnzyme()), sb)
+    @test length(rows) == length(block.effects)
+    @test all(r -> r.family === :ranef && r.binding === block.ranef.binding, rows)
+end
+
+@testset "BridgeStan known-value Student-t adapts exactly" begin
+    sb = student_t_sb(KNOWN_STUDENT_T)
+    block = check_student_t_block(sb)
+    @test block.ranef.family === :ranef_correlated_draws_known_scale_student_t
+    check_r2d2_wrapper(sb; stan_tau=(problem, x, block) -> known_stan_tau(sb, problem, x, block))
+end
+
+@testset "Student-t $label: each endpoint is the other emission" for
+        (label, builder) in STUDENT_T_VARIANTS
+    ncp_sb, cp_sb = student_t_sb(builder), student_t_sb(builder; centered=true)
+    ncp, cp = StanBlocks.stan_instantiate(ncp_sb.model), StanBlocks.stan_instantiate(cp_sb.model)
+    ncp_names = StanBlocks.BridgeStan.param_unc_names(ncp.model)
+    cp_names = StanBlocks.BridgeStan.param_unc_names(cp.model)
+    ncp_block = only(adaptive_centering_blocks(ncp_sb, ncp_names))
+    cp_block = only(adaptive_centering_blocks(cp_sb, cp_names))
+    # The two programs share every coordinate but the effects, matched by
+    # (term, level); the rest by name.
+    effect_map = Dict(zip(vec(ncp_block.effects), vec(cp_block.effects)))
+    cp_pos = Dict(n => i for (i, n) in enumerate(cp_names))
+    perm = [get(() -> cp_pos[n], effect_map, i) for (i, n) in enumerate(ncp_names)]
+    @test sort(perm) == eachindex(cp_names)
+    n = length(ncp_names)
+    points = [0.6 .* sin.(1:n) .+ 0.1 .* cos.(3 .* (1:n)),
+              collect(range(0.7, -0.5; length=n))]
+    # The densities agree up to normalizing constants the two programs keep
+    # differently: the non-centered `z ~ std_normal()` statement drops its
+    # `log(2pi) / 2` per effect, which the centered `multi_normal_cholesky0_scaled`
+    # function keeps and the configured plate's `multi_normal_cholesky`
+    # statement drops. So the difference is the same at every point, and is
+    # either zero or that constant over every effect.
+    normalizer = length(ncp_block.effects) * log(2pi) / 2
+    for (sb, problem, c, twin, map, sign) in ((ncp_sb, ncp, 1.0, cp, perm, 1),
+                                              (cp_sb, cp, 0.0, ncp, invperm(perm), -1))
+        wrapped = adaptive_centering_problem(sb, problem, AutoEnzyme(); centeredness=c)
+        offsets = Float64[]
+        for x in points
+            lp, gradient = LogDensityProblems.logdensity_and_gradient(wrapped, x)
+            twin_x = similar(x)
+            twin_x[map] = x
+            twin_lp, twin_gradient = LogDensityProblems.logdensity_and_gradient(twin, twin_x)
+            push!(offsets, lp - twin_lp)
+            @test gradient ≈ twin_gradient[map] atol=1e-9 rtol=1e-9
+        end
+        @test offsets[2] ≈ offsets[1] atol=1e-10
+        @test any(o -> isapprox(offsets[1], o; atol=1e-10), (0.0, sign * normalizer))
+    end
+end
+
+# `log|det|` of the map's Jacobian by central differences.
+function fd_logabsdet(ir, x; step=1e-6)
+    J = reduce(hcat, [begin
+        plus, minus = copy(x), copy(x)
+        plus[i] += step
+        minus[i] -= step
+        (last(ir(plus)) - last(ir(minus))) / (2step)
+    end for i in eachindex(x)])
+    first(logabsdet(J))
+end
+
+# The learned order permutes each level's factor `sqrt(w[g]) * C`; the weight
+# scales it and leaves the block's correlation coordinates alone.
+@testset "learned order over a Student-t block, centered=$centered" for centered in (false, true)
+    sb = student_t_sb(last(STUDENT_T_VARIANTS[1]); centered)
+    problem = StanBlocks.stan_instantiate(sb.model)
+    names = StanBlocks.BridgeStan.param_unc_names(problem.model)
+    block = only(adaptive_centering_blocks(sb, names))
+    G = size(block.effects, 2)
+    x = 0.5 .* sin.(1:length(names))
+    # Uniform controls keep the declared order, which is the per-pair wrapper.
+    declared = WarmupHMC.reparametrizer(adaptive_centering_problem(sb, problem,
+        AutoEnzyme(); centeredness=0.4))
+    learned = WarmupHMC.reparametrizer(adaptive_centering_problem(sb, problem,
+        AutoEnzyme(); ranef_order=:learned, centeredness=0.4))
+    @test learned isa AC_EXT.BRMOrderedCenteringReparametrization
+    @test only(learned.orders) == repeat([1, 2], 1, G)
+    ljac_d, y_d = declared(x)
+    ljac_l, y_l = learned(x)
+    @test ljac_l ≈ ljac_d atol=1e-12
+    @test y_l ≈ y_d atol=1e-12
+    # Mixed controls reorder groups and the block.
+    controls = vcat([isodd(g) ? [0.1, 0.9] : [0.95, 0.2] for g in 1:G]...)
+    wrapped = adaptive_centering_problem(sb, problem, AutoEnzyme(); ranef_order=:learned,
+                                         centeredness=controls)
+    ir = WarmupHMC.reparametrizer(wrapped)
+    @test only(ir.orders) == reduce(hcat, [isodd(g) ? [2, 1] : [1, 2] for g in 1:G])
+    ljac, mapped = ir(x)
+    @test ljac ≈ fd_logabsdet(ir, x) atol=1e-6
+    @test mapped[setdiff(eachindex(names), vec(block.effects), block.cholesky_free)] ==
+          x[setdiff(eachindex(names), vec(block.effects), block.cholesky_free)]
     inverse_ljac, roundtrip = WarmupHMC.InverseFunctions.inverse(ir)(mapped)
     @test roundtrip ≈ x atol=1e-12
     @test inverse_ljac ≈ -ljac atol=1e-12
