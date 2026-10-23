@@ -290,6 +290,60 @@ function _rk_design_checks(binder::RKDesignBinder, plan, design, derived)
     for kernel in _rk_plan_kernels(plan)
         push!(checks, _rk_design_cell_check(kernel, design))
     end
+    # Responses bind as the design holds them: an ordered outcome lies in the
+    # fitted levels, and weights are checked as the planner checks them.
+    weighted = Dict{Symbol,Symbol}()
+    for response in _rk_replay_responses(plan)
+        key = response.response
+        response.weights === nothing || (weighted[key] = response.weights)
+        if response.family === :ordered_logit && has(key)
+            K = response.n_levels
+            push!(checks, design -> _rk_check_ordered_outcomes(key,
+                _brm_df_column(design, key), K))
+        end
+    end
+    for (key, K) in _rk_ordered_observation_levels(plan)
+        has(key) || continue
+        push!(checks, design -> _brm_ordered_outcome_levels(key,
+            _brm_df_column(design, key), (; n_levels=K)))
+    end
+    isempty(weighted) || _rk_design_weight_checks!(checks, binder, weighted, has)
+    checks
+end
+
+# The level count of each `OrderedLogistic` observation with an authored
+# location: one more than its implicit cutpoint vector's length.
+_rk_ordered_observation_levels(plan::_RKHeldOutPlan) = _rk_ordered_observation_levels(plan.parent)
+_rk_ordered_observation_levels(_plan) = Dict{Symbol,Int}()
+function _rk_ordered_observation_levels(plan::_RKValuePlan)
+    sizes = Dict{Symbol,Any}(v.name => v.size for v in plan.regression.vector_parameters)
+    levels = Dict{Symbol,Int}()
+    for observation in plan.observations
+        observation isa _BRMPreparedObservation || continue
+        law = observation.distribution
+        law isa _BRMPreparedExpr && law.callable === OrderedLogistic || continue
+        cutpoints = Symbol(observation.name, :_cutpoints)
+        any(a -> a isa _BRMPreparedRef && a.name === cutpoints, law.args) || continue
+        levels[observation.name] = sizes[cutpoints] + 1
+    end
+    levels
+end
+
+# `weighted` maps each weighted response to its weight column. The weight kind
+# is the likelihood's syntax (`fweights(n)`), read off the fitted model.
+function _rk_design_weight_checks!(checks, binder::RKDesignBinder, weighted, has)
+    prefix = "RK backend"
+    for observation in _brm_direct_observation_list(parent(binder.rk); prefix)
+        target = observation.key
+        source = get(weighted, target, nothing)
+        source !== nothing && has(source) || continue
+        kind = _brm_observation_weight_syntax(observation.rhs, target; prefix).kind
+        response = has(target) ? target : nothing
+        push!(checks, design -> _brm_check_observation_weight_values(kind,
+            _brm_df_column(design, source),
+            response === nothing ? nothing : length(_brm_df_column(design, response)),
+            target, source; prefix))
+    end
     checks
 end
 

@@ -120,6 +120,10 @@ _rk_replay_predictors(plan::_RKValuePlan) = plan.regression.predictors
 _rk_replay_predictors(plan::_RKHeldOutPlan) = _rk_replay_predictors(plan.parent)
 _rk_replay_predictors(_plan) = ()
 
+_rk_replay_responses(plan::_RKStructuralPlan) = plan.responses
+_rk_replay_responses(plan::_RKHeldOutPlan) = _rk_replay_responses(plan.parent)
+_rk_replay_responses(_plan) = ()
+
 # Latent values that belong to the training rows themselves (an exact GP's
 # values at its locations, an AR/DAR path over its time steps, measurement-
 # error latents, structured group fields) have no meaning at other rows, and

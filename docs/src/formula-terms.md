@@ -619,9 +619,13 @@ every group column, and Normal or `Flat()` population priors (Student-t priors
 are not yet supported). The predictor may carry further groupings, crossed or
 nested (`|ID|` buckets included), and direct terms such as `hsgp(...)` or
 categorical blocks: those stay ordinary terms of the same linear predictor, and
-only the selected block is reparameterised. Two S2Z groupings on one predictor
-are refused, because both block means would be integrated into the same
-population coefficients.
+only the selected block is reparameterised. A predictor that only `@plate for`
+cells read by index, such as `alpha ~ 1 + (1 | g)` with one row per level of
+`g` read as `alpha[site[i]]`, takes its rows from the grouping column, so an
+intercept alone suffices. Two S2Z groupings on one predictor are refused,
+because both block means would be integrated into the same population
+coefficients, and so is a block without a population coefficient to integrate
+its mean into, as in `0 + (1 | g)`.
 
 S2Z reparameterises sampled blocks only. When no observed likelihood reaches a
 predictor, for example because its response column is omitted from the data,

@@ -122,10 +122,14 @@ function _sb_s2z_plan(brmi, prepared, predictor, overrides, rho, requested;
         J >= 2 || throw(ArgumentError("J = 1 level (no contrast coordinates)"))
         pop, ran, direct = Any[], Any[], Any[]
         foreach(t -> _sb_classify_term!(t, pop, ran, direct), _sb_terms(predictor.expression))
-        design = _brm_population_design(target, Tuple(pop), prepared.context.data,
-                                        get(prepared.context.target_obs, target, nothing))
-        (isnothing(design) || isempty(design.columns) || !isempty(design.fixed_terms)) &&
-            throw(ArgumentError("missing or fixed-term population design"))
+        design = _brm_grouped_population_design(target, Tuple(pop), prepared.context, group)
+        isnothing(design) && throw(ArgumentError(
+            "a population term outside the shared design surface"))
+        isempty(design.columns) && throw(ArgumentError(
+            "no population coefficient to integrate the block mean into (as in " *
+            "`0 + (1 | $group)`); add the matching population term, such as `1`"))
+        isempty(design.fixed_terms) || throw(ArgumentError(
+            "fixed `offset(...)` terms in the population design"))
         columns = Tuple(c for p in plans for c in p.columns)
         all(c -> isnothing(c.preprocess) || c.preprocess.kind === :protect, columns) ||
             throw(ArgumentError("transformed random-effect columns"))
@@ -204,8 +208,9 @@ function _sb_s2z_plan(brmi, prepared, predictor, overrides, rho, requested;
                 indices=first(plans).indices, levels=first(plans).levels)
     catch err
         err isa ArgumentError || rethrow()
-        label = isnothing(group) ? string(target) : "`$group`"
-        throw(ArgumentError("sbimpl: S2Z is unavailable for group $label: $(err.msg); " *
+        label = isnothing(group) ? "predictor `$target`" :
+            "group `$group` of predictor `$target`"
+        throw(ArgumentError("sbimpl: S2Z is unavailable for $label: $(err.msg); " *
               "requires one independent Gaussian block of that grouping with J >= 2, " *
               "fully matched population design and supported priors"))
     end

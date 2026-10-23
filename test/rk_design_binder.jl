@@ -104,6 +104,23 @@ fitted_constant(d) = @brm d begin
     mu = b * (x - xbar)
     y ~ Normal(mu, sigma)
 end
+# A weighted likelihood and an ordered outcome: their weights and outcomes
+# bind as the design holds them.
+weighted_normal(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + zscale(z)
+    y ~ weighted(Normal(mu, sigma), fweights(n))
+end
+ordered(d) = @brm d begin
+    eta ~ 0 + zscale(z)
+    k ~ OrderedLogistic(eta)
+end
+ordered_authored(d) = @brm d begin
+    slope ~ 0 + zscale(z)
+    bias ~ Normal(0, 1)
+    loc = slope + bias
+    k ~ OrderedLogistic(loc)
+end
 # HSGPs over masked rows: the mask and the masked axis are graph values of the
 # bound `keep` and `x` columns.
 masked(d) = @brm d begin
@@ -256,6 +273,9 @@ flat_data(rng, n) = (; x=collect(range(0.3, 4.1; length=n)) .+ 0.01 .* rand(rng,
     g=["a", "b", "c"][mod1.(1:n, 3)], z=cos.(1:n) .+ rand(rng, n),
     keep=[isodd(i) || i > 8 for i in 1:n], y=randn(rng, n))
 without(data, name) = NamedTuple{filter(!=(name), keys(data))}(data)
+# Frequency weights and an ordered outcome with three levels.
+leveled_data(rng, rows) = merge(flat_data(rng, rows),
+    (; n=rand(rng, 1:3, rows), k=[1, 2, 3][mod1.(1:rows, 3)]))
 
 absent(v) = occursin("Absent", string(nameof(typeof(v))))
 same(a, b) = typeof(a) == typeof(b) && (absent(a) ?
@@ -402,6 +422,39 @@ end
     @test_throws "must be a column on" reprocess(rk, merge(base, (; dose_rank=base.dose_rank[1:end-1])))
     @test_throws "must be a column on" binder(merge(base, (; dose_rank=base.dose_rank[1:end-1])))
     @test_throws "name no subject" binder(merge(base, (; dose_subject=[base.dose_subject[1:end-1]; "zz"])))
+end
+
+@stestset "weights and ordered outcomes bind as the design holds them" begin
+    # Both used to be copied in Julia (`Float64` weights, `Int` outcomes), so
+    # every design replayed in full; the ordered level count is the fit's.
+    rng = Xoshiro(19)
+    data = leveled_data(rng, 12)
+    for (build, response, want) in ((BM.weighted_normal, :y, :mu), (BM.ordered, :k, :eta),
+            (BM.ordered_authored, :k, :loc))
+        rk = RKBRMI(build(data))
+        # With the response and without it (todo `1u6wzfy`); row 7 holds one
+        # level of `k`.
+        for design_data in (data, without(data, response))
+            designs = [map(v -> v[rows], design_data) for rows in (2:5, [7], 1:9)]
+            binder = check_binder(rk, designs; want)
+            @test length(binder.classes) == 1
+            @test !occursin("replayed in full", sprint(show, binder))
+        end
+    end
+    # A design is refused where `reprocess` refuses its weights or outcomes.
+    for (build, bad, message) in (
+            (BM.weighted_normal, (; n=[1, -1, 2, 1]), "nonnegative integer-valued counts"),
+            (BM.weighted_normal, (; n=[1, 2, 3]), "has length 3 but response `y` has length 4"),
+            (BM.ordered, (; k=[1, 4, 2, 1]), "outside the fitted levels 1..3"),
+            (BM.ordered, (; k=[0, 1, 2, 1]), "outside the fitted levels 1..3"),
+            (BM.ordered_authored, (; k=[1, 4, 2, 1]), "beyond its fitted levels"))
+        rk = RKBRMI(build(data))
+        binder = rk_design_binder(rk)
+        design = map(v -> v[2:5], data)
+        binder(design)
+        @test_throws message reprocess(rk, merge(design, bad))
+        @test_throws message binder(merge(design, bad))
+    end
 end
 
 @stestset "a cell reading only grouped rows binds every design into one lowering" begin

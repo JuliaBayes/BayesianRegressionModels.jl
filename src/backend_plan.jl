@@ -562,11 +562,14 @@ struct _BRMResponseModifierPlan{B,L,U}
     upper::U
 end
 
-struct _BRMObservationWeightPlan{D,V<:AbstractVector}
+struct _BRMObservationWeightPlan{D,V<:AbstractVector,C<:AbstractVector}
     kind::Symbol
     distribution::D
     source::Symbol
     values::V
+    # The weight column as the data hold it, checked like `values`. An RK
+    # program binds it unchanged, so a design's weights stay a raw input.
+    column::C
 end
 
 """
@@ -639,7 +642,8 @@ _brm_observation_weight_kind(f) =
 
 # `nobs === nothing` is an omitted response: there are no response values to
 # match, and the weights still describe the rows the response would have.
-function _brm_prepare_observation_weight_values(
+# Checks the weight column as the data hold it, without copying it.
+function _brm_check_observation_weight_values(
         kind::Symbol, raw, nobs::Union{Integer,Nothing}, target::Symbol, source::Symbol;
         prefix="BRM backend lowering")
     raw isa AbstractVector{<:Real} || error(
@@ -648,35 +652,58 @@ function _brm_prepare_observation_weight_values(
     isnothing(nobs) || length(raw) == nobs || error(
         "$prefix: weight column `$source` has length $(length(raw)) but response " *
         "`$target` has length $nobs")
-    values = collect(Float64, raw)
-    all(isfinite, values) || error(
+    all(isfinite, raw) || error(
         "$prefix: weight column `$source` for response `$target` contains " *
         "non-finite values")
     if kind === :analytic
-        all(>(0), values) || error(
+        all(>(0), raw) || error(
             "$prefix: analytic/precision weights for response `$target` must be " *
             "strictly positive")
     elseif kind === :frequency
-        all(x -> x >= 0 && isinteger(x), values) || error(
+        all(x -> x >= 0 && isinteger(x), raw) || error(
             "$prefix: frequency weights for response `$target` must be " *
             "nonnegative integer-valued counts")
     elseif kind === :power
-        all(>=(0), values) || error(
+        all(>=(0), raw) || error(
             "$prefix: power-likelihood weights for response `$target` must be " *
             "nonnegative")
     else
         error("$prefix: internal unsupported observation-weight kind `$kind`")
     end
-    values
+    raw
 end
 
-# `response === nothing` plans the weights of an omitted response.
+_brm_prepare_observation_weight_values(kind::Symbol, raw, nobs::Union{Integer,Nothing},
+        target::Symbol, source::Symbol; prefix="BRM backend lowering") =
+    collect(Float64, _brm_check_observation_weight_values(kind, raw, nobs, target, source;
+        prefix))
+
+# The number of rows a response holds; `nothing` when it is omitted.
+_brm_observation_count(::Nothing) = nothing
+_brm_observation_count(response) = length(response)
+
+# `response === nothing` (or an omitted replay response) plans the weights of
+# an omitted response.
 function _brm_observation_weight_plan(rhs, target::Symbol, response;
                                       prefix="BRM backend lowering")
     rhs isa ExprColumn && getf(rhs) === weighted || return nothing
     isnothing(response) || response isa AbstractVector || error(
         "$prefix: weighted response `$target` must be a one-dimensional " *
         "observation vector; got $(typeof(response))")
+    (; kind, distribution, source_column) = _brm_observation_weight_syntax(
+        rhs, target; prefix)
+    source = name(source_column)
+    raw = parent(parent(source_column))
+    values = _brm_prepare_observation_weight_values(
+        kind, raw, _brm_observation_count(response), target, source; prefix)
+    _BRMObservationWeightPlan(kind, distribution, source, values, raw)
+end
+
+# The weight kind, the base distribution and the weight column of a
+# `weighted(distribution, constructor(column))` likelihood, read from its
+# syntax alone; `nothing` for any other likelihood.
+function _brm_observation_weight_syntax(rhs, target::Symbol; prefix="BRM backend lowering")
+    rhs isa ExprColumn && getf(rhs) === weighted || return nothing
     isempty(getkwargs(rhs)) || error(
         "$prefix: `weighted(distribution, weights)` accepts no keywords")
     args = getargs(rhs)
@@ -711,12 +738,7 @@ function _brm_observation_weight_plan(rhs, target::Symbol, response;
     source_column isa NamedColumn && parent(source_column) isa DataColumn || error(
         "$prefix: weights for response `$target` must be built from one raw " *
         "dataframe column, got $(typeof(source_column))")
-    source = name(source_column)
-    raw = parent(parent(source_column))
-    values = _brm_prepare_observation_weight_values(
-        kind, raw, isnothing(response) ? nothing : length(response), target, source;
-        prefix)
-    _BRMObservationWeightPlan(kind, distribution, source, values)
+    (; kind, distribution, source_column)
 end
 
 # A cell observation whose weight is a StatsBase constructor keeps that
@@ -1998,6 +2020,8 @@ Base.size(x::_BRMAbsentResponse) = _brm_absent_read(x)
 Base.getindex(x::_BRMAbsentResponse, ::Int) = _brm_absent_read(x)
 Base.show(io::IO, x::_BRMAbsentResponse) = print(io, "<absent response `", x.name, "`>")
 Base.show(io::IO, ::MIME"text/plain", x::_BRMAbsentResponse) = show(io, x)
+# An omitted response's weights describe the design's rows.
+_brm_observation_count(::_BRMAbsentResponse) = nothing
 
 function _brm_fit_source(name::Symbol, values)
     frozen = _brm_frozen_replay()
@@ -2620,6 +2644,21 @@ function _brm_population_design(target::Symbol, terms::Tuple,
     end
     _BRMPopulationDesign(
         target, Tuple(columns), matrix, row_source, Tuple(fixed_terms), fixed)
+end
+
+# The population design of a predictor that carries a block of grouping
+# `group`, for the planners that integrate that block's mean into it (exact
+# totals, S2Z). An intercept-only predictor that no bound observation sizes,
+# because its response is omitted or it is read only by index in `@plate for`
+# cells, has no other row axis: the grouping column spans its rows, as in
+# `_brm_prepare_predictor_geometry`.
+function _brm_grouped_population_design(target::Symbol, terms::Tuple,
+                                        context, group::Symbol)
+    obs_name = get(context.target_obs, target, nothing)
+    design = _brm_population_design(target, terms, context.data, obs_name)
+    isnothing(design) || return design
+    !isnothing(obs_name) && haskey(context.data, obs_name) && return nothing
+    _brm_population_design(target, terms, context.data, obs_name; row_source=group)
 end
 
 struct _BRMPopulationPredictor{F,D<:_BRMPopulationDesign}
