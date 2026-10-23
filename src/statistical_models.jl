@@ -262,6 +262,23 @@ brm_prepared_indices(values, level_values) = begin
     return indices
 end
     ),
+    # An HSGP `rows=` column as the 0/1 rows its basis carries.
+    brm_hsgp_row_mask = :(
+brm_hsgp_row_mask(values) = begin
+    mask = ReactiveKernels.plate(values) do value
+        1.0 * !iszero(value)
+    end
+    return mask
+end
+    ),
+    # An axis only `rows=`-masked HSGP terms read: a row no mask carries may
+    # hold `missing`, read as an inert 0.0 since its basis row is zeroed.
+    brm_hsgp_masked_axis = :(
+brm_hsgp_masked_axis(values) = begin
+    axis = Float64.(coalesce.(values, 0.0))
+    return axis
+end
+    ),
     brm_covariate_geometry = :(
 brm_covariate_geometry(observed, observed_rows, missing_rows) = begin
     rows = 1:(length(observed_rows) + length(missing_rows))
