@@ -556,8 +556,9 @@ end
     end
     # A response whose levels the graph codes (`k = brm_prepared_indices(k_raw,
     # …)`) is observed as a data-only definition of `k_raw`. ReactiveKernels
-    # does not yet bind it absent when a design omits `k_raw` (RK snag
-    # `rkppl-derived-re-79a3a684`).
+    # binds it absent when the fit's lowering is rebound (snag
+    # `rkppl-derived-re-79a3a684`), but BRM lowers each binding afresh, and
+    # lowering a design that omits `k_raw` is RK todo `120ic2x`.
     for (build, want) in ((RM.ordinal_cumulative, :eta), (RM.categorical_logit, :e2))
         rk = RKBRMI(build(LEVELED))
         u = point(rk)
