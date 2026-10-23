@@ -140,6 +140,34 @@ censored_below(d) = @brm d begin
     mu ~ 1 + zscale(x)
     y ~ censored(Normal(mu, 1); lower=lo)
 end
+# Responses whose planning reads their values: an ordered outcome (its level
+# count), with a formula and with an authored location, and a weighted
+# likelihood (its weights' rows).
+ordered(d) = @brm d begin
+    eta ~ 0 + zscale(x)
+    k ~ OrderedLogistic(eta)
+end
+ordered_authored(d) = @brm d begin
+    slope ~ 0 + zscale(x)
+    bias ~ Normal(0, 1)
+    loc = slope + bias
+    k ~ OrderedLogistic(loc)
+end
+weighted_normal(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + zscale(x)
+    y ~ weighted(Normal(mu, sigma), fweights(n))
+end
+# Responses whose levels the graph codes from the response's values.
+ordinal_cumulative(d) = @brm d begin
+    eta ~ 0 + zscale(x)
+    k ~ Ordinal(Cumulative(), LogitLink(), eta)
+end
+categorical_logit(d) = @brm d begin
+    e2 ~ 1 + zscale(x)
+    e3 ~ 1 + zscale(x)
+    k ~ CategoricalLogit(e2, e3)
+end
 pk_censored(d) = @brm d begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + zscale(weight) + (1 | p | subject)
@@ -233,6 +261,8 @@ const TRAIN = (; x=collect(range(0.3, 4.1; length=N)) .^ 1.3,
     lo=fill(-0.5, N),
     y=sin.(1:N) .+ 0.1 .* (1:N))
 rows_of(data, rows) = map(v -> v isa AbstractVector ? v[rows] : v, data)
+# An ordered outcome with three levels and frequency weights.
+const LEVELED = merge(TRAIN, (; k=[1, 2, 3][mod1.(1:N, 3)], n=[1, 2, 1, 3][mod1.(1:N, 4)]))
 without(data, name) = NamedTuple{filter(!=(name), keys(data))}(data)
 
 const PK = (; subject=["s1", "s2", "s3", "s4", "s5"],
@@ -270,7 +300,7 @@ density(rk, u) = LogDensityProblems.logdensity(
 
 # A backend whose `y` was omitted has no density: RK refuses every query that
 # reads `y`, naming it.
-function check_no_density(replay, u)
+function check_no_density(replay, u; response=:y)
     err = try
         density(replay, u)
         nothing
@@ -278,7 +308,7 @@ function check_no_density(replay, u)
         e
     end
     @test err isa ReactiveKernelsPPL.ContractValidationError
-    @test occursin("`y`", sprint(showerror, err))
+    @test occursin("`$response`", sprint(showerror, err))
 end
 
 # The replay predicts the training values at the training rows it holds, and
@@ -499,6 +529,47 @@ end
     # Other data stay required.
     @test_throws "has no column `x`" reprocess(RKBRMI(RM.zscaled(TRAIN)),
         without(without(rows_of(TRAIN, 2:5), :y), :x))
+end
+
+@stestset "ordered and weighted responses: a design without them predicts the same values" begin
+    # Planning used to read these responses' values: the ordered level count
+    # and the weights' row count (todo `1u6wzfy`). Both are the fit's now.
+    for (build, response, want) in ((RM.ordered, :k, :eta), (RM.ordered_authored, :k, :loc),
+            (RM.weighted_normal, :y, :mu))
+        rk = RKBRMI(build(LEVELED))
+        u = point(rk)
+        for rows in (2:5, [7], [3, 6])
+            design = rows_of(LEVELED, rows)
+            replay = reprocess(rk, without(design, response))
+            @test replay.model === rk.model
+            @test graph_value(replay, want, u) == graph_value(reprocess(rk, design), want, u)
+            check_no_density(replay, u; response)
+        end
+    end
+    # The level count is the fit's: outcomes that miss a level bind to the
+    # fitted program, and one past the fitted levels is refused.
+    for (build, message) in ((RM.ordered, "outside the fitted levels 1..3"),
+            (RM.ordered_authored, "beyond its fitted levels"))
+        rk = RKBRMI(build(LEVELED))
+        @test isfinite(density(reprocess(rk, rows_of(LEVELED, [1, 4])), point(rk)))
+        @test_throws message reprocess(rk, merge(rows_of(LEVELED, 2:3), (; k=[2, 4])))
+    end
+    # A response whose levels the graph codes (`k = brm_prepared_indices(k_raw,
+    # …)`) is observed as a data-only definition of `k_raw`. ReactiveKernels
+    # binds it absent when the fit's lowering is rebound (snag
+    # `rkppl-derived-re-79a3a684`), but BRM lowers each binding afresh, and
+    # lowering a design that omits `k_raw` is RK todo `120ic2x`.
+    for (build, want) in ((RM.ordinal_cumulative, :eta), (RM.categorical_logit, :e2))
+        rk = RKBRMI(build(LEVELED))
+        u = point(rk)
+        design = rows_of(LEVELED, 1:9)
+        @test_broken try
+            graph_value(reprocess(rk, without(design, :k)), want, u) ==
+                graph_value(reprocess(rk, design), want, u)
+        catch
+            false
+        end
+    end
 end
 
 @stestset "freeze_constants=false rebuilds on the new data" begin
