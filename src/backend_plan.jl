@@ -2646,6 +2646,21 @@ function _brm_population_design(target::Symbol, terms::Tuple,
         target, Tuple(columns), matrix, row_source, Tuple(fixed_terms), fixed)
 end
 
+# The population design of a predictor that carries a block of grouping
+# `group`, for the planners that integrate that block's mean into it (exact
+# totals, S2Z). An intercept-only predictor that no bound observation sizes,
+# because its response is omitted or it is read only by index in `@plate for`
+# cells, has no other row axis: the grouping column spans its rows, as in
+# `_brm_prepare_predictor_geometry`.
+function _brm_grouped_population_design(target::Symbol, terms::Tuple,
+                                        context, group::Symbol)
+    obs_name = get(context.target_obs, target, nothing)
+    design = _brm_population_design(target, terms, context.data, obs_name)
+    isnothing(design) || return design
+    !isnothing(obs_name) && haskey(context.data, obs_name) && return nothing
+    _brm_population_design(target, terms, context.data, obs_name; row_source=group)
+end
+
 struct _BRMPopulationPredictor{F,D<:_BRMPopulationDesign}
     name::Symbol
     link_lhs_fn::F

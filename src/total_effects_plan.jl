@@ -291,16 +291,11 @@ function _sb_total_plan(brmi, prepared, predictor, overrides, buckets, sd_overri
     foreach(t -> _sb_classify_term!(t,pop,ran,direct), _sb_terms(predictor.expression))
     all(_sb_total_passthrough_term,direct) ||
         return ineligible("it has a term other than `offset(...)` outside its population design (a spline, GP, monotonic, autoregressive or categorical term)")
-    obs_name = get(prepared.context.target_obs,target,nothing)
-    design = _brm_population_design(target,Tuple(pop),prepared.context.data,obs_name)
-    if isnothing(design) && (isnothing(obs_name) || !haskey(prepared.context.data,obs_name))
-        # Prior spelling: the response column is omitted, so an
-        # intercept-only predictor has no observation row axis. The declared
-        # grouping column spans the same rows; resolve the axis from the
-        # declaration so the prior program keeps the posterior's
-        # representation and names instead of dropping every `:auto` plan.
-        design = _brm_population_design(target,Tuple(pop),prepared.context.data,obs_name; row_source=group)
-    end
+    # Prior spelling: with the response column omitted, an intercept-only
+    # predictor takes its row axis from the declared grouping, so the prior
+    # program keeps the posterior's representation and names instead of
+    # dropping every `:auto` plan.
+    design = _brm_grouped_population_design(target,Tuple(pop),prepared.context,group)
     isnothing(design) && return ineligible("its population design cannot be resolved")
     isempty(design.columns) &&
         return ineligible("it has no population coefficient to integrate (as in `0 + (1 | $group)`)")

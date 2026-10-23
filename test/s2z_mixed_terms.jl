@@ -259,6 +259,74 @@ end
           ids=Dict(:alpha_r => :region_r, :alpha_i => :region_i))
 end
 
+# Site effects with one row per site, read only by index in a plate over
+# visits, each relative to the mean over its area's sites (snag
+# `s2z-refused-on-a-4d11f578`). `a_c` and `a_d` are intercept-only, so no
+# observation or data column gives their row axis: the grouping column does.
+const NSITE, NVISIT = 8, 10
+const SITES = let rng = Xoshiro(6)
+    site_m = [1 + (i % NSITE) for i in 1:NVISIT]
+    area_s = [1 + (s % 2) for s in 1:NSITE]
+    (; site_g=["S$(lpad(s, 2, '0'))" for s in 1:NSITE], w_s=Float64.(isodd.(1:NSITE)),
+       site_m, area_rows=[findall(==(area_s[s]), area_s) for s in site_m],
+       n_m=rand(rng, 20:40, NVISIT), x_m=Float64.(rand(rng, 0:1, NVISIT)),
+       y_m=rand(rng, 0:6, NVISIT), s_m=rand(rng, 0:6, NVISIT))
+end
+
+relative_sites = @brm begin
+    a_s ~ 1 + w_s + (1 | as | site_g)
+    a_c ~ 1 + (1 | ac | site_g)
+    a_d ~ 1 + (1 | ad | site_g)
+    effect(a_s, Intercept) ~ Normal(0, 1)
+    effect(a_c, Intercept) ~ Normal(0, 1)
+    effect(a_d, Intercept) ~ Normal(0, 1)
+    sd(:, as) ~ Exponential(0.5)
+    sd(:, ac) ~ Exponential(0.5)
+    sd(:, ad) ~ Exponential(0.25)
+    @plate for i in eachindex(n_m)
+        ls_m[i] = a_s[site_m[i]] - log(mean(exp.(a_s[area_rows[i]])))
+        lc_m[i] = a_c[site_m[i]] - log(mean(exp.(a_c[area_rows[i]])))
+        ld_m[i] = a_d[site_m[i]] - mean(a_d[area_rows[i]])
+        y_m[i] ~ Poisson(n_m[i] .* exp.(lc_m[i] .+ ld_m[i] .* x_m[i]))
+        s_m[i] ~ Poisson(n_m[i] .* exp(ls_m[i]))
+    end
+end
+
+@testset "S2Z on intercept-only predictors read by index in a plate" begin
+    brmi = relative_sites(SITES)
+    sb = SBBRMI(brmi; mod=@__MODULE__, s2z_groups=[:site_g], s2z_rho=1.0)
+    blocks = s2z_effect_blocks(sb)
+    @test [b.predictor for b in blocks] == [:a_c, :a_d, :a_s]
+    @test all(b -> b.population_columns == (:Intercept,), blocks)
+    @test all(b -> size(b.design, 1) == NSITE, blocks)
+    @test pop_labels(sb, :a_s) == [:w_s]
+    @test isempty(ranef_blocks(sb))
+    @test s2z_stanc_ok(sb)
+    @test brm_descriptor(sb) isa BRMDescriptor
+    ids = Dict{Symbol,Any}(:a_s => :as, :a_c => :ac, :a_d => :ad)
+    # The default build turns each one-grouping predictor into exact totals.
+    ordinary = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
+    audit(sb, ordinary, "relative_sites"; ids)
+    audit(SBBRMI(brmi; mod=@__MODULE__, s2z_groups=[:site_g], s2z_rho=0.0),
+          ordinary, "relative_sites_0"; ids, trials=1)
+    # refused: S2Z integrates the block mean into a matched population
+    # coefficient (`s2z_plan.jl` first scope); `0 + (1 | g)` has none.
+    no_intercept = @brm begin
+        a_c ~ 0 + (1 | site_g)
+        @plate for i in eachindex(n_m)
+            y_m[i] ~ Poisson(n_m[i] .* exp(a_c[site_m[i]]))
+        end
+    end
+    err = try
+        SBBRMI(no_intercept(SITES); mod=@__MODULE__, s2z_groups=[:site_g], s2z_rho=1.0)
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError &&
+        occursin("group `site_g` of predictor `a_c`: no population coefficient", err.msg)
+end
+
 @testset "S2Z scope that stays refused" begin
     brmi = two_groupings(FLAT)
     # refused: both blocks' means are confounded with the one intercept they
