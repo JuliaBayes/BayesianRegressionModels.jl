@@ -353,14 +353,17 @@ function _rk_ast_value_spline(definitions, term, taken)
     kval = k isa Tuple ? Expr(:tuple, k...) : k
     fit_columns = get(term.options, :fit_columns, ())
     stmts = Expr[]
-    if term.options.kind === :t2 && !isempty(fit_columns)
-        # A `t2` basis is fitted once to its fit-role axes, a fitted value of
-        # the program (`brm_fitted_state`), and evaluated at the rows from it.
+    fitted = !isempty(fit_columns)
+    if fitted
+        # A basis is fitted once to its fit-role axes, a fitted value of the
+        # program (`brm_fitted_state`), and evaluated at the rows from it.
         fit = _rk_ast_fresh_name(string(term.options.id, "_fit"), taken)
-        push!(stmts, Expr(:(=), fit, Expr(:call, :brm_t2_fit, fit_columns..., kval)))
+        fitter = term.options.kind === :t2 ? :brm_t2_fit : :brm_tps_fit
+        push!(stmts, Expr(:(=), fit, Expr(:call, fitter, fit_columns..., kval)))
         fit_columns = (fit,)
     end
-    basis = term.options.kind === :t2 ? :brm_t2_basis : :brm_tps_basis
+    basis = term.options.kind === :t2 ? :brm_t2_basis :
+        fitted ? :brm_tps_apply : :brm_tps_basis
     push!(stmts, Expr(:(=), Expr(:tuple, X, Z...),
         Expr(:call, basis, term.columns..., fit_columns..., kval)))
     block = _rk_block_body()
