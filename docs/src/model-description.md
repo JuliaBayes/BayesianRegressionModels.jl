@@ -98,6 +98,53 @@ conditional density in this inventory, including parameter-dependent families.
 Their contexts use `observation_role=:latent_parameter`; the prose identifies
 the sampled quantity and its contribution to the joint model.
 
+## Language
+
+A description is written in one language, chosen when it is built:
+
+```julia
+const DE = description_texts(:de)
+result = brm_description(d; labels, texts=DE)
+markdown = brm_description_markdown(result)   # German throughout
+```
+
+[`description_texts`](@ref) returns the built-in `:en` (the default) or `:de`
+texts. They cover everything BRM writes itself: the prose sentences, the
+meanings of the notation it introduces, the coverage-gap messages, the Markdown
+headings and table headers, and the descriptive words inside its LaTeX, such as
+`\operatorname{Exponential}_{\mathrm{rate}}` or `\text{(continuous)}`. The
+result records its texts, so [`brm_description_markdown`](@ref) needs no
+language argument and the page cannot mix languages. `model_id`, the component
+inventory and the equations' structure do not depend on the language.
+
+What the caller supplies is never translated: `labels` meanings, symbols and
+units, hook prose, and the model's own identifiers. Code-level names stay as
+they are in every language: logical IDs and axis names (`random_effect`,
+`declared`), distribution families (`Gamma`, `LogNormal`), standard operators
+(`\operatorname{diag}`, `\operatorname{logit}`) and function names
+(`\operatorname{range}`, `\operatorname{constant}`, `rep_matrix`).
+
+Replace any text by keyword, e.g.
+`description_texts(:de; effective_priors="A-priori-Annahmen:")`. A word in
+braces such as `{owner}` is a value the description fills in; a replacement
+must keep exactly the placeholders of the English text. Braces directly after a
+letter, `\`, `_` or `^` are LaTeX groups, not placeholders. An unknown locale or
+text name, or a placeholder mismatch, throws an `ArgumentError`.
+
+A hook writes its own prose in the description's language by reading
+[`brm_description_texts`](@ref)`(context).locale`. A page that needs two
+languages calls `brm_description` once per language; it does not fit or sample.
+
+The example model's prose in German:
+
+```@eval
+let d = brm_descriptor(SBBRMI(description_model; total_groups=()))
+    result = brm_description(d; texts=description_texts(:de))
+    result.complete || error(join(result.diagnostics, "\n"))
+    Markdown.parse(join(result.prose, "\n\n"))
+end
+```
+
 ## Scientific extensions
 
 An unknown callable leaves a coverage gap. Add a reusable

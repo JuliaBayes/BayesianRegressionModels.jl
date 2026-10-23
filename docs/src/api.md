@@ -14,7 +14,10 @@ brm_description_record
 brm_description_prior
 brm_description_prior_anchor
 brm_description_prior_references
+description_texts
+brm_description_texts
 BRMDescription
+BRMDescriptionTexts
 BRMDescriptionComponent
 BRMDescriptionFragment
 BRMDescriptionReference
