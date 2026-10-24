@@ -65,6 +65,11 @@ function check_module(rk; anchors)
     @test src isa JAXSource
     @test issubset(("prepare_data", "log_density", "log_prior", "log_likelihood",
         "log_jacobian", "constrain"), [f.name for f in src.functions])
+    # `prepare_data` takes `rk_bound_data(rk)`'s columns by the names it
+    # lists. A data-free replay binds more (its omitted fit-role columns),
+    # which `prepare_data` does not take.
+    inputs = Set(Symbol(first(input)) for input in jax_function(src, "prepare_data").inputs)
+    @test issubset(inputs, keys(rk_bound_data(rk)))
     # A fitted anchor computed in the program is translated host code, its
     # guards included.
     @test occursin("requires at least one training value", src.text) == anchors
@@ -89,11 +94,24 @@ end
     check_module(RKBRMI(JM.counts(TRAIN)); anchors=false)
 end
 
+const PK_DESIGN = (; subject=["s2", "s4"], weight=[72.0, 55.0], dose=[120.0, 100.0],
+    t=[[0.25, 1.5, 3.0], [1.0, 2.0]], y=[[1.1, 0.6, 0.3], [0.5, 0.4]])
+
 @testset "an anchor computed in the program is prepare_data host code" begin
     rk = RKBRMI(JM.pk(PK))
     src = check_module(rk; anchors=true)
     @test occursin("requires nonzero sample variance", src.text)
-    check_module(reprocess(rk, (; subject=["s2", "s4"], weight=[72.0, 55.0],
-        dose=[120.0, 100.0], t=[[0.25, 1.5, 3.0], [1.0, 2.0]],
-        y=[[1.1, 0.6, 0.3], [0.5, 0.4]])); anchors=true)
+    check_module(reprocess(rk, PK_DESIGN); anchors=true)
+end
+
+# `RKBRMI(build(design), brm_fitted_state(rk))` binds the fitted values, not
+# the training rows: they are `prepare_data` inputs, which `rk_bound_data`
+# holds under the names `src.functions` lists.
+@testset "a data-free replay passes its fitted values to prepare_data" begin
+    rk = RKBRMI(JM.grouped(TRAIN))
+    design = (; x=[1.0, 2.0, 3.0, 4.0], w=[0.1, -0.2, 0.3, 0.0],
+        g=["a", "c", "c", "b"], y=[0.2, -0.1, 0.4, 0.0])
+    check_module(RKBRMI(JM.grouped(design), brm_fitted_state(rk)); anchors=false)
+    pk = RKBRMI(JM.pk(PK))
+    check_module(RKBRMI(JM.pk(PK_DESIGN), brm_fitted_state(pk)); anchors=false)
 end
