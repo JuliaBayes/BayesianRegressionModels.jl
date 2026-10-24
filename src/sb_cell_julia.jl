@@ -160,27 +160,40 @@ _sb_cell_block(x, scope) = Meta.isexpr(x, :block) ?
 # ---- `AR1Normal` in a cell: the BRM-owned AR(1) submodel ---------------------
 #
 # The `@slic` submodels `y[p] ~ AR1Normal(...)` calls (`ar1_normal.jl`): the
-# exact AR(1) density over one series, given one mean, scale and persistence
-# per step, at the recorded integer times or one step apart. `obs` is the
-# caller's observed series; without it the submodel draws the series.
-const _sb_ar1_normal = StanBlocks.@slic begin
-    @scan begin
-        obs[1] ~ normal(mu[1], sigma[1] / sqrt(1 - phi[1] ^ 2))
-        for t in 2:n
-            k = time[t] - time[t - 1]
-            obs[t] ~ normal(mu[t] + phi[t] ^ k * (obs[t - 1] - mu[t - 1]),
-                sigma[t] * sqrt((1 - phi[t] ^ (2 * k)) / (1 - phi[t] ^ 2)))
+# exact AR(1) density over one series, at the recorded integer times or one
+# step apart. `obs` is the caller's observed series; without it the submodel
+# draws the series. A mean, scale or persistence that varies along the series
+# is read per step (`mu[t]`); a shared one is read as its one value (`sigma`).
+# StanBlocks substitutes each argument where the body reads it, so a shared
+# value filled to the series' length would be rebuilt at every step, and the
+# gradient would grow with the square of the series' length.
+function _sb_ar1_normal_body(along::NTuple{3,Bool}, timed::Bool)
+    mu, sigma, phi = map((:mu, :sigma, :phi), along) do name, varies
+        t -> varies ? :($name[$t]) : name
+    end
+    step = timed ? quote
+        k = time[t] - time[t - 1]
+        obs[t] ~ normal($(mu(:t)) + $(phi(:t)) ^ k * (obs[t - 1] - $(mu(:(t - 1)))),
+            $(sigma(:t)) * sqrt((1 - $(phi(:t)) ^ (2 * k)) / (1 - $(phi(:t)) ^ 2)))
+    end : quote
+        obs[t] ~ normal($(mu(:t)) + $(phi(:t)) * (obs[t - 1] - $(mu(:(t - 1)))), $(sigma(:t)))
+    end
+    quote
+        @scan begin
+            obs[1] ~ normal($(mu(1)), $(sigma(1)) / sqrt(1 - $(phi(1)) ^ 2))
+            for t in 2:n
+                $(step.args...)
+            end
         end
     end
 end
 
-const _sb_ar1_normal_steps = StanBlocks.@slic begin
-    @scan begin
-        obs[1] ~ normal(mu[1], sigma[1] / sqrt(1 - phi[1] ^ 2))
-        for t in 2:n
-            obs[t] ~ normal(mu[t] + phi[t] * (obs[t - 1] - mu[t - 1]), sigma[t])
-        end
-    end
+# One submodel per pattern of which of `mu`, `sigma`, `phi` vary along the
+# series, with a time column (`timed`) or one step apart.
+const _sb_ar1_normal_models = Dict{Tuple{NTuple{3,Bool},Bool},StanBlocks.SlicModel}()
+for along in Iterators.product((false, true), (false, true), (false, true)), timed in (false, true)
+    _sb_ar1_normal_models[(along, timed)] =
+        @eval StanBlocks.@slic $(_sb_ar1_normal_body(along, timed))
 end
 
 # A cell's statements with each `y ~ AR1Normal(...)` calling the AR(1)
@@ -197,7 +210,7 @@ function _sb_cell_ar1_normal_calls(statements, params)
             "sbimpl: `$(spec.response) ~ AR1Normal(...)` with `$(spec.response)` omitted " *
             "draws a series whose length nothing in the cell gives; pass " *
             "`time = t[p]`, or an argument read along the series")
-        mu, sigma, phi = _brm_ar1_normal_series(spec, :fill)
+        mu, sigma, phi = spec.arguments
         keywords = Any[Expr(:kw, :mu, mu), Expr(:kw, :sigma, sigma),
             Expr(:kw, :phi, phi), Expr(:kw, :n, spec.length)]
         spec.time === nothing || push!(keywords, Expr(:kw, :time, spec.time))
@@ -210,7 +223,7 @@ function _sb_cell_ar1_normal_calls(statements, params)
             end
             push!(used, node)
         end
-        submodel = spec.time === nothing ? _sb_ar1_normal_steps : _sb_ar1_normal
+        submodel = _sb_ar1_normal_models[(spec.along, spec.time !== nothing)]
         Expr(:call, :~, node, Expr(:call, submodel, Expr(:parameters, keywords...)))
     end
 end
@@ -221,4 +234,4 @@ end
 _sb_plan_ar1_normal_call(x) = Meta.isexpr(x, :call, 3) && x.args[1] === :~ &&
     Meta.isexpr(x.args[3], :call) && (head = first(x.args[3].args);
         head isa StanBlocks.SlicModel && any(submodel -> isequal(head.model, submodel.model),
-            (_sb_ar1_normal, _sb_ar1_normal_steps)))
+            values(_sb_ar1_normal_models)))

@@ -3,7 +3,7 @@
 # `y[p] ~ AR1Normal(mu[p], sigma[p], phi; time = day[p])` observes the cell's
 # series under AR(1) residuals. `@brm` keeps the statement as written and
 # checks it; each backend calls its own BRM-owned submodel holding the
-# observed `@scan` (`_sb_ar1_normal` in `sb_cell_julia.jl`,
+# observed `@scan` (`_sb_ar1_normal_models` in `sb_cell_julia.jl`,
 # `_RK_AR1_NORMAL_SUBMODELS` in `rk_kernel_values.jl`), the same recurrence on
 # both:
 #
@@ -24,8 +24,9 @@
 #
 # An argument that reads the group's rows — `mu[p]`, `mu[p] .+ offset`, or a
 # cell local computed from one — varies along the series; any other argument
-# (`phi`, `exp(log_sigma)`, a number) is shared by every entry and reaches the
-# submodel filled to the series' length.
+# (`phi`, `exp(log_sigma)`, a number) is shared by every entry. SBBRMI's
+# submodel reads a shared argument as its one value; RKBRMI's receives it
+# filled to the series' length.
 
 """
     @plate for p in groups(g; order = t)
@@ -68,7 +69,8 @@ one on RKBRMI), the cell's series passed as its arguments:
 end
 ```
 
-A shared argument reaches it filled to the series' length. `show` and the
+SBBRMI's submodel reads a shared argument as its one value, and RKBRMI's
+receives it filled to the series' length. `show` and the
 descriptor print the statement; the generative plan declares an `AR1Normal`
 observation of `y`. Each entry's pointwise log likelihood is its conditional
 density given the series' earlier entries, and with `y` omitted the cell draws
@@ -164,8 +166,8 @@ function _brm_kernel_ar1_normal(statement, params, body)
     (; response, arguments=Tuple(positional), along, time, length=:(length($span)))
 end
 
-# The arguments a backend's AR(1) submodel takes, one entry per step: a
-# shared value is filled to the series' length with the backend's `fill`.
+# The arguments RKBRMI's AR(1) submodel takes, one entry per step: a shared
+# value is filled to the series' length with `fill`.
 _brm_ar1_normal_series(spec, fill) = Tuple(along ? value : Expr(:call, fill, value, spec.length)
     for (value, along) in zip(spec.arguments, spec.along))
 
