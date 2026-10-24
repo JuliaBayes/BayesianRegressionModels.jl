@@ -119,8 +119,10 @@ const PINS = [
     # form of BRM's emitted cell flatten; snag type-constant-la-902b10ce).
     # 356142a62 adds `jax_source` (666bb505f) with its host-side
     # `prepare_data` (888bdfd42; RK todo 0rouf39), which test/rk_jax.jl
-    # translates RKBRMI backends through.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "356142a626497459b3c556324d23dcbbfc1c3b7a"),  # main
+    # translates RKBRMI backends through. 911df2b96 adds 39185dd24 (a call
+    # on static operands, such as the GP jitter/period guards over caller
+    # literals, is decided while JAX traces; snag jax-source-liter-a9e6219e).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "911df2b96f50d612670ac9c15d40a7f0470c80d0"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.5); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "d16c4efb72b963f45de9d6f632c38d46706c23e1"),  # main
