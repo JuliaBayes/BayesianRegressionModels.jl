@@ -55,6 +55,78 @@ stepped_ar(data) = @brm data begin
     end
 end
 
+# The statement and the `@scan` it states are one model, whichever
+# arguments vary along the series: an `x[p]` read, or a cell local
+# computed from one, varies; anything else is shared.
+written(data) = @brm data begin
+    phi ~ Uniform(-1, 1)
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 | probe)
+    @plate for p in groups(probe; order = day)
+        @scan begin
+            y[p][1] ~ Normal(mu[p][1], sigma / sqrt(1 - phi ^ 2))
+            for t in 2:length(day[p])
+                k = day[p][t] - day[p][t - 1]
+                y[p][t] ~ Normal(mu[p][t] + phi ^ k * (y[p][t - 1] - mu[p][t - 1]),
+                    sigma * sqrt((1 - phi ^ (2 * k)) / (1 - phi ^ 2)))
+            end
+        end
+    end
+end
+written_varying(data) = @brm data begin
+    atanh(phi) ~ 1 + (1 | probe)
+    log(sigma) ~ 1 + (1 | probe)
+    mu ~ 1 + x
+    @plate for p in groups(probe; order = day)
+        @scan begin
+            y[p][1] ~ Normal(mu[p][1], sigma[p][1] / sqrt(1 - phi[p][1] ^ 2))
+            for t in 2:length(day[p])
+                k = day[p][t] - day[p][t - 1]
+                y[p][t] ~ Normal(mu[p][t] + phi[p][t] ^ k * (y[p][t - 1] - mu[p][t - 1]),
+                    sigma[p][t] * sqrt((1 - phi[p][t] ^ (2 * k)) / (1 - phi[p][t] ^ 2)))
+            end
+        end
+    end
+end
+local_ar(data) = @brm data begin
+    phi ~ Uniform(-1, 1)
+    log_s ~ Normal(0, 1)
+    mu ~ 1 + x + (1 | probe)
+    @plate for p in groups(probe; order = day)
+        m = mu[p] .+ 0.5
+        y[p] ~ AR1Normal(m, exp(log_s), phi; time = day[p])
+    end
+end
+written_local(data) = @brm data begin
+    phi ~ Uniform(-1, 1)
+    log_s ~ Normal(0, 1)
+    mu ~ 1 + x + (1 | probe)
+    @plate for p in groups(probe; order = day)
+        m = mu[p] .+ 0.5
+        @scan begin
+            y[p][1] ~ Normal(m[1], exp(log_s) / sqrt(1 - phi ^ 2))
+            for t in 2:length(day[p])
+                k = day[p][t] - day[p][t - 1]
+                y[p][t] ~ Normal(m[t] + phi ^ k * (y[p][t - 1] - m[t - 1]),
+                    exp(log_s) * sqrt((1 - phi ^ (2 * k)) / (1 - phi ^ 2)))
+            end
+        end
+    end
+end
+written_steps(data) = @brm data begin
+    phi ~ Uniform(-1, 1)
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 | probe)
+    @plate for p in groups(probe; order = day)
+        @scan begin
+            y[p][1] ~ Normal(mu[p][1], sigma / sqrt(1 - phi ^ 2))
+            for t in 2:length(mu[p])
+                y[p][t] ~ Normal(mu[p][t] + phi * (y[p][t - 1] - mu[p][t - 1]), sigma)
+            end
+        end
+    end
+end
+
 # Each group's rows in time order: the cells' `p`, computed by the same
 # exported function outside the model.
 group_rows(data) = groups(data.probe; order=data.day)
@@ -129,77 +201,7 @@ rk_density(backend, u) = LogDensityProblems.logdensity(
         code = BRM.stan_code(SBBRMI(shared_ar(PANEL); mod=@__MODULE__))
         @test occursin("y_ar1", code)
 
-        # The statement and the `@scan` it states are one model, whichever
-        # arguments vary along the series: an `x[p]` read, or a cell local
-        # computed from one, varies; anything else is shared.
-        written(data) = @brm data begin
-            phi ~ Uniform(-1, 1)
-            sigma ~ Exponential(1)
-            mu ~ 1 + x + (1 | probe)
-            @plate for p in groups(probe; order = day)
-                @scan begin
-                    y[p][1] ~ Normal(mu[p][1], sigma / sqrt(1 - phi ^ 2))
-                    for t in 2:length(day[p])
-                        k = day[p][t] - day[p][t - 1]
-                        y[p][t] ~ Normal(mu[p][t] + phi ^ k * (y[p][t - 1] - mu[p][t - 1]),
-                            sigma * sqrt((1 - phi ^ (2 * k)) / (1 - phi ^ 2)))
-                    end
-                end
-            end
-        end
-        written_varying(data) = @brm data begin
-            atanh(phi) ~ 1 + (1 | probe)
-            log(sigma) ~ 1 + (1 | probe)
-            mu ~ 1 + x
-            @plate for p in groups(probe; order = day)
-                @scan begin
-                    y[p][1] ~ Normal(mu[p][1], sigma[p][1] / sqrt(1 - phi[p][1] ^ 2))
-                    for t in 2:length(day[p])
-                        k = day[p][t] - day[p][t - 1]
-                        y[p][t] ~ Normal(mu[p][t] + phi[p][t] ^ k * (y[p][t - 1] - mu[p][t - 1]),
-                            sigma[p][t] * sqrt((1 - phi[p][t] ^ (2 * k)) / (1 - phi[p][t] ^ 2)))
-                    end
-                end
-            end
-        end
-        local_ar(data) = @brm data begin
-            phi ~ Uniform(-1, 1)
-            log_s ~ Normal(0, 1)
-            mu ~ 1 + x + (1 | probe)
-            @plate for p in groups(probe; order = day)
-                m = mu[p] .+ 0.5
-                y[p] ~ AR1Normal(m, exp(log_s), phi; time = day[p])
-            end
-        end
-        written_local(data) = @brm data begin
-            phi ~ Uniform(-1, 1)
-            log_s ~ Normal(0, 1)
-            mu ~ 1 + x + (1 | probe)
-            @plate for p in groups(probe; order = day)
-                m = mu[p] .+ 0.5
-                @scan begin
-                    y[p][1] ~ Normal(m[1], exp(log_s) / sqrt(1 - phi ^ 2))
-                    for t in 2:length(day[p])
-                        k = day[p][t] - day[p][t - 1]
-                        y[p][t] ~ Normal(m[t] + phi ^ k * (y[p][t - 1] - m[t - 1]),
-                            exp(log_s) * sqrt((1 - phi ^ (2 * k)) / (1 - phi ^ 2)))
-                    end
-                end
-            end
-        end
-        written_steps(data) = @brm data begin
-            phi ~ Uniform(-1, 1)
-            sigma ~ Exponential(1)
-            mu ~ 1 + x + (1 | probe)
-            @plate for p in groups(probe; order = day)
-                @scan begin
-                    y[p][1] ~ Normal(mu[p][1], sigma / sqrt(1 - phi ^ 2))
-                    for t in 2:length(mu[p])
-                        y[p][t] ~ Normal(mu[p][t] + phi * (y[p][t - 1] - mu[p][t - 1]), sigma)
-                    end
-                end
-            end
-        end
+        # On RK, each statement and the `@scan` it states are one density.
         for (statement, scan) in ((shared_ar, written), (varying_ar, written_varying),
                 (local_ar, written_local), (stepped_ar, written_steps))
             backend, reference = RKBRMI(statement(PANEL)), RKBRMI(scan(PANEL))
@@ -431,6 +433,28 @@ rk_density(backend, u) = LogDensityProblems.logdensity(
         n = length(names)
         for u in (zeros(n), fill(0.1, n), collect(range(-0.4, 0.4; length=n)))
             check_consumer_stan(problem, stan, mapping, backend, u)
+        end
+    end
+
+    # SBBRMI reads a shared argument as its one value at every step: filled to
+    # the series' length, it was rebuilt at each step, and the gradient grew
+    # with the square of the series' length (snag `ar1normal-emissi-e1a524c4`).
+    @testset "SBBRMI: the density and gradient of the @scan it states ($name)" for
+            (name, statement, scan) in (("shared", shared_ar, written),
+                ("varying", varying_ar, written_varying), ("local", local_ar, written_local),
+                ("stepped", stepped_ar, written_steps))
+        code = BRM.stan_code(SBBRMI(statement(PANEL); mod=@__MODULE__))
+        @test occursin("y_ar1", code)
+        @test !occursin(r"rep_vector\(\s*(sigma|phi|exp\(log_s\))", code)
+        a = consumer_stan(statement(PANEL), "ar1-statement-$name").model
+        b = consumer_stan(scan(PANEL), "ar1-scan-$name").model
+        @test BridgeStan.param_unc_names(a) == BridgeStan.param_unc_names(b)
+        n = BridgeStan.param_unc_num(a)
+        for u in (zeros(n), fill(0.1, n), collect(range(-0.4, 0.4; length=n)))
+            lp_a, g_a = BridgeStan.log_density_gradient(a, u; propto=false)
+            lp_b, g_b = BridgeStan.log_density_gradient(b, u; propto=false)
+            @test lp_a ≈ lp_b rtol=1e-12
+            @test g_a ≈ g_b rtol=1e-10
         end
     end
 end
