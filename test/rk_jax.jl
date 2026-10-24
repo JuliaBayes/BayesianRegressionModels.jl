@@ -104,6 +104,37 @@ const PK_DESIGN = (; subject=["s2", "s4"], weight=[72.0, 55.0], dose=[120.0, 100
     check_module(reprocess(rk, PK_DESIGN); anchors=true)
 end
 
+# A `@plate` cell's collected value (`conc`, one vector per subject, read
+# from the sampled `log_CL`) in `values`, which `constrain` returns flat.
+# Not built yet (capability gap): the emitted plate iterates
+# `eachindex(dose)` and its cells read `t[i]`, so RK's JAX flatten finds no
+# prepared ragged input carrying the cells' lengths ("flattening a ragged
+# value whose lengths are not those of a prepared ragged input"; RK
+# `356142a62`). Todo `2026-10-24T11-58-45-172-1e0pxzp`.
+@testset "a plate cell's collected value in `values`" begin
+    rk = RKBRMI(JM.pk(PK))
+    src = try
+        jax_source(rk.model, rk_bound_plan(rk); values=(:conc,))
+    catch e
+        e isa JAXEmissionError || rethrow()
+        nothing
+    end
+    @test_broken src isa JAXSource
+    if src === nothing
+        # nothing to evaluate until the module emits
+    elseif rk_jax_available()
+        u = point(rk)
+        bound = rk_bound_data(rk)
+        conc = ReactiveKernels.prepare(rk.model.spec;
+            have=(:unconstrained, keys(bound)...), want=(:conc,), bound)
+        native = first(Base.invokelatest(conc, u))
+        r = rk_jax_evaluate(src, "constrain", (u, raw_inputs(rk, src)...); prepare=true)
+        @test r.value["conc"] ≈ reduce(vcat, native) rtol=1e-12
+    else
+        @test_skip "RK_JAX_PYTHON names no Python with jax"
+    end
+end
+
 # `RKBRMI(build(design), brm_fitted_state(rk))` binds the fitted values, not
 # the training rows: they are `prepare_data` inputs, which `rk_bound_data`
 # holds under the names `src.functions` lists.
