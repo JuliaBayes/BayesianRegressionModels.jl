@@ -112,8 +112,11 @@ const PINS = [
     # design binds its data-only definitions frozen by value, which
     # test/rk_fitted_state.jl replays without the training data) and
     # 28f8896d8 (a frozen design may omit an input of strings); snag
-    # rkppl-bind-froze-da223711.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "de89298a28c26a8e31a324088049c514be8db90f"),  # main
+    # rkppl-bind-froze-da223711. 9f5d1e7de adds 6027d63bd (a position-batched
+    # reader keeps each plate cell's result and the `reduce(vcat, cells)`
+    # flatten in lane slots, which BRM's emitted cell flatten uses; snag
+    # position-batched-cc11130b).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "9f5d1e7de06510fe214fe522bc85a1375034337e"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.5); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "d16c4efb72b963f45de9d6f632c38d46706c23e1"),  # main

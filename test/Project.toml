@@ -116,7 +116,10 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # `lower_rkppl(…; frozen)`: data-only definitions bound frozen by value;
 # test/rk_fitted_state.jl) and 28f8896d8 (a frozen design may omit an input
 # of strings); snag rkppl-bind-froze-da223711.
+# 9f5d1e7de adds 6027d63bd (position-batched readers keep plate cell results
+# and the `reduce(vcat, cells)` flatten in lane slots; snag
+# position-batched-cc11130b).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "de89298a28c26a8e31a324088049c514be8db90f"
+rev = "9f5d1e7de06510fe214fe522bc85a1375034337e"
