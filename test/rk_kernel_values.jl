@@ -323,6 +323,9 @@ emitted_plates(main) = [s for s in main.args
 plate_writes(plate) = Symbol[first(first(cell.args).args)
     for cell in last(last(plate.args).args).args
     if Meta.isexpr(cell, :(=)) && Meta.isexpr(first(cell.args), :ref)]
+# The definitions of a program whose one definition is the kernel flattening
+# its cells (`flatten_cells`).
+flatten_definitions() = (defs = Any[]; BRM._rk_flatten_cells!(defs, Set{Symbol}(), :cells); defs)
 
 # A kernel cell is emitted once, as the authored `@plate for` loop in the model
 # body, with one indexed write per value the program reads (decision
@@ -361,7 +364,8 @@ plate_writes(plate) = Symbol[first(first(cell.args).args)
     # rk-emission-grou-9dac9bc6, todo 1jocaai).
     @test sort!(collect(keys(plan.columns)); by=string) == [:dose, :t, :y]
     @test isequal(plan.columns[:y], data.y)
-    @test isempty(emitted.defs)
+    @test BRM._rk_flatten_cells!(Any[], Set{Symbol}(), :loc_cells) == :(flatten_cells(loc_cells))
+    @test emitted.defs == flatten_definitions()
     # The cell reads its per-subject inputs at the subject index and the model
     # value `log_k` whole; no do-block `Ref` operand (todo 0t3q6dl).
     cell = only(p for p in emitted_plates(emitted.main) if :loc_cells in plate_writes(p))
@@ -371,7 +375,7 @@ plate_writes(plate) = Symbol[first(first(cell.args).args)
     # The per-subject response reads the cells cell by cell, so it is never
     # flattened. The authored `loc` stays a named value over the cells,
     # planned only when queried.
-    @test occursin("loc = brm_flatten_cells(loc_cells)", main)
+    @test occursin("loc = flatten_cells(loc_cells)", main)
     @test occursin("y[i] .~ Normal.(loc_cells[i], sigma)", main)
     for retired in ("_reader", "ReactiveKernels.plate", "Ref(", "cell_input", "subject_count",
             "init =", "reduce(vcat", "brm_flatten_response", "raw_response")
@@ -428,7 +432,9 @@ plate_writes(plate) = Symbol[first(first(cell.args).args)
     shadowing_plan = BRM._brm_rk_plan(shadowing)
     shadowed = BRM._rk_emit_ast(shadowing_plan)
     shadowed_main = sprint(Base.show_unquoted, shadowed.main)
-    @test isempty(shadowed.defs)
+    # The flatten kernel's own `cells` and `values` are its locals.
+    @test shadowed.defs == flatten_definitions()
+    @test occursin("loc = flatten_cells(loc_cells)", shadowed_main)
     cell = only(p for p in emitted_plates(shadowed.main) if :loc_cells in plate_writes(p))
     @test plate_writes(cell) == [:loc_cells, :loc_argument_y_1]
     @test occursin("values = t[i] .* exp(log_k)", shadowed_main)
@@ -502,7 +508,7 @@ end
     saved = deepcopy(data)
     brmi = CountedCell.build(data)
     emitted = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
-    @test isempty(emitted.defs)
+    @test emitted.defs == flatten_definitions()
     cell = only(p for p in emitted_plates(emitted.main) if :loc_cells in plate_writes(p))
     @test plate_writes(cell) == [:loc_cells, :loc_argument_z_1, :loc_argument_w_1]
     backend, problem = consumer_problem(brmi)
