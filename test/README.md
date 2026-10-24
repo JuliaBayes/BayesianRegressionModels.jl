@@ -519,6 +519,23 @@ julia --project=test test/rk_dual_hsgp.jl
 julia --project=test test/rk_gp_covariance.jl
 ```
 
+## Python/JAX modules
+
+`rk_jax.jl` translates RKBRMI fits and replays with
+`jax_source(rk.model, rk_bound_plan(rk))` and checks that BRM's preprocessing
+(level codes, fitted `zscale`/`center` anchors, cell flattens) is the module's
+`prepare_data`. With `RK_JAX_PYTHON` naming a Python that has `jax`, it also
+compares each module's `log_density` and `jax.grad` with the native density
+and its central differences, through the pinned ReactiveKernels checkout's
+`test/jax_python.jl`; without it those comparisons are skipped. It needs an RK
+with `jax_source` and `prepare_data` (`888bdfd42` or later), which the
+standard pin carries:
+
+```sh
+python -m venv <jaxenv> && <jaxenv>/bin/pip install "jax[cpu]"
+RK_JAX_PYTHON=<jaxenv>/bin/python julia --project=test test/rk_jax.jl
+```
+
 ## Chunking heavy suites
 
 `rk_retained_transport.jl` attaches `RKBRMI(brmi, artifact.plan, built)` to
