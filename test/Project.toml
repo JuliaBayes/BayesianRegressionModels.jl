@@ -54,8 +54,10 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # of `weighted` / `truncated` / `censored` / `interval_censored`, with CDF companions;
 # b233afbc evaluates every descriptor input/output bound as `constraint_values`;
 # c7293b88 evaluates Stan's vectorised builtins elementwise there, so a per-axis
-# `fmax(0.0, rho_lower_…)` floor reports one bound per coordinate.
-rev = "c7293b884363cf4d84da43bba7a775696ad81c70"
+# `fmax(0.0, rho_lower_…)` floor reports one bound per coordinate; b97fc5a6 reads shared
+# scan arguments once per step; c4671eb's values-free `maybecv(:y)` holds out an
+# observation with no values given a fit (BRM's forecast replay).
+rev = "c4671eb85737b39688a5ff748a162d64b78fc56a"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"

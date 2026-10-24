@@ -5166,9 +5166,11 @@ Base.@nospecializeinfer function _sb_held_out_inventory(@nospecialize(sb::SBBRMI
     (; aliases, sources, unbound)
 end
 
-# A response data source's value without its hold-out mark.
+# A response data source's value without its hold-out mark; `nothing` for the
+# values-free `maybecv(:y)` a forecast replay binds (`reprocess`), which has none.
 function _sb_unmarked_value(sb::SBBRMI, key::Symbol, value)
     key in sb.held_out || return value
+    value isa StanBlocks.CVMark && return nothing
     raw = StanBlocks.getvalue(value)
     ismissing(raw) && error(
         "sbimpl: held-out response `$key` carries no recoverable data value; " *
@@ -5635,8 +5637,16 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
     elseif e.kind === :kernel_subject_count
         if e.const_ isa NamedTuple && get(e.const_, :from_data_length, false)
             # No-random-effects panel: the subject count is the pre-grouped
-            # per-subject column's length, not a unique-label count.
-            new_data[key] = _sb_reprocess_column_length(df, e.raw_ref,
+            # per-subject column's length, not a unique-label count. Any of the
+            # plate's per-subject columns gives it; a forecast frame has no
+            # response column. A record without `columns` names one column.
+            columns = get(e.const_, :columns, (e.raw_ref,))
+            found = findfirst(c -> _sb_df_has_column(df, c), columns)
+            isnothing(found) && error(
+                "sbimpl: reprocess: kernel(...) counts its subjects from a per-subject ",
+                "column, but the new data carries none of `", join(columns, "`, `"),
+                "`; include at least one of them.")
+            new_data[key] = _sb_reprocess_column_length(df, columns[found],
                 "kernel per-subject column")
         else
             subjects = _sb_reprocess_kernel_cells(df, e.raw_ref, e.const_)
@@ -6016,6 +6026,15 @@ of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
   hold-outs, and `held_out=()` holds nothing out. Every parameter keeps its
   role and coordinates, so the fit's draws replay as before. It composes with
   `resample_groups` and `resample_covariates`.
+- A response the fit observed but `new_df` lacks is **predicted given the fit**
+  (a forecast): it is held out without values (StanBlocks' `maybecv(:y)`), so
+  every parameter stays a parameter, its draw `y_gen` keeps the fit program's
+  name and is shaped by the other arguments (`segments` for a ragged response),
+  and the program has no `y` input and no `y_likelihood`. Its descriptor offers
+  `:predict`, and `:fit` only while another response stays bound. This covers
+  top-level, plate-cell and grouped (`y[rows[i]]`) responses. A joint
+  (`MvNormalCholesky`) response, and a forecast together with `resample_groups`
+  or `resample_covariates`, are not supported yet and error.
 
 Covered: the Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
 `mo`/`s`/`t2`/`gp`/`hsgp`), interval-censored predictor splits,
@@ -6041,6 +6060,21 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     covariates = union(_sb_existing_covariates(sb.preproc),
         _sb_covariate_selection(sb.parent,resample_covariates))
     isempty(covariates) || union!(groups,_sb_covariate_resample_groups(sb.preproc))
+    # Both re-emissions below rebuild the program from the formula on `new_df`;
+    # without the response that is the prior program, not a forecast.
+    if !(isempty(covariates) && isempty(groups))
+        # A covariate selected for `resample_covariates` is re-drawn there.
+        absent = sort!([c for k in _sb_absent_responses(sb, new_df)
+                        for c in _sb_response_columns(sb, k)
+                        if !_sb_df_has_column(new_df, c) && !(c in covariates)])
+        isempty(absent) || error(
+            "sbimpl: reprocess: the new data lacks response(s) `", join(absent, "`, `"),
+            "`, so this replay would predict them given the fit (a forecast), but ",
+            "`resample_groups` / `resample_covariates` re-emit the program from the ",
+            "formula, which without the response is the prior program. A forecast ",
+            "with resampled groups or covariates is not supported yet (todo `1fnt1zu`); ",
+            "replay without `resample_groups` / `resample_covariates`, or include the response.")
+    end
     isempty(covariates) || return _sb_reprocess_covariates(
         sb,new_df,covariates,groups,freeze_constants,held_out)
     isempty(groups) || return _sb_reprocess_resample(
@@ -6063,10 +6097,45 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     new_preproc = Dict{Symbol,PreprocEntry}()
     handled = Set{Symbol}()
     interaction_keys = Set(k for (k, e) in sb.preproc if e.kind === :interaction)
+    # A response the new data lacks is predicted given the fit (a forecast,
+    # decision `0soyu1b`): its data source is bound to StanBlocks' values-free
+    # `maybecv(:y)`, so every parameter it reads stays a parameter, its draw is
+    # shaped by the other arguments, and it has no data input or likelihood.
+    # The absent responses are read only when some response column is missing.
+    absent_responses = Ref{Union{Nothing,Set{Symbol}}}(nothing)
+    function is_absent_response(key)
+        isnothing(absent_responses[]) &&
+            (absent_responses[] = _sb_absent_responses(sb, new_df))
+        key in absent_responses[]
+    end
+    forecast = Set{Symbol}()
+    forecast_columns = Set{Symbol}()
     # 1. Regenerate every independent transform-output key from its preproc
     #    record. Interactions wait until their raw/transformed operands exist.
     for (key, e) in sb.preproc
         e.kind in (:interaction, :submodel_hook) && continue
+        # A response a cell observes through a grouping (`y[rows[i]]`) is a
+        # gathered key whose raw column the new data may lack. Its record is
+        # kept, so a later replay onto rows with the response gathers it again.
+        if e.kind === :kernel_ragged && !e.const_.is_lp &&
+           !_sb_df_has_column(new_df, first(e.raw_ref)) && is_absent_response(key)
+            new_data[key] = StanBlocks.stan.maybecv(key)
+            new_preproc[key] = e
+            push!(handled, key)
+            push!(forecast, key)
+            push!(forecast_columns, first(e.raw_ref))
+            continue
+        end
+        # A joint response's emission reads its rows through its own density,
+        # which a values-free mark cannot stand in for.
+        if e.kind in (:joint_response, :joint_missing_response)
+            outcomes = Tuple(e.raw_ref)
+            lacking = [c for c in outcomes if !_sb_df_has_column(new_df, c)]
+            isempty(lacking) || error(
+                "sbimpl: reprocess: the new data lacks column(s) `", join(lacking, "`, `"),
+                "` of the joint response `", join(outcomes, "`, `"), "`. A forecast of a ",
+                "joint response is not supported yet (todo `1fnt1zu`); include its outcome columns.")
+        end
         _sb_reprocess_entry!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
     end
     # 1b. Re-invoke each consumer `_sb_submodel_rhs!` term on the new frame; it
@@ -6084,7 +6153,20 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
         k in handled && continue
         k in interaction_keys && continue
         has_column = _sb_df_has_column(new_df, k)
-        if v isa AbstractVector
+        # The raw column of a gathered response predicted given the fit: the
+        # program reads only the gathered key step 1 marked.
+        k in forecast_columns && !has_column && continue
+        if isnothing(v) || (!has_column && !(v isa Number) && is_absent_response(k))
+            # A forecast replay's response (`nothing`: its values-free mark), or
+            # a response the new data lacks: replay the frame's own values, or
+            # predict it given the fit. A scalar response keeps the scalar rule.
+            if has_column
+                new_data[k] = _sb_df_column(new_df, k)
+            else
+                new_data[k] = StanBlocks.stan.maybecv(k)
+                push!(forecast, k)
+            end
+        elseif v isa AbstractVector
             if has_column
                 # pass-through (plain / me obs / ar time)
                 new_data[k] = haskey(masked, k) ? _brm_axis_values(
@@ -6137,9 +6219,36 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     end
     new_model = StanBlocks.SlicModel(sb.model.model, new_data, sb.model.mod, sb.model.observations)
     _sb_apply_held_out(
-        SBBRMI(sb.parent, new_model, new_data, new_preproc, Set{Symbol}(), sb.bindings,
+        SBBRMI(sb.parent, new_model, new_data, new_preproc, forecast, sb.bindings,
                sb.source),
         held_out; cover_all=true, prefix="sbimpl: reprocess")
+end
+
+# The data columns a response data source is read from, or `nothing` for one
+# BRM derives from other columns (a fresh-covariate `keep`, an imputation
+# split): its own column, the raw column a cell gathers through a grouping, or
+# a joint response's outcome columns.
+function _sb_response_columns(sb::SBBRMI, key::Symbol)
+    e = get(sb.preproc, key, nothing)
+    isnothing(e) && return (key,)
+    e.kind === :kernel_ragged && !e.const_.is_lp && return (first(e.raw_ref),)
+    e.kind in (:joint_response, :joint_missing_response) && return Tuple(e.raw_ref)
+    nothing
+end
+
+# The response data sources `df` lacks a column of, each predicted given the
+# fit by a replay onto it (a forecast). A derived response key or a scalar one
+# is regenerated or kept by `reprocess` as before.
+function _sb_absent_responses(sb::SBBRMI, df)
+    absent = Set{Symbol}()
+    for key in _sb_held_out_inventory(sb).sources
+        columns = _sb_response_columns(sb, key)
+        isnothing(columns) && continue
+        haskey(sb.preproc, key) ||
+            !(_sb_unmarked_value(sb, key, sb.data[key]) isa Number) || continue
+        all(c -> _sb_df_has_column(df, c), columns) || push!(absent, key)
+    end
+    absent
 end
 
 function reprocess(plan::GenerativePlan, new_df; freeze_constants::Bool=true,
@@ -6821,11 +6930,13 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
             ". Every positional column must carry exactly one entry per subject.")
         nsub = only(col_lens)
         # Count only; no group column exists (labels are the implicit 1:nsub row
-        # order). Replayed on a new frame, the count is that frame's matching
-        # column length — see the `:kernel_subject_count` reprocess branch.
+        # order). Replayed on a new frame, the count is the length of the first
+        # of these columns that frame carries — see the `:kernel_subject_count`
+        # reprocess branch. A forecast replay's frame lacks the response.
         data[nsub_sym] = nsub
         _sb_record_preproc!(data, nsub_sym, PreprocEntry(
-            :kernel_subject_count, (; from_data_length = true), first(first(counted)), false))
+            :kernel_subject_count, (; from_data_length = true, columns = Tuple(first.(counted))),
+            first(first(counted)), false))
     else
         # ORDER: cells stay in ROW order, deliberately. `_sb_linear_predictor!`
         # returns `popefs(X) + rows_dot_product(Z, b[group_idx,:])`, i.e. a
