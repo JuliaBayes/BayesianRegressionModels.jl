@@ -117,7 +117,10 @@ const PINS = [
     # flatten in lane slots; snag position-batched-cc11130b). fd92ced46 adds
     # 207b0e056 (the slot survives a branch on `eltype(cells) <: Number`, the
     # form of BRM's emitted cell flatten; snag type-constant-la-902b10ce).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "fd92ced465865a6f04022ce7180059873c306f12"),  # main
+    # 356142a62 adds `jax_source` (666bb505f) with its host-side
+    # `prepare_data` (888bdfd42; RK todo 0rouf39), which test/rk_jax.jl
+    # translates RKBRMI backends through.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "356142a626497459b3c556324d23dcbbfc1c3b7a"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.5); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "d16c4efb72b963f45de9d6f632c38d46706c23e1"),  # main
