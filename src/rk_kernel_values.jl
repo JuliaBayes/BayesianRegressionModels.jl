@@ -672,7 +672,7 @@ function _rk_kernel_ar1_normal_call!(statement, kernel, defs, bindings, taken)
         "RK backend: internal: kernel `$(kernel.name)` emits an `AR1Normal` cell " *
         "without the program's definitions")
     spec = _brm_kernel_ar1_normal(statement, kernel.params, kernel.body)
-    submodel = _rk_ar1_normal_submodel!(defs, taken,
+    submodel = _rk_shared_definition!(defs, taken,
         _RK_AR1_NORMAL_SUBMODELS[spec.time === nothing ? :stepped : :timed])
     arguments = Any[_brm_ar1_normal_series(spec, :fill)...]
     spec.time === nothing || push!(arguments, spec.time)
@@ -682,17 +682,22 @@ function _rk_kernel_ar1_normal_call!(statement, kernel, defs, bindings, taken)
 end
 
 # The name of a definition in `defs` with the template's signature and body,
-# adding it under a name free in the program when absent.
-function _rk_ar1_normal_submodel!(defs, taken, template)
+# adding it under a name free in the program when absent. A `kernel`
+# template is defined as a ReactiveKernels `@kernel`, an `@rkppl` submodel
+# otherwise.
+function _rk_shared_definition!(defs, taken, template; kernel::Bool=false)
     call, body = template.args
     for definition in defs
+        Meta.isexpr(definition, :macrocall) == kernel || continue
+        kernel && (definition = last(definition.args))
         Meta.isexpr(definition, :(=), 2) || continue
         signature = first(definition.args)
         Meta.isexpr(signature, :call) && isequal(signature.args[2:end], call.args[2:end]) &&
             isequal(last(definition.args), body) && return first(signature.args)
     end
     name = _rk_ast_fresh_name(string(first(call.args)), taken)
-    push!(defs, Expr(:(=), Expr(:call, name, call.args[2:end]...), body))
+    definition = Expr(:(=), Expr(:call, name, call.args[2:end]...), body)
+    push!(defs, kernel ? :(ReactiveKernels.@kernel $definition) : definition)
     name
 end
 
@@ -1260,6 +1265,24 @@ function _rk_kernel_cell_argument(kernel, name, argument)
     (; route=:plate, ref=name)
 end
 
+# A plate's cells, concatenated in cell order as `brm_flatten_cells` does.
+# RKPPL definitions are calls, so the branch on the cells' element type lives
+# in a kernel whose graph ReactiveKernels splices in: it plans only the live
+# arm and keeps `reduce(vcat, cells)` in a lane slot of a position-batched
+# reader (RK `207b0e056`, reactivekernels-use §4c). Behind the opaque helper
+# the reader allocated the flat value at every position (snag
+# brm-flatten-cell-0dce6ee7). Cells of any other element type keep the helper.
+const _RK_FLATTEN_CELLS_KERNEL = :(flatten_cells(cells) = begin
+    values = eltype(cells) <: Number ? cells :
+        eltype(cells) <: AbstractVector ?
+            (isempty(cells) ? eltype(eltype(cells))[] : reduce(vcat, cells)) :
+        brm_flatten_cells(cells)
+    return values
+end)
+_rk_flatten_cells!(defs, taken, cells) =
+    Expr(:call, _rk_shared_definition!(defs, taken, _RK_FLATTEN_CELLS_KERNEL; kernel=true),
+        cells)
+
 # The kernel's value is its subject cells; formula terms read them
 # concatenated, a per-subject observation reads them cell by cell. The cell's
 # plate also writes every in-cell observation argument the observations read
@@ -1271,7 +1294,7 @@ function _rk_emit_value_assignment!(defs, statements, bindings, taken,
     # A cell without a collected value writes only what its observations read.
     outputs, after = kernel.collected === nothing ? (Any[], Any[]) : (
         Any[(kernel.cells, kernel.collected)],
-        Any[Expr(:(=), kernel.name, Expr(:call, :brm_flatten_cells, kernel.cells))])
+        Any[Expr(:(=), kernel.name, _rk_flatten_cells!(defs, taken, kernel.cells))])
     for observation in kernel.observations
         named = Any[zip(observation.argument_names, observation.arguments)...]
         append!(named, ((entry.name, entry.expression) for entry in observation.bounds))
@@ -1292,7 +1315,7 @@ function _rk_emit_value_assignment!(defs, statements, bindings, taken,
             cells = _rk_ast_fresh_name(string(name, "_cells"), taken)
             push!(outputs, (cells, Expr(:call, :.*,
                 Expr(:call, :ones, Expr(:call, :length, observation.param)), argument)))
-            push!(after, Expr(:(=), name, Expr(:call, :brm_flatten_cells, cells)))
+            push!(after, Expr(:(=), name, _rk_flatten_cells!(defs, taken, cells)))
         end
     end
     _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
