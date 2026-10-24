@@ -10,17 +10,22 @@ function _gp_positive(value::Real, name)
     Float64(value)
 end
 
-function _gp_period(period::Real)
+# The period and jitter guards are also spliced, as source, into the
+# covariance graphs (`_GP_COVARIANCE_MODELS`), where they read the graphs'
+# `period` / `jitter` data, so RK sees and translates them (jax_source's
+# `prepare_data`) instead of an opaque call.
+const _GP_PERIOD_BODY = quote
     isfinite(period) && period > 0 || throw(ArgumentError(
         "GP period must be finite and positive, got $period"))
     Float64(period)
 end
-
-function _gp_jitter(jitter::Real)
+const _GP_JITTER_BODY = quote
     isfinite(jitter) && jitter >= 0 || throw(ArgumentError(
         "GP jitter must be finite and nonnegative, got $jitter"))
     Float64(jitter)
 end
+@eval _gp_period(period::Real) = $_GP_PERIOD_BODY
+@eval _gp_jitter(jitter::Real) = $_GP_JITTER_BODY
 
 
 """

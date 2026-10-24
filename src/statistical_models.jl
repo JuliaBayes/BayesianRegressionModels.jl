@@ -192,18 +192,18 @@ brm_multinomial_scores(cell, count_columns, trials, probabilities) = begin
     return pointwise
 end),
 
+    # The anchors' own source (`preparation_numeric.jl`), not a call of their
+    # Julia helpers, so RK sees and translates it.
     brm_covariate_mean = :(
 brm_covariate_mean(values) = begin
-    mean = BayesianRegressionModels._brm_fit_mean_numeric(
-        values, :predictor, :center, ArgumentError)
+    mean = $(_brm_fit_kernel_body(_BRM_FIT_MEAN_BODY; transform=:center))
     return mean
 end),
 
     brm_covariate_sd = :(
 brm_covariate_sd(values) = begin
-    fit = BayesianRegressionModels._brm_fit_zscale_numeric(
-        values, :predictor, ArgumentError)
-    return fit.scale
+    scale = $(_brm_fit_kernel_body(_BRM_FIT_ZSCALE_BODY, :fitted_scale))
+    return scale
 end),
 
     brm_covariate_var = :(
