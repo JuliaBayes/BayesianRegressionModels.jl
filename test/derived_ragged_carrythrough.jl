@@ -44,8 +44,13 @@ using StanBlocks
     @test replayed.held_out == sb.held_out
     @test replayed.bindings == sb.bindings
 
+    # A replay without the response predicts it given the fit (decision
+    # `0soyu1b`), but this cell's prediction reads the response itself
+    # (`sum(ys)`). Refused: without its values there is nothing to predict
+    # from, so tracing the forecast program fails (stanblocks-use §34).
     without_tgi = (; subject=train.subject, weight=train.weight)
-    @test_throws "data key `tgi_bin`" reprocess(sb, without_tgi)
+    @test_throws StanBlocks.StanBlocksError BayesianRegressionModels.stan_data(
+        reprocess(sb, without_tgi))
 
     future = replay_df(; subs=["n1", "n2", "n3", "n4"])
     future = merge(future, (; tgi_bin=[[0.0], [1.0, 0.0], [1.0], [0.0, 1.0, 1.0]]))
