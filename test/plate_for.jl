@@ -301,8 +301,8 @@ const PLATE_EFFECT_PAIRS = (
             old_backend, old_problem = consumer_problem(with_output(data))
             new_backend, new_problem = consumer_problem(effect_only(data))
             # Nothing is collected: only the output form flattens its cells.
-            @test occursin("brm_flatten_cells", emitted(old_backend))
-            @test !occursin("brm_flatten_cells", emitted(new_backend))
+            @test occursin("loc = flatten_cells(loc_cells)", emitted(old_backend))
+            @test !occursin("flatten_cells(", emitted(new_backend))
             names = coordinate_names(old_backend.model.layout)
             @test coordinate_names(new_backend.model.layout) == names
             n = length(names)
