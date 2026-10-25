@@ -2,7 +2,7 @@
 const _GP_COVARIANCE_MODELS = (
     gp_pair_locations = :(
 gp_pair_locations(x) = begin
-    indices = BayesianRegressionModels.StatisticalPreparation._gp_indices(x)
+    indices = $_GP_INDICES_BODY
     locations = Float64.(x)
     left = locations
     right = reshape(locations, 1, :)
